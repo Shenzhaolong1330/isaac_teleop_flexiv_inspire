@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and downloaded upstream sources
+.venv/
+envs/
+upstream/
+vendor/
+
+# ROS/colcon and native builds
+build/
+install/
+log/
+CMakeFiles/
+CMakeCache.txt
+
+# Runtime state and datasets
+sessions/
+recordings/
+datasets/
+artifacts/
+*.mcap
+*.rrd
+*.db3
+
+# Generated build scratch only. Canonical protobuf Python stubs are source.
+build/generated/
+install/generated/
+
+# Credentials must never be committed
+certs/private/
+*.key
+*.pem
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

@@ -4,23 +4,38 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flexiv-inspire-isaac"
-version = "0.1.0"
-description = "Isolated NVIDIA Isaac Teleop bridge for the existing Flexiv dual-arm and Inspire hand stack"
+version = "0.2.0"
+description = "Independent Isaac Teleop, acquisition, visualization, and policy adapters for Flexiv and Inspire"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-  "numpy>=1.24,<2.0",
-  "PyYAML>=6.0",
+  "isaac-teleop-core==0.2.0",
+  "grpcio>=1.71,<2",
+  "msgpack>=1,<2",
+  "numpy>=2.0,<2.3",
+  "protobuf>=5.29,<6",
+  "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]
-ros = ["msgpack>=1.0"]
-test = ["pytest>=7.4,<8"]
+data = [
+  "mcap>=1.2,<2",
+  "mcap-ros2-support>=0.5,<1",
+  "rerun-sdk>=0.24,<0.34",
+]
+test = ["pytest>=8.4,<9"]
 
 [project.scripts]
-isaac-flexiv-verify = "flexiv_inspire_isaac.verify:main"
-isaac-flexiv-ros2 = "flexiv_inspire_isaac.ros2_runtime:main"
-isaac-flexiv-gateway = "flexiv_inspire_isaac.gateway_safe_runtime:main"
+flexiv-inspire-camera-node = "flexiv_inspire_isaac.cameras.ros_node:main"
+flexiv-inspire-camera-smoke = "flexiv_inspire_isaac.cameras.smoke:main"
+flexiv-inspire-camera-verify = "flexiv_inspire_isaac.cameras.verify:main"
+flexiv-inspire-dftp-node = "flexiv_inspire_isaac.dftp.ros_node:main"
+flexiv-inspire-dftp-read-only = "flexiv_inspire_isaac.dftp.read_only_check:main"
+flexiv-inspire-policy-server = "flexiv_inspire_isaac.policy_api.ros_adapter:main"
+flexiv-inspire-lerobot-export = "flexiv_inspire_isaac.data_pipeline.lerobot_cli:main"
+flexiv-inspire-data-smoke = "flexiv_inspire_isaac.data_pipeline.synthetic_smoke:main"
+isaac-flexiv-episode = "flexiv_inspire_isaac.data_pipeline.episode_manager:main"
+flexiv-inspire-rerun = "flexiv_inspire_isaac.rerun_viz.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -28,7 +43,12 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"flexiv_inspire_isaac.cameras" = ["*.yaml", "launch/*.py"]
+"flexiv_inspire_isaac.dftp" = ["*.yaml", "launch/*.py"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
-
+# ROS 2's launch-testing plugins turn a module-level importorskip into a skip of
+# the entire tests/core directory. This repository has no pytest launch tests.
+addopts = "-q -p no:launch_testing -p no:launch_ros"

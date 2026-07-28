@@ -1,0 +1,23 @@
+uint32 SCHEMA_VERSION=1
+uint8 CARTESIAN_ROT6D=1
+uint8 CARTESIAN_QUATERNION=2
+uint8 JOINT_POSITION=3
+uint32 LEFT_ARM_VALID=1
+uint32 RIGHT_ARM_VALID=2
+uint32 LEFT_HAND_VALID=4
+uint32 RIGHT_HAND_VALID=8
+
+std_msgs/Header header
+uint32 schema_version
+string session_id
+string source
+uint64 sequence
+builtin_interfaces/Duration ttl
+uint8 representation
+string frame_id
+string rotation_order
+uint32 valid_mask
+bool deadman
+BimanualCommandPoint[] trajectory
+string[] metadata_keys
+string[] metadata_values

@@ -1,0 +1,12 @@
+std_msgs/Header header
+string session_id
+uint64 trace_sequence
+BimanualCommand requested
+BimanualCommand safe
+BimanualCommand sent
+bool requested_valid
+bool safe_valid
+bool sent_valid
+string rejection_reason
+builtin_interfaces/Duration validation_latency
+builtin_interfaces/Duration send_latency

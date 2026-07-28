@@ -1,0 +1,18 @@
+/**:
+  ros__parameters:
+    # Fail-closed until seven audited Rizon4s limits are supplied locally.
+    joint_lower_limits_rad: []
+    joint_upper_limits_rad: []
+    max_joint_velocity_rad_s: 0.75
+    max_tcp_linear_speed_m_s: 0.35
+    max_tcp_angular_speed_rad_s: 1.0
+    max_external_force_n: 60.0
+    max_external_torque_nm: 8.0
+    max_joint_temperature_c: 75.0
+    hand_reference_tolerance: 1.0
+    max_translation_step_m: 0.01
+    max_rotation_step_rad: 0.10
+    max_linear_velocity_m_s: 0.05
+    max_angular_velocity_rad_s: 0.15
+    max_linear_acceleration_m_s2: 0.25
+    max_angular_acceleration_rad_s2: 0.50

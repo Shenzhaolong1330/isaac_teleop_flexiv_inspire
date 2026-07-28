@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package flexiv.inspire.rdk.v1;
+
+message Envelope {
+  uint32 schema_version = 1;
+  uint64 sequence = 2;
+  uint64 monotonic_ns = 3;
+  oneof payload {
+    Hello hello = 10;
+    ObserveRequest observe_request = 11;
+    DualArmState dual_arm_state = 12;
+    CartesianCommand cartesian_command = 13;
+    CommandAck command_ack = 14;
+    ZeroFTRequest zero_ft_request = 15;
+    ZeroFTResult zero_ft_result = 16;
+    HoldRequest hold_request = 17;
+    Error error = 18;
+    HandObservation hand_observation = 19;
+    AuthorizeZeroFTRequest authorize_zero_ft_request = 20;
+    AuthorizeZeroFTResult authorize_zero_ft_result = 21;
+    AuthorizeControlRequest authorize_control_request = 22;
+    AuthorizeControlResult authorize_control_result = 23;
+  }
+}
+
+message Hello {
+  string client_name = 1;
+  string session_id = 2;
+}
+
+message ObserveRequest {}
+
+message ArmState {
+  string side = 1;
+  bool connected = 2;
+  uint64 robot_time_ns = 3;
+  uint64 host_receive_monotonic_ns = 4;
+  repeated double q = 5;
+  repeated double dq = 6;
+  repeated double tau = 7;
+  repeated double tau_des = 8;
+  repeated double tau_ext = 9;
+  repeated double tau_interact = 10;
+  repeated double tcp_pose_rdk_xyz_wxyz = 11; // xyz,qw,qx,qy,qz
+  repeated double tcp_velocity = 12;
+  repeated double raw_ft = 13; // fx,fy,fz,mx,my,mz
+  repeated double external_wrench = 14;
+  repeated double temperature = 15;
+  string fault = 16;
+  uint64 connection_generation = 17;
+  int64 robot_time_sec = 18;
+  uint32 robot_time_nsec = 19;
+  string clock_domain = 20;
+  uint64 host_receive_unix_ns = 21;
+}
+
+message DualArmState {
+  ArmState left = 1;
+  ArmState right = 2;
+  string daemon_instance_id = 3;
+}
+
+message CartesianTarget {
+  repeated double tcp_pose_rdk = 1; // exactly xyz,qw,qx,qy,qz
+  double max_linear_velocity = 2;
+  double max_angular_velocity = 3;
+  double max_linear_acceleration = 4;
+  double max_angular_acceleration = 5;
+}
+
+message CartesianCommand {
+  string session_id = 1;
+  string source = 2;
+  uint64 source_sequence = 3;
+  uint64 expires_monotonic_ns = 4;
+  CartesianTarget left = 5;
+  CartesianTarget right = 6;
+  uint32 valid_mask = 7;
+  bool safety_validated = 8;
+  bool local_permission = 9;
+  bool physical_pedal = 10;
+  string local_arm_token = 11;
+}
+
+message CommandAck {
+  uint64 source_sequence = 1;
+  bool accepted = 2;
+  string reason = 3;
+  uint64 applied_monotonic_ns = 4;
+}
+
+message WrenchStatistics {
+  uint64 samples = 1;
+  repeated double mean = 2;
+  repeated double standard_deviation = 3;
+  repeated double peak_absolute = 4;
+  double max_dq_norm = 5;
+  double max_tcp_velocity_norm = 6;
+  bool stable = 7;
+  string reason = 8;
+  repeated double external_mean = 9;
+  repeated double external_standard_deviation = 10;
+  repeated double external_peak_absolute = 11;
+  double duration_s = 12;
+  string rejection_reason = 13;
+}
+
+message ZeroFTRequest {
+  string session_id = 1;
+  string operator_confirmation = 2;
+  bool local_console = 3;
+  string tool_payload_config_hash = 4;
+  repeated double left_hand_position = 5;
+  repeated double right_hand_position = 6;
+  string local_authorization_token = 7;
+}
+
+message HandObservation {
+  repeated double left = 1;
+  repeated double right = 2;
+  uint64 host_receive_monotonic_ns = 3;
+  uint64 source_sequence = 4;
+  uint64 source_time_ns = 5;
+  string source_clock_domain = 6;
+}
+
+message AuthorizeZeroFTRequest {
+  string session_id = 1;
+  string operator_confirmation = 2;
+  string tool_payload_config_hash = 3;
+}
+
+message AuthorizeZeroFTResult {
+  bool authorized = 1;
+  string one_time_token = 2;
+  uint64 expires_monotonic_ns = 3;
+  string reason = 4;
+}
+
+message AuthorizeControlRequest {
+  string session_id = 1;
+  string source = 2;
+  string operator_confirmation = 3;
+  bool clear_hold_latched = 4;
+}
+
+message AuthorizeControlResult {
+  bool authorized = 1;
+  string one_time_token = 2;
+  uint64 expires_monotonic_ns = 3;
+  string reason = 4;
+}
+
+message ZeroFTArmResult {
+  string side = 1;
+  WrenchStatistics before = 2;
+  WrenchStatistics after = 3;
+}
+
+message ZeroFTResult {
+  bool success = 1;
+  string failure_reason = 2;
+  ZeroFTArmResult left = 3;
+  ZeroFTArmResult right = 4;
+  uint64 connection_generation = 5;
+  string event_json = 6;
+  string daemon_instance_id = 7;
+  string failure_phase = 8;
+  string cleanup_json = 9;
+  map<string, WrenchStatistics> available_statistics = 10;
+  string hand_monitor_json = 11;
+}
+
+message HoldRequest {
+  string reason = 1;
+  bool latch = 2;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+}

@@ -1,0 +1,38 @@
+schema_version: 1
+left:
+  serial: Rizon4s-063326
+  expected_model: Rizon4s
+  require_ft_sensor: true
+  expected_software_prefix: v3.11
+  required_license: RDK-Professional
+right:
+  serial: Rizon4s-063806
+  expected_model: Rizon4s
+  require_ft_sensor: true
+  expected_software_prefix: v3.11
+  required_license: RDK-Professional
+tool_payload_config: tool_payload.yaml
+control:
+  target_rate_hz: 200
+  default_mode: observe_only
+  hardware_writes_enabled: false
+ipc:
+  socket_name: rdk.sock
+  max_packet_bytes: 65536
+ft_zero:
+  confirmation_token: FLEXIV-FT-UNLOADED
+  sample_window_s: 2.0
+  sample_rate_hz: 200.0
+  operational_timeout_s: 30.0
+  primitive_timeout_s: 30.0
+  max_joint_velocity_norm: 0.01
+  max_tcp_velocity_norm: 0.01
+  max_wrench_std_force_n: 0.5
+  max_wrench_std_torque_nm: 0.05
+  max_residual_force_n: 1.0
+  max_residual_torque_nm: 0.1
+  max_pre_external_mean_force_n: 3.0
+  max_pre_external_mean_torque_nm: 0.3
+  max_pre_external_peak_force_n: 5.0
+  max_pre_external_peak_torque_nm: 0.5
+  max_hand_delta: 1.0

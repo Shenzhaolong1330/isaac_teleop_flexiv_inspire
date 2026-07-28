@@ -1,0 +1,23 @@
+uint8 DISABLED=0
+uint8 MAINTENANCE=1
+uint8 FT_ZEROED=2
+uint8 READY=3
+uint8 TELEOP_ARMED=4
+uint8 POLICY_ARMED=5
+uint8 REPLAY_ARMED=6
+uint8 ACTIVE=7
+uint8 HOLD_LATCHED=8
+uint8 FAULT=9
+
+std_msgs/Header header
+uint8 state
+string state_name
+string session_id
+string active_source
+string hold_reason
+bool local_permission
+bool physical_pedal
+bool ft_zeroed_for_session
+bool arms_online
+bool hands_online
+uint64 rdk_connection_generation

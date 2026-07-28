@@ -1,0 +1,25 @@
+/**:
+  ros__parameters:
+    command_enabled: false
+    ee_topic: /xr_teleop/ee_poses
+    controller_topic: /xr_teleop/controller_data
+    tf_topic: /tf
+    external_deadman_topic: /teleop/deadman
+    deadman_source: quest_squeeze_both
+    squeeze_threshold: 0.65
+    world_frame: world
+    left_wrist_frame: left_wrist
+    right_wrist_frame: right_wrist
+    left_pose_index: 0
+    right_pose_index: 1
+    require_wrist_tf: true
+    max_tf_age_s: 0.12
+    control_rate_hz: 60.0
+    ttl_s: 0.10
+    translation_gain: 1.0
+    axis_rotation: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    hand_pose_topic: /xr_teleop/hand
+    # Empty means arm-only teleop. Copy/manually calibrate the packaged
+    # manus_calibration_template.yaml before setting this path.
+    manus_calibration: ""
+    max_manus_age_s: 0.10

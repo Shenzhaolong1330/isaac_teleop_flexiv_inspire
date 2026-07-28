@@ -1,0 +1,33 @@
+schema_version: 1
+librealsense_version: 2.57.7
+firmware_policy: preserve
+recording:
+  encoding: jpeg
+  jpeg_quality: 90
+  calibration_encoding: raw_rgb
+  depth_enabled: false
+cameras:
+  head:
+    serial: "346522072347"
+    width: 424
+    height: 240
+    fps: 30
+    pixel_format: rgb8
+    jpeg_quality: 90
+    depth_enabled: false
+  left_wrist:
+    serial: "342522074353"
+    width: 424
+    height: 240
+    fps: 30
+    pixel_format: rgb8
+    jpeg_quality: 90
+    depth_enabled: false
+  right_wrist:
+    serial: "347622074577"
+    width: 424
+    height: 240
+    fps: 30
+    pixel_format: rgb8
+    jpeg_quality: 90
+    depth_enabled: false

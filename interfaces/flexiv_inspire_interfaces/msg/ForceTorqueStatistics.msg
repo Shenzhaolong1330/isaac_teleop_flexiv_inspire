@@ -1,0 +1,13 @@
+string side
+uint64 sample_count
+builtin_interfaces/Duration window
+float64[6] mean
+float64[6] standard_deviation
+float64[6] peak_absolute
+float64[6] external_mean
+float64[6] external_standard_deviation
+float64[6] external_peak_absolute
+float64 max_dq_norm
+float64 max_tcp_velocity_norm
+bool stable
+string rejection_reason

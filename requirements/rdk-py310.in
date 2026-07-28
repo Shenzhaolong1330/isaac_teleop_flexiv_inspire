@@ -1,0 +1,6 @@
+flexivrdk==1.9.0
+numpy==1.26.4
+protobuf==5.29.5
+psutil>=6,<8
+pyyaml>=6,<7
+pytest==8.4.2

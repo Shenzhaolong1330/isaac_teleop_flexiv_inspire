@@ -1,0 +1,218 @@
+syntax = "proto3";
+
+package flexiv.inspire.policy.v1;
+
+service PolicyService {
+  rpc GetCapabilities(CapabilitiesRequest) returns (Capabilities);
+  rpc AcquireControlLease(AcquireControlLeaseRequest) returns (ControlLease);
+  rpc ReleaseControlLease(ReleaseControlLeaseRequest) returns (LeaseResult);
+  rpc StreamObservations(ObservationStreamRequest) returns (stream Observation);
+  rpc StreamActions(stream ActionChunk) returns (stream ActionResult);
+  rpc Stop(StopRequest) returns (StopResult);
+}
+
+enum RotationRepresentation {
+  ROTATION_REPRESENTATION_UNSPECIFIED = 0;
+  ROT6D_FIRST_TWO_COLUMNS = 1;
+  QUATERNION_XYZW = 2;
+}
+
+message CapabilitiesRequest {}
+
+message Capabilities {
+  uint32 schema_version = 1;
+  RotationRepresentation rotation_representation = 2;
+  repeated string rotation_element_order = 3;
+  uint32 default_action_dimension = 4;
+  repeated string action_layout = 5;
+  string frame_id = 6;
+  string linear_unit = 7;
+  string angular_unit = 8;
+  uint32 max_chunk_points = 9;
+  double max_chunk_duration_s = 10;
+  repeated string supported_control_representations = 11;
+  string action_clock_semantics = 12;
+  repeated string observation_layout = 13;
+}
+
+message AcquireControlLeaseRequest {
+  string client_id = 1;
+  string session_id = 2;
+  uint64 requested_duration_ms = 3;
+}
+
+message ControlLease {
+  bool granted = 1;
+  string lease_id = 2;
+  uint64 expires_monotonic_ns = 3;
+  string reason = 4;
+}
+
+message ReleaseControlLeaseRequest {
+  string lease_id = 1;
+}
+
+message LeaseResult {
+  bool success = 1;
+  string reason = 2;
+}
+
+message ObservationStreamRequest {
+  string lease_id = 1;
+  uint32 max_rate_hz = 2;
+  bool include_images = 3;
+  bool include_tactile = 4;
+}
+
+message TimedVector {
+  repeated double values = 1;
+  uint64 source_time_ns = 2;
+  uint64 host_receive_time_ns = 3;
+  uint64 sequence = 4;
+  bool valid = 5;
+  uint64 age_ns = 6;
+  string invalid_reason = 7;
+}
+
+message CompressedImage {
+  string camera = 1;
+  string encoding = 2;
+  bytes data = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  uint64 source_time_ns = 6;
+  uint64 host_receive_time_ns = 7;
+  uint64 sequence = 8;
+  bool valid = 9;
+  uint64 age_ns = 10;
+}
+
+message Observation {
+  uint32 schema_version = 1;
+  string session_id = 2;
+  uint64 sequence = 3;
+  uint64 snapshot_monotonic_ns = 4;
+  reserved 5 to 15;
+  string control_state = 16;
+  ArmObservation left_arm = 17;
+  ArmObservation right_arm = 18;
+  HandObservation left_hand = 19;
+  HandObservation right_hand = 20;
+  TactileObservation left_tactile = 21;
+  TactileObservation right_tactile = 22;
+  repeated CameraImage camera_images = 23;
+}
+
+message TimedMetadata {
+  uint64 source_time_ns = 1;
+  uint64 host_receive_time_ns = 2;
+  uint64 mapped_host_time_ns = 3;
+  uint64 acquisition_start_ns = 4;
+  uint64 acquisition_end_ns = 5;
+  uint64 sequence = 6;
+  bool valid = 7;
+  uint64 age_ns = 8;
+  string invalid_reason = 9;
+  string source_clock_domain = 10;
+  string host_clock_domain = 11;
+  bool timing_valid = 12;
+}
+
+message ArmObservation {
+  repeated double q = 1;
+  repeated double dq = 2;
+  repeated double tau = 3;
+  repeated double tau_des = 4;
+  repeated double tau_ext = 5;
+  repeated double tau_interact = 6;
+  repeated double tcp_pose_xyzw = 7;
+  repeated double tcp_twist = 8;
+  repeated double raw_ft = 9;
+  repeated double tcp_wrench = 10;
+  repeated double temperature = 11;
+  TimedMetadata timing = 12;
+  map<string, TimedMetadata> field_timing = 13;
+}
+
+message HandObservation {
+  repeated double angle = 1;
+  repeated double position = 2;
+  repeated double actual_force = 3;
+  repeated double current = 4;
+  repeated double temperature = 5;
+  repeated uint32 error = 6;
+  repeated uint32 status = 7;
+  TimedMetadata timing = 8;
+  map<string, TimedMetadata> field_timing = 9;
+}
+
+message TactileSurfaceObservation {
+  string name = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+  repeated uint32 values = 4;
+  TimedMetadata timing = 5;
+}
+
+message TactileObservation {
+  repeated TactileSurfaceObservation surfaces = 1;
+  TimedMetadata frame_timing = 2;
+  uint64 frame_start_ns = 3;
+  uint64 frame_end_ns = 4;
+  uint32 taxel_count = 5;
+}
+
+enum CameraName {
+  CAMERA_NAME_UNSPECIFIED = 0;
+  CAMERA_HEAD = 1;
+  CAMERA_LEFT_WRIST = 2;
+  CAMERA_RIGHT_WRIST = 3;
+}
+
+message CameraImage {
+  CameraName camera = 1;
+  string encoding = 2;
+  bytes data = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  TimedMetadata timing = 6;
+}
+
+message ActionPoint {
+  double execute_after_s = 1;
+  repeated double values = 2; // exactly 30 in schema v1
+}
+
+message ActionChunk {
+  uint32 schema_version = 1;
+  string lease_id = 2;
+  string session_id = 3;
+  uint64 sequence = 4;
+  // Diagnostic only. Client monotonic time is not comparable to robot-host time.
+  uint64 client_issued_monotonic_ns = 5;
+  // TTL starts when the robot host receives this chunk.
+  uint64 ttl_from_server_receive_ns = 6;
+  string frame_id = 7;
+  bool deadman = 8;
+  repeated ActionPoint points = 9; // 1..32, at most one second
+}
+
+message ActionResult {
+  uint64 sequence = 1;
+  bool accepted = 2;
+  string reason = 3;
+  string control_state = 4;
+}
+
+message StopRequest {
+  string lease_id = 1;
+  string reason = 2;
+}
+
+message StopResult {
+  // True only after an acknowledged supervisor transition; v1 publishes asynchronously.
+  bool latched = 1;
+  string control_state = 2;
+  bool stop_published = 3;
+  string status = 4;
+}

@@ -1,0 +1,16 @@
+flexiv_inspire_dftp_driver:
+  ros__parameters:
+    left_host: 192.168.5.11
+    right_host: 192.168.5.12
+    port: 6000
+    socket_timeout_s: 0.25
+    state_hz: 50.0
+    tactile_hz: 30.0
+    safe_force_limits: [600, 600, 600, 600, 500, 500]
+    control_state_timeout_ms: 200.0
+    hand_state_timeout_ms: 200.0
+
+    # Safe defaults: no constructor with Modbus write functions is created.
+    hardware_write_enabled: false
+    local_session_id: ""
+    local_write_confirmation: ""

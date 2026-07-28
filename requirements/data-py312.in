@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+lerobot[dataset,viz]==0.6.0
+torch==2.8.0+cu128
+torchvision==0.23.0+cu128
+torchcodec==0.6.0
+numpy==2.2.6
+mcap>=1.2,<2
+mcap-ros2-support>=0.5,<1
+zstandard>=0.23,<1
+pytest==8.4.2
+grpcio==1.71.0
+protobuf==5.29.5
+msgpack>=1,<2

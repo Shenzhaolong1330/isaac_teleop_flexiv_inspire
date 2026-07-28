@@ -1,0 +1,23 @@
+# Goal: accepted only from a local ROS node while the control state is MAINTENANCE.
+string session_id
+string operator_confirmation
+bool local_console
+string tool_payload_config_hash
+# One-time token minted only for a same-UID peer whose stdin is a local TTY.
+string local_authorization_token
+float64[6] left_hand_position
+float64[6] right_hand_position
+---
+bool success
+string final_state
+string event_id
+string failure_reason
+ForceTorqueStatistics left_before
+ForceTorqueStatistics left_after
+ForceTorqueStatistics right_before
+ForceTorqueStatistics right_after
+---
+string phase
+string active_arm
+float32 progress
+string status

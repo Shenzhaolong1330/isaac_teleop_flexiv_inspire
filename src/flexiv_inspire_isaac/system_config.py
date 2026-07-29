@@ -95,6 +95,19 @@ def load_system_config(path: str | Path) -> SystemConfig:
         _positive(home.get(key), f"flexiv.home.{key}")
     if not str(home.get("quest_button", "")).strip():
         raise SystemConfigError("flexiv.home.quest_button is required")
+    export = _mapping(root.get("lerobot_export"), "lerobot_export")
+    if int(export.get("schema_version", 0)) != 1:
+        raise SystemConfigError("lerobot_export.schema_version must be 1")
+    timeline = _mapping(export.get("timeline"), "lerobot_export.timeline")
+    if not str(timeline.get("source", "")).strip():
+        raise SystemConfigError("lerobot_export.timeline.source is required")
+    _positive(timeline.get("fps"), "lerobot_export.timeline.fps")
+    action = _mapping(export.get("action"), "lerobot_export.action")
+    if action.get("view") not in {"sent_command", "absolute_joint_position", "absolute_cartesian_pose"}:
+        raise SystemConfigError("lerobot_export.action.view is unsupported")
+    channels = _mapping(export.get("channels", {}), "lerobot_export.channels")
+    if not all(isinstance(key, str) and isinstance(value, str) for key, value in channels.items()):
+        raise SystemConfigError("lerobot_export.channels must contain string mappings")
     cameras = _mapping(root.get("cameras"), "cameras")
     if bool(cameras.get("depth_enabled", False)):
         raise SystemConfigError("depth must remain disabled in this RGB-only first release")
@@ -133,6 +146,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
         "control_bridge.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "foot_pedal": pedal["device"], "observation_rate_hz": sampling["arm_observation_hz"], "enable_key_code": pedal["enable_key_code"], "cartesian_control_mode": flexiv["cartesian_control"]["mode"], "cartesian_position_stiffness": flexiv["cartesian_control"]["position_stiffness"], "cartesian_impedance_stiffness": flexiv["cartesian_control"]["impedance_stiffness"], "cartesian_damping": flexiv["cartesian_control"]["damping"], "home_left_joints_rad": flexiv["home"]["left_joints_rad"], "home_right_joints_rad": flexiv["home"]["right_joints_rad"], "home_max_velocity_rad_s": flexiv["home"]["max_velocity_rad_s"], "home_max_acceleration_rad_s2": flexiv["home"]["max_acceleration_rad_s2"], "home_tolerance_rad": flexiv["home"]["tolerance_rad"], "home_timeout_s": flexiv["home"]["timeout_s"]}}},
         "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": teleop["manus_calibration"], "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/control/home_request"}}},
         "pedal.yaml": {"/**": {"ros__parameters": {"foot_pedal": pedal["device"], "rerecord_key_code": pedal["rerecord_key_code"], "enable_key_code": pedal["enable_key_code"], "record_toggle_key_code": pedal["record_toggle_key_code"]}}},
+        "lerobot_export.yaml": root["lerobot_export"],
     }
     for name, payload in payloads.items():
         path = out / name

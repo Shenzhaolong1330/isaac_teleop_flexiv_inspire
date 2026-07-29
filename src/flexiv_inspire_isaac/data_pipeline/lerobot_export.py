@@ -10,6 +10,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from .export_spec import ActionView
 from .alignment import (
     AlignedValue,
     Pose,
@@ -57,12 +58,16 @@ class EpisodeAligner:
         streams: Mapping[str, Sequence[TimedSample]],
         *,
         tolerance: ExportTolerance = ExportTolerance(),
+        timeline_source: str = "camera/head/jpeg",
+        action: ActionView = ActionView(),
     ) -> None:
         self.streams = streams
         self.tolerance = tolerance
+        self.timeline_source = timeline_source.lstrip("/")
+        self.action = action
 
     def rows(self) -> list[dict[str, Any]]:
-        reference = self.streams.get("camera/head/jpeg", ())
+        reference = self.streams.get(self.timeline_source, ())
         output: list[dict[str, Any]] = []
         for head in reference:
             timestamp = head.alignment_time_ns
@@ -126,17 +131,41 @@ class EpisodeAligner:
                     timestamp,
                     self.tolerance.tactile_ns,
                 )
-            # Training labels are the exact commands acknowledged by the RDK,
-            # never merely requested or bridge-safe commands.
-            self._put_nearest(
-                row,
-                "action",
-                "control/sent_command",
-                timestamp,
-                self.tolerance.action_ns,
-            )
+            self._put(row, "action", self._action_at(timestamp))
             output.append(row)
         return output
+
+    def _action_at(self, timestamp_ns: int) -> AlignedValue:
+        if self.action.name == "sent_command":
+            # Exact RDK-acknowledged command: default behavioural-cloning label.
+            return causal_nearest(self.streams.get("control/sent_command", ()), timestamp_ns, self.tolerance.action_ns)
+        if self.action.name == "absolute_joint_position":
+            values: list[float] = []
+            ages: list[int] = []
+            for side in ("left", "right"):
+                value = causal_nearest(self.streams.get(f"robot/{side}_arm/state", ()), timestamp_ns, self.tolerance.state_ns)
+                if not value.valid or not isinstance(value.value, Mapping):
+                    return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:{value.reason}")
+                try:
+                    joint = [float(item) for item in value.value["q"]]
+                except (KeyError, TypeError, ValueError):
+                    return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:q-missing")
+                if len(joint) != 7:
+                    return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:q-not-7d")
+                values.extend(joint)
+                ages.append(int(value.age_ns or 0))
+            return AlignedValue(tuple(values), timestamp_ns, max(ages, default=0), True)
+        # Absolute Cartesian pose uses the same valid SO(3)-interpolated poses
+        # as observations: xyz plus Rotation-6D for left then right.
+        values: list[float] = []
+        ages: list[int] = []
+        for side in ("left", "right"):
+            pose = _pose_at(self.streams.get(f"robot/{side}_arm/tcp_pose", ()), timestamp_ns, self.tolerance.pose_bracket_ns)
+            if not pose.valid or pose.value is None:
+                return AlignedValue(None, None, pose.age_ns, False, f"absolute-cartesian-{side}:{pose.reason}")
+            values.extend((*pose.value.pose.xyz, *pose.value.rotation6d))
+            ages.append(int(pose.age_ns or 0))
+        return AlignedValue(tuple(values), timestamp_ns, max(ages, default=0), True)
 
     def _put_nearest(
         self,

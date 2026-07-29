@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from isaac_teleop_core.rotation6d import rotation6d_to_matrix
+from .export_spec import ActionView
 
 
 FPS = 30
@@ -52,7 +53,7 @@ HAND_FIELD_TIMING_NAMES = tuple(
 )
 
 
-def lerobot_features() -> dict[str, dict]:
+def lerobot_features(action: ActionView = ActionView()) -> dict[str, dict]:
     features: dict[str, dict] = {
         "observation.arm_pose": {
             "dtype": "float32",
@@ -157,6 +158,10 @@ def lerobot_features() -> dict[str, dict]:
                 ],
             ],
         },
+    }
+    # Action is deliberately configurable while the raw MCAP remains unchanged.
+    features["action"] = {
+        "dtype": "float32", "shape": (action.shape,), "names": action.names,
     }
     features["observation.arm_quaternion_xyzw"] = {
         "dtype": "float32",
@@ -277,16 +282,18 @@ def _tactile_vector(value: Any) -> np.ndarray:
     return _vector(value, 1062, dtype=np.uint16)
 
 
-def _validated_action(value: Any) -> np.ndarray:
-    action = _vector(value, 30)
+def _validated_action(value: Any, action_view: ActionView = ActionView()) -> np.ndarray:
+    action = _vector(value, action_view.shape)
     if not np.all(np.isfinite(action)):
         raise ValueError("action contains NaN or Inf")
-    for start in (3, 12):
-        # Keep ROS, gRPC and dataset validation on the exact same
-        # scale-invariant Rotation-6D decoder.
-        rotation6d_to_matrix(action[start : start + 6])
-    if np.any(action[18:] < 0.0) or np.any(action[18:] > 1000.0):
-        raise ValueError("hand targets must be in 0..1000")
+    if action_view.name == "sent_command":
+        for start in (3, 12):
+            rotation6d_to_matrix(action[start : start + 6])
+        if np.any(action[18:] < 0.0) or np.any(action[18:] > 1000.0):
+            raise ValueError("hand targets must be in 0..1000")
+    elif action_view.name == "absolute_cartesian_pose":
+        for start in (3, 12):
+            rotation6d_to_matrix(action[start : start + 6])
     return action
 def _pose_vector(value: Any) -> np.ndarray:
     if value is None:
@@ -383,7 +390,7 @@ def _hand_field_timing(row: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def aligned_row_to_frame(row: Mapping[str, Any], task: str) -> dict[str, Any]:
+def aligned_row_to_frame(row: Mapping[str, Any], task: str, action: ActionView = ActionView()) -> dict[str, Any]:
     if not task:
         raise ValueError("LeRobot frames require a non-empty task")
     images = {}
@@ -506,8 +513,7 @@ def aligned_row_to_frame(row: Mapping[str, Any], task: str) -> dict[str, Any]:
         "observation.tactile": tactile,
         "observation.valid": valid,
         "observation.age_s": age_s,
-        # EpisodeAligner selects control/sent_command for this field.
-        "action": _validated_action(row.get("action")),
+        "action": _validated_action(row.get("action"), action),
         **images,
     }
     return frame
@@ -528,6 +534,8 @@ def export_rows(
     repo_id: str,
     task: str,
     dataset_class=None,
+    action: ActionView = ActionView(),
+    fps: float = FPS,
 ) -> ExportResult:
     if dataset_class is None:
         try:
@@ -548,8 +556,8 @@ def export_rows(
         raise FileExistsError(f"refusing to overwrite non-empty dataset root: {root}")
     dataset = dataset_class.create(
         repo_id=repo_id,
-        fps=FPS,
-        features=lerobot_features(),
+        fps=int(fps),
+        features=lerobot_features(action),
         root=root,
         robot_type="flexiv_rizon4s_dual_inspire_dftp2",
         use_videos=True,
@@ -568,7 +576,7 @@ def export_rows(
                 dropped += 1
                 continue
             try:
-                frame = aligned_row_to_frame(row, task)
+                frame = aligned_row_to_frame(row, task, action)
             except ValueError as exc:
                 if "required image" in str(exc):
                     dropped += 1
@@ -592,8 +600,8 @@ def export_rows(
             f"LeRobot reload validation failed: wrote {written}, loaded {reload_length}"
         )
     sample = reloaded[0]
-    if tuple(np.asarray(sample["action"]).shape) != (30,):
-        raise RuntimeError("reloaded action is not 30-dimensional")
+    if tuple(np.asarray(sample["action"]).shape) != (action.shape,):
+        raise RuntimeError(f"reloaded action shape is not {action.shape}")
     expected_shapes = {
         "observation.arm_pose": (18,),
         "observation.arm_quaternion_xyzw": (8,),

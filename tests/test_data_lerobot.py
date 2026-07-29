@@ -1,4 +1,5 @@
 from flexiv_inspire_isaac.data_pipeline.alignment import Pose, TimedSample
+from flexiv_inspire_isaac.data_pipeline.export_spec import ActionView
 from flexiv_inspire_isaac.data_pipeline.lerobot_export import EpisodeAligner
 
 
@@ -28,3 +29,22 @@ def test_lerobot_uses_head_clock_sent_command_and_explicit_invalids():
     assert row["observation.images.right_wrist"] is None
     assert not row["observation.images.right_wrist.valid"]
     assert len(row["observation.left_arm.pose"].rotation6d) == 6
+
+
+def test_absolute_joint_action_view_uses_timestamp_aligned_robot_q():
+    streams = {
+        "camera/head/jpeg": [s(b"head", 100)],
+        "robot/left_arm/state": [s({"q": tuple(range(7))}, 99)],
+        "robot/right_arm/state": [s({"q": tuple(range(10, 17))}, 98)],
+    }
+    row = EpisodeAligner(streams, action=ActionView("absolute_joint_position")).rows()[0]
+    assert row["action"] == tuple(range(7)) + tuple(range(10, 17))
+    assert row["action.valid"]
+
+
+def test_absolute_cartesian_action_view_uses_interpolated_pose():
+    poses = [s(Pose((0, 0, 0), (0, 0, 0, 1)), 95), s(Pose((2, 0, 0), (0, 0, 0, 1)), 105)]
+    row = EpisodeAligner({"camera/head/jpeg": [s(b"head", 100)], "robot/left_arm/tcp_pose": poses, "robot/right_arm/tcp_pose": poses}, action=ActionView("absolute_cartesian_pose")).rows()[0]
+    assert len(row["action"]) == 18
+    assert row["action"][:3] == (1.0, 0.0, 0.0)
+    assert row["action.valid"]

@@ -13,7 +13,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     config = load_system_config(_example())
     rendered = render_runtime_configs(config, tmp_path)
     assert config.document["sampling"]["action_label"] == "sent_command"
-    assert set(rendered) == {"camera.yaml", "dftp.yaml", "control_bridge.yaml", "teleop.yaml", "pedal.yaml", "snapshot"}
+    assert set(rendered) == {"camera.yaml", "dftp.yaml", "control_bridge.yaml", "teleop.yaml", "pedal.yaml", "lerobot_export.yaml", "snapshot"}
     camera = yaml.safe_load(rendered["camera.yaml"].read_text())
     assert camera["cameras"]["head"]["width"] == 424
     assert camera["recording"]["depth_enabled"] is False

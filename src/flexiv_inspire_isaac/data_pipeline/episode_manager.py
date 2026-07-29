@@ -514,6 +514,8 @@ class EpisodeSession:
 def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
+    from geometry_msgs.msg import PoseArray
+    from std_msgs.msg import Bool, ByteMultiArray
     from flexiv_inspire_interfaces.msg import (
         ArmState, BimanualCommand, CameraFrame, CommandTrace, ControlState,
         EpisodeEvent, HandState, TactileFrame,
@@ -522,6 +524,20 @@ def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
     class EpisodeRecorderNode(Node):
         def __init__(self) -> None:
             super().__init__("flexiv_inspire_episode_manager")
+            # DeviceIO captures producer-side robot observations in native mode.
+            # XR/raw command inputs have no DeviceIO producer, so always record
+            # them here into the same MCAP truth file.
+            self.create_subscription(PoseArray, "/xr_teleop/ee_poses",
+                lambda msg: self._record("/xr_teleop/ee_poses", msg), qos_profile_sensor_data)
+            self.create_subscription(ByteMultiArray, "/xr_teleop/controller_data",
+                lambda msg: self._record("/xr_teleop/controller_data", msg), qos_profile_sensor_data)
+            self.create_subscription(PoseArray, "/xr_teleop/hand",
+                lambda msg: self._record("/xr_teleop/hand", msg), qos_profile_sensor_data)
+            self.create_subscription(Bool, "/teleop/deadman",
+                lambda msg: self._record("/teleop/deadman", msg), qos_profile_sensor_data)
+            for source in ("teleop", "policy", "replay"):
+                self.create_subscription(BimanualCommand, f"/command_sources/{source}/command",
+                    lambda msg, selected=source: self._record(f"/command_sources/{selected}/command", msg, True), 1)
             if not record_ros_mirror:
                 return
             for side in ("left", "right"):

@@ -67,6 +67,18 @@ teleop:
   manus_calibration: ""
   control_enabled: false # always shadow at startup; local authorization is separate
 
+lerobot_export:
+  schema_version: 1
+  timeline:
+    source: camera/head/jpeg
+    fps: 30.0
+  action:
+    # sent_command (30-D) | absolute_joint_position (14-D) | absolute_cartesian_pose (18-D)
+    view: sent_command
+  # canonical exporter stream -> recorded MCAP stream.  Use this to remap a
+  # later hardware/topic layout without changing raw data or Python code.
+  channels: {}
+
 recording:
   camera_recording_mode: jpeg
   deviceio_mode: native

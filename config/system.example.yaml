@@ -1,0 +1,79 @@
+# This is the only site-editable runtime configuration.  Copy to config/site.yaml.
+schema_version: 1
+session:
+  id: "flexiv-inspire-site"
+  runtime_root: "/run/user/1000/isaac_teleop"
+  sessions_root: "sessions"
+
+# All rates are requested rates; the manifest stores achieved rate and drops.
+sampling:
+  arm_observation_hz: 200.0
+  teleop_command_hz: 60.0
+  hand_state_hz: 50.0
+  tactile_hz: 30.0
+  camera_hz: 30.0
+  policy_observation_hz: 30.0
+  training_timeline_hz: 30.0
+  action_label: sent_command # the command accepted by hardware, never requested/safe alone
+
+pedal:
+  device: /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
+  # PCsensor keyboard mapping: left=105, down=108, right=106.
+  rerecord_key_code: 105       # left arrow: atomically invalidate and start a new episode
+  enable_key_code: 108         # down arrow: hold-to-enable; release latches hold
+  record_toggle_key_code: 106  # right arrow: toggle recording, never robot motion
+
+flexiv:
+  rdk_config: rdk_daemon/config/robots.yaml
+  tool_payload_config: rdk_daemon/config/tool_payload.yaml
+  cartesian_control:
+    # Both choices use RDK NRT_CARTESIAN_MOTION_FORCE.  "position" uses high
+    # configured stiffness; "impedance" sends the explicit stiffness/damping below.
+    mode: position              # position | impedance
+    position_stiffness: [3000, 3000, 3000, 200, 200, 200]
+    impedance_stiffness: [1200, 1200, 1200, 80, 80, 80]
+    damping: [60, 60, 60, 8, 8, 8]
+  home:
+    # Migrated values only from legacy dual_arm_teleop Flexiv config.  Automatic
+    # connect/home behavior is deliberately not imported.
+    left_joints_rad: [0.0, 0.80, -1.80, -1.35, 0.8416, 0.30, -1.57]
+    right_joints_rad: [0.0, -0.80, 1.80, 1.35, 2.30, 0.30, 0.0]
+    max_velocity_rad_s: 1.0
+    max_acceleration_rad_s2: 2.0
+    tolerance_rad: 0.01
+    timeout_s: 20.0
+    quest_button: right_primary_click # Quest right A key, rising edge
+
+inspire:
+  config: src/flexiv_inspire_isaac/dftp/dual_hands.yaml
+  left_host: 192.168.5.11
+  right_host: 192.168.5.12
+  port: 6000
+  hardware_write_enabled: false
+
+cameras:
+  config: src/flexiv_inspire_isaac/cameras/realsense_rgb.yaml
+  recording_encoding: jpeg
+  jpeg_quality: 90
+  depth_enabled: false
+  streams:
+    head:        {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8}
+    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8}
+
+teleop:
+  control_config: core/ros2/flexiv_inspire_control/config/control_bridge.yaml
+  teleop_config: core/ros2/flexiv_inspire_control/config/teleop.yaml
+  manus_calibration: ""
+  control_enabled: false # always shadow at startup; local authorization is separate
+
+recording:
+  camera_recording_mode: jpeg
+  deviceio_mode: native
+  # Immutable during an active episode.  Re-render/restart producers to change resolution/rate.
+  snapshot_config: true
+
+commands:
+  # Kept explicit so the launcher never guesses an environment or starts hardware writes.
+  rdk_daemon: ["flexiv-rdk-daemon", "--mock"]
+  teleop_launch: ["ros2", "launch", "flexiv_inspire_control", "teleop_control.launch.py"]

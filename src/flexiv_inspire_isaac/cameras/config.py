@@ -8,6 +8,12 @@ import yaml
 
 
 PINNED_LIBREALSENSE = "2.57.7"
+MIN_WIDTH = 160
+MAX_WIDTH = 1920
+MIN_HEIGHT = 120
+MAX_HEIGHT = 1080
+MIN_FPS = 1
+MAX_FPS = 90
 
 
 @dataclass(frozen=True)
@@ -22,12 +28,16 @@ class CameraConfig:
     depth_enabled: bool
 
     def __post_init__(self) -> None:
-        if (self.width, self.height, self.fps) != (424, 240, 30):
-            raise ValueError("first release is fixed to 424x240 RGB at 30 Hz")
+        if not MIN_WIDTH <= self.width <= MAX_WIDTH:
+            raise ValueError(f"camera width must be in {MIN_WIDTH}..{MAX_WIDTH}")
+        if not MIN_HEIGHT <= self.height <= MAX_HEIGHT:
+            raise ValueError(f"camera height must be in {MIN_HEIGHT}..{MAX_HEIGHT}")
+        if not MIN_FPS <= self.fps <= MAX_FPS:
+            raise ValueError(f"camera fps must be in {MIN_FPS}..{MAX_FPS}")
         if self.pixel_format.lower() not in {"rgb8", "bgr8"}:
             raise ValueError("camera stream must be RGB")
         if self.depth_enabled:
-            raise ValueError("depth is intentionally disabled in the first release")
+            raise ValueError("depth is intentionally disabled in this system")
         if not 1 <= self.jpeg_quality <= 100:
             raise ValueError("JPEG quality must be in 1..100")
 

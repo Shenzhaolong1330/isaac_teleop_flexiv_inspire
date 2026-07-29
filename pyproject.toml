@@ -36,6 +36,9 @@ flexiv-inspire-lerobot-export = "flexiv_inspire_isaac.data_pipeline.lerobot_cli:
 flexiv-inspire-data-smoke = "flexiv_inspire_isaac.data_pipeline.synthetic_smoke:main"
 isaac-flexiv-episode = "flexiv_inspire_isaac.data_pipeline.episode_manager:main"
 flexiv-inspire-rerun = "flexiv_inspire_isaac.rerun_viz.cli:main"
+flexiv-inspire-pedal-router = "flexiv_inspire_isaac.pedal_router:main"
+flexiv-inspire-episode-controller = "flexiv_inspire_isaac.episode_control:main"
+flexiv-inspire = "flexiv_inspire_isaac.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

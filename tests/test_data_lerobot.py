@@ -6,12 +6,12 @@ def s(value, t, seq=0, valid=True):
     return TimedSample(value, t, t + 1, seq, valid)
 
 
-def test_lerobot_uses_head_clock_safe_command_and_explicit_invalids():
+def test_lerobot_uses_head_clock_sent_command_and_explicit_invalids():
     streams = {
         "camera/head/jpeg": [s(b"head", 100)],
         "camera/left_wrist/jpeg": [s(b"left", 90)],
         "camera/right_wrist/jpeg": [],
-        "control/safe_command": [s(tuple(range(30)), 99)],
+        "control/sent_command": [s(tuple(range(30)), 99)],
         "control/requested_command": [s(("must", "not", "use"), 99)],
         "robot/left_arm/tcp_pose": [
             s(Pose((0, 0, 0), (0, 0, 0, 1)), 95, 1),

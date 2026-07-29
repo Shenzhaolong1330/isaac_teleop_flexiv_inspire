@@ -52,7 +52,7 @@ def main(argv=None) -> int:
                     (manifest_path.parent / manifest["ros_mcap"]).resolve()
                 ) if manifest.get("ros_mcap") else "",
                 "ros_mcap_decoded": False,
-                "action_source": "control/safe_command",
+                "action_source": "control/sent_command",
                 "rotation_representation": "ROT6D_FIRST_TWO_COLUMNS",
             },
             indent=2,

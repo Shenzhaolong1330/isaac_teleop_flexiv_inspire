@@ -479,7 +479,10 @@ class EpisodeSession:
         errors: list[str] = []
         try:
             self.submit(_critical_envelope("/episode/events", self._next_critical_sequence(), {
-                "event_type": "episode_stopped", "episode_uuid": self.episode_uuid,
+                "event_type": (
+                    "episode_rerecord_requested"
+                    if reason == "rerecord-requested" else "episode_stopped"
+                ), "episode_uuid": self.episode_uuid,
                 "session_id": self.manifest.session_id, "reason": reason,
             }), critical=True)
         except Exception as exc:
@@ -496,7 +499,9 @@ class EpisodeSession:
         except Exception as exc:
             errors.append(f"deviceio: {exc}")
         self._update_stream_stats()
-        terminal_fault = reason.startswith("fault:")
+        # Preserve the raw capture for audit but never label a re-record as a
+        # completed demonstration eligible for training or replay.
+        terminal_fault = reason.startswith("fault:") or reason == "rerecord-requested"
         self.manifest.completed = not errors and not terminal_fault
         self.manifest.completion_reason = (
             reason if not errors else "; ".join([reason, *errors])
@@ -632,7 +637,17 @@ def main(argv=None) -> int:
     rclpy_module = None
     reason = "operator-stop"
     failure: Exception | None = None
+    rerecord_requested = threading.Event()
+    previous_usr1_handler = None
+
+    def _request_rerecord(_signum, _frame) -> None:
+        rerecord_requested.set()
+
     try:
+        # SIGUSR1 is reserved for an explicit left-pedal re-record request.
+        # Install it before recorder startup to preserve an atomic manifest.
+        if hasattr(signal, "SIGUSR1"):
+            previous_usr1_handler = signal.signal(signal.SIGUSR1, _request_rerecord)
         episode = EpisodeSession(
             options.root.resolve(),
             options.session_id,
@@ -653,6 +668,9 @@ def main(argv=None) -> int:
         start = time.monotonic()
         while rclpy_module.ok():
             rclpy_module.spin_once(node, timeout_sec=0.1)
+            if rerecord_requested.is_set():
+                reason = "rerecord-requested"
+                break
             if ingress is not None:
                 ingress.check_health()
             if (
@@ -699,6 +717,8 @@ def main(argv=None) -> int:
                 cleanup_errors.append(f"episode-finalize: {exc}")
             if cleanup_errors and failure is None:
                 failure = RuntimeError("; ".join(cleanup_errors))
+        if previous_usr1_handler is not None:
+            signal.signal(signal.SIGUSR1, previous_usr1_handler)
     if episode is not None:
         print(str(episode.directory))
     if failure is not None:

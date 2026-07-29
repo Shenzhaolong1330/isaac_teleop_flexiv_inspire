@@ -95,6 +95,7 @@ class ControlBridge(Node):
             "foot_pedal",
             "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd",
         )
+        self.declare_parameter("observation_rate_hz", 200.0)
         self.declare_parameter("max_translation_step_m", 0.01)
         self.declare_parameter("max_rotation_step_rad", 0.10)
         self.declare_parameter("max_linear_velocity_m_s", 0.05)
@@ -248,7 +249,10 @@ class ControlBridge(Node):
         return super().destroy_node()
 
     def _observation_loop(self) -> None:
-        period = 1.0 / 200.0
+        observation_rate_hz = float(self.get_parameter("observation_rate_hz").value)
+        if not 1.0 <= observation_rate_hz <= 1000.0:
+            raise RuntimeError("observation_rate_hz must be in [1,1000]")
+        period = 1.0 / observation_rate_hz
         deadline = time.monotonic()
         while not self._stop.is_set():
             try:

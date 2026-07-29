@@ -16,28 +16,28 @@ FULL_VALID_MASK = 1 | 2 | 4 | 8
 
 def _flatten_safe_command_checked(payload):
     if not isinstance(payload, dict):
-        return None, "safe-command-payload-not-mapping"
+        return None, "sent-command-payload-not-mapping"
     try:
         schema_version = int(payload.get("schema_version", 0))
         valid_mask = int(payload.get("valid_mask", 0))
     except (TypeError, ValueError):
-        return None, "safe-command-schema-or-mask-not-integer"
+        return None, "sent-command-schema-or-mask-not-integer"
     if (
         schema_version != 1
         or payload.get("frame_id") != "world"
         or valid_mask != FULL_VALID_MASK
         or not bool(payload.get("deadman", False))
     ):
-        return None, "safe-command-schema-frame-mask-or-deadman-invalid"
+        return None, "sent-command-schema-frame-mask-or-deadman-invalid"
     representation = payload.get("representation")
     if representation in (3, "JOINT_POSITION"):
-        return None, "joint-position-safe-command-not-exportable-as-30d-cartesian"
+        return None, "joint-position-sent-command-not-exportable-as-30d-cartesian"
     trajectory = payload.get("trajectory")
     if not isinstance(trajectory, list) or not trajectory:
-        return None, "safe-command-trajectory-missing"
+        return None, "sent-command-trajectory-missing"
     point = trajectory[-1]
     if not isinstance(point, dict):
-        return None, "safe-command-point-not-mapping"
+        return None, "sent-command-point-not-mapping"
     try:
         left_xyz = list(point["left_delta_xyz"])
         right_xyz = list(point["right_delta_xyz"])
@@ -45,12 +45,12 @@ def _flatten_safe_command_checked(payload):
         right_hand = list(point["right_hand_targets"])
         if representation in (1, "CARTESIAN_ROT6D"):
             if payload.get("rotation_order") != ROT6D_ORDER:
-                return None, "safe-command-rot6d-order-invalid"
+                return None, "sent-command-rot6d-order-invalid"
             left_rotation = list(point["left_delta_rotation6d"])
             right_rotation = list(point["right_delta_rotation6d"])
         elif representation in (2, "CARTESIAN_QUATERNION"):
             if payload.get("rotation_order") != QUATERNION_ORDER:
-                return None, "safe-command-quaternion-order-invalid"
+                return None, "sent-command-quaternion-order-invalid"
             left_rotation = quaternion_xyzw_to_rotation6d(
                 point["left_delta_quaternion_xyzw"]
             ).tolist()
@@ -58,17 +58,17 @@ def _flatten_safe_command_checked(payload):
                 point["right_delta_quaternion_xyzw"]
             ).tolist()
         else:
-            return None, "safe-command-representation-unsupported"
+            return None, "sent-command-representation-unsupported"
     except (KeyError, TypeError, ValueError) as exc:
-        return None, f"safe-command-conversion-failed:{exc}"
+        return None, f"sent-command-conversion-failed:{exc}"
     parts = (left_xyz, left_rotation, right_xyz, right_rotation, left_hand, right_hand)
     if tuple(len(part) for part in parts) != (3, 6, 3, 6, 6, 6):
-        return None, "safe-command-field-dimensions-invalid"
+        return None, "sent-command-field-dimensions-invalid"
     try:
         values = [float(value) for part in parts for value in part]
     except (TypeError, ValueError) as exc:
-        return None, f"safe-command-nonnumeric:{exc}"
-    return (values, "") if len(values) == 30 else (None, "safe-command-not-30d")
+        return None, f"sent-command-nonnumeric:{exc}"
+    return (values, "") if len(values) == 30 else (None, "sent-command-not-30d")
 
 
 def _flatten_safe_command(payload):
@@ -77,7 +77,7 @@ def _flatten_safe_command(payload):
 
 
 def _payload_value(topic: str, payload):
-    if topic.rstrip("/").endswith("control/safe_command"):
+    if topic.rstrip("/").endswith("control/sent_command"):
         return _flatten_safe_command(payload)
     if topic.endswith("/tcp_pose") and isinstance(payload, dict):
         return Pose(tuple(payload["xyz"]), tuple(payload["quaternion_xyzw"]))
@@ -117,7 +117,7 @@ def load_json_mcap_streams(paths: Iterable[str | Path]) -> dict[str, list[TimedS
                     continue
                 raw_topic = str(document.get("topic", channel.topic)).lstrip("/")
                 topic = _stream_name(raw_topic)
-                if raw_topic.rstrip("/").endswith("control/safe_command"):
+                if raw_topic.rstrip("/").endswith("control/sent_command"):
                     payload, safe_reason = _flatten_safe_command_checked(
                         document["payload"]
                     )

@@ -1,5 +1,7 @@
 /**:
   ros__parameters:
+    # Requested arm observation rate; actual achieved rate is recorded in MCAP.
+    observation_rate_hz: 200.0
     # Fail-closed until seven audited Rizon4s limits are supplied locally.
     joint_lower_limits_rad: []
     joint_upper_limits_rad: []

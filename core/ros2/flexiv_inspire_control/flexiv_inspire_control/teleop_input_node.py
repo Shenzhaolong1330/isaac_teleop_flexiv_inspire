@@ -15,7 +15,7 @@ import rclpy
 from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from std_msgs.msg import Bool, ByteMultiArray, UInt64
+from std_msgs.msg import Bool, ByteMultiArray, Empty, UInt64
 from tf2_msgs.msg import TFMessage
 import yaml
 
@@ -202,6 +202,8 @@ class TeleopInput(Node):
             "hand_pose_topic": "/xr_teleop/hand",
             "manus_calibration": "",
             "max_manus_age_s": 0.10,
+            "home_button_key": "right_primary_click",
+            "home_topic": "/control/home_request",
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -229,6 +231,7 @@ class TeleopInput(Node):
         self._hands: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._hands_received = {"left": 0, "right": 0}
         self._command_sequence = 0
+        self._home_button_down = False
 
         self.create_subscription(
             PoseArray,
@@ -265,6 +268,9 @@ class TeleopInput(Node):
         )
         self._heartbeat_pub = self.create_publisher(
             UInt64, "/command_sources/teleop/heartbeat", qos_profile_sensor_data
+        )
+        self._home_pub = self.create_publisher(
+            Empty, str(self.get_parameter("home_topic").value), 1
         )
         rate = float(self.get_parameter("control_rate_hz").value)
         self.create_timer(1.0 / rate, self._tick)
@@ -316,10 +322,21 @@ class TeleopInput(Node):
         try:
             value = msgpack.unpackb(_bytes(message), raw=False)
             self._squeeze = _validated_squeezes(value)
+            raw_button = value.get(str(self.get_parameter("home_button_key").value), False)
+            if not isinstance(raw_button, (bool, int)):
+                raise ValueError("Quest home button must be boolean")
+            home_button_down = bool(raw_button)
+            # A is a rising-edge Home request. It intentionally does not
+            # depend on the down-arrow pedal; the Home supervisor must enforce
+            # F/T zero, local permission, collision/limit and daemon checks.
+            if home_button_down and not self._home_button_down:
+                self._home_pub.publish(Empty())
+            self._home_button_down = home_button_down
             self._controller_received = time.monotonic_ns()
         except Exception as exc:
             self._squeeze = {"left": 0.0, "right": 0.0}
             self._controller_received = 0
+            self._home_button_down = False
             self.get_logger().error(f"invalid controller_data: {exc}")
 
     def _on_tf(self, message: TFMessage) -> None:

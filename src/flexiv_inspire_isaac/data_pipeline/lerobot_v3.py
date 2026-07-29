@@ -506,7 +506,7 @@ def aligned_row_to_frame(row: Mapping[str, Any], task: str) -> dict[str, Any]:
         "observation.tactile": tactile,
         "observation.valid": valid,
         "observation.age_s": age_s,
-        # EpisodeAligner selects control/safe_command for this field.
+        # EpisodeAligner selects control/sent_command for this field.
         "action": _validated_action(row.get("action")),
         **images,
     }

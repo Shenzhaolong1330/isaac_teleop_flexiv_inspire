@@ -126,11 +126,12 @@ class EpisodeAligner:
                     timestamp,
                     self.tolerance.tactile_ns,
                 )
-            # Training defaults to what passed safety, never requested_command.
+            # Training labels are the exact commands acknowledged by the RDK,
+            # never merely requested or bridge-safe commands.
             self._put_nearest(
                 row,
                 "action",
-                "control/safe_command",
+                "control/sent_command",
                 timestamp,
                 self.tolerance.action_ns,
             )

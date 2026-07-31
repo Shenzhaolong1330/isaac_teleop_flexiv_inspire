@@ -277,6 +277,58 @@ def test_rosbag_early_exit_is_reaped_and_not_started(tmp_path, monkeypatch):
     assert process.waited and bag.process is None and not bag.started
 
 
+def test_rosbag_pause_and_resume_use_its_unique_recorder_services(
+    tmp_path, monkeypatch
+):
+    class Process:
+        def poll(self):
+            return None
+
+    class Future:
+        def done(self):
+            return True
+
+        def exception(self):
+            return None
+
+        def result(self):
+            return object()
+
+    class Client:
+        def wait_for_service(self, timeout_sec):
+            return timeout_sec == 5.0
+
+        def call_async(self, _request):
+            return Future()
+
+    class Node:
+        def __init__(self):
+            self.services = []
+
+        def create_client(self, _service_type, name):
+            self.services.append(name)
+            return Client()
+
+        def destroy_client(self, _client):
+            return None
+
+    monkeypatch.setattr(
+        "rclpy.spin_until_future_complete", lambda *_args, **_kwargs: None
+    )
+    bag = RosbagProcess(tmp_path / "bag")
+    bag.process = Process()
+    bag._started = True
+    node = Node()
+
+    bag.pause(node)
+    bag.resume(node)
+
+    assert node.services == [
+        f"/{bag.node_name}/pause",
+        f"/{bag.node_name}/resume",
+    ]
+
+
 def test_fault_reason_never_marks_episode_complete(tmp_path):
     episode = _episode_session(tmp_path)
     bag = SimpleNamespace(started=True, stop_and_validate=lambda: None)

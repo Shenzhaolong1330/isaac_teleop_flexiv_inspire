@@ -17,13 +17,24 @@ def main(argv=None) -> int:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--repo-id", required=True)
-    parser.add_argument("--task", required=True)
+    parser.add_argument(
+        "--task",
+        default="",
+        help="VLA prompt override; defaults to manifest.task_description",
+    )
     parser.add_argument("--mcap", action="append", default=[])
     parser.add_argument("--export-config", default=None, help="schema-v1 YAML selecting timeline, action view and channel remaps")
     args = parser.parse_args(argv)
 
     manifest_path = Path(args.manifest).resolve()
     manifest = json.loads(manifest_path.read_text())
+    if not bool(manifest.get("completed", False)):
+        raise ValueError(
+            f"refusing incomplete episode: {manifest.get('completion_reason', '')}"
+        )
+    task = str(args.task or manifest.get("task_description", "")).strip()
+    if not task:
+        raise ValueError("episode manifest has no task_description/VLA prompt")
     paths = [Path(value) for value in args.mcap]
     if not paths:
         value = manifest.get("deviceio_mcap")
@@ -42,7 +53,7 @@ def main(argv=None) -> int:
         rows,
         output_root=args.output_root,
         repo_id=args.repo_id,
-        task=args.task,
+        task=task,
         action=spec.action,
         fps=spec.fps,
     )
@@ -63,6 +74,7 @@ def main(argv=None) -> int:
                 "action_shape": spec.action.shape,
                 "channel_remaps": dict(spec.channels),
                 "rotation_representation": "ROT6D_FIRST_TWO_COLUMNS",
+                "task_description": task,
             },
             indent=2,
         )

@@ -61,6 +61,13 @@ class EpisodeManifest:
     ft_zero_event: Mapping[str, Any]
     tool_configuration_file_hash: str = ""
     deviceio_capture_layer: str = "post-dds-typed-mirror"
+    dataset_name: str = ""
+    episode_index: int = 0
+    attempt: int = 1
+    task_description: str = ""
+    pause_count: int = 0
+    paused_duration_ns: int = 0
+    suppressed_samples: int = 0
     native_source_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     streams: dict[str, StreamStats] = field(default_factory=dict)
     completed: bool = False

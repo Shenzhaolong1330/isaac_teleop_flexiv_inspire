@@ -255,14 +255,22 @@ class RosbagProcess:
     def __init__(self, output: Path, extra_topics: tuple[str, ...] = ()) -> None:
         self.output = output
         self.extra_topics = extra_topics
+        self.node_name = f"flexiv_inspire_rosbag_{uuid.uuid4().hex[:12]}"
         self.process: subprocess.Popen | None = None
         self._started = False
+        self._paused = False
         self._early_exit_code: int | None = None
 
     def start(self) -> None:
-        command = ["ros2", "bag", "record", "--disable-keyboard-controls", "-s", "mcap", "-o", str(self.output), "--topics", *ROS_BAG_TOPICS, *self.extra_topics]
+        command = [
+            "ros2", "bag", "record", "--disable-keyboard-controls",
+            "--node-name", self.node_name,
+            "-s", "mcap", "-o", str(self.output),
+            "--topics", *ROS_BAG_TOPICS, *self.extra_topics,
+        ]
         self.process = subprocess.Popen(command, start_new_session=True)
         self._started = False
+        self._paused = False
         self._early_exit_code = None
         time.sleep(0.5)
         if self.process.poll() is not None:
@@ -271,6 +279,43 @@ class RosbagProcess:
             self.process = None
             raise RuntimeError(f"ros2 bag record exited early with {return_code}")
         self._started = True
+
+    def _set_paused(self, node: Any, *, paused: bool, timeout_s: float = 5.0) -> None:
+        if not self.started:
+            raise RuntimeError("cannot pause/resume a stopped rosbag recorder")
+        if self._paused == paused:
+            return
+        import rclpy
+        from rosbag2_interfaces.srv import Pause, Resume
+
+        service_type = Pause if paused else Resume
+        operation = "pause" if paused else "resume"
+        client = node.create_client(
+            service_type, f"/{self.node_name}/{operation}"
+        )
+        try:
+            if not client.wait_for_service(timeout_sec=timeout_s):
+                raise TimeoutError(
+                    f"rosbag {operation} service was not available"
+                )
+            future = client.call_async(service_type.Request())
+            rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_s)
+            if not future.done():
+                raise TimeoutError(f"rosbag {operation} service timed out")
+            exception = future.exception()
+            if exception is not None:
+                raise RuntimeError(f"rosbag {operation} failed: {exception}")
+            if future.result() is None:
+                raise RuntimeError(f"rosbag {operation} returned no response")
+            self._paused = paused
+        finally:
+            node.destroy_client(client)
+
+    def pause(self, node: Any, timeout_s: float = 5.0) -> None:
+        self._set_paused(node, paused=True, timeout_s=timeout_s)
+
+    def resume(self, node: Any, timeout_s: float = 5.0) -> None:
+        self._set_paused(node, paused=False, timeout_s=timeout_s)
 
 
     @property
@@ -299,6 +344,7 @@ class RosbagProcess:
                 self.process.wait(3.0)
             raise TimeoutError("rosbag did not finish cleanly after SIGINT")
         self._started = False
+        self._paused = False
         if return_code != 0:
             raise RuntimeError(f"rosbag exited with {return_code}")
         metadata = self.output / "metadata.yaml"
@@ -317,6 +363,13 @@ class EpisodeSession:
         ft_zero_record: Path,
         camera_recording_mode: str = "jpeg",
         deviceio_capture_layer: str = "native-pre-dds",
+        *,
+        dataset_name: str = "",
+        episode_index: int = 0,
+        attempt: int = 1,
+        task_description: str = "",
+        episode_directory_name: str = "",
+        recording_gate: threading.Event | None = None,
     ) -> None:
         if camera_recording_mode != "jpeg":
             raise ValueError(
@@ -332,7 +385,10 @@ class EpisodeSession:
         }
         versions = _runtime_versions()
         self.episode_uuid = str(uuid.uuid4())
-        self.directory = root / self.episode_uuid
+        dataset_root = root / dataset_name if dataset_name else root
+        self.directory = dataset_root / (
+            episode_directory_name or self.episode_uuid
+        )
         self.directory.mkdir(parents=True, exist_ok=False)
         self.manifest_path = self.directory / "manifest.json"
         self.device_path = self.directory / "deviceio.mcap"
@@ -351,21 +407,28 @@ class EpisodeSession:
             tool_configuration_file_hash=tool_file_hash,
             ft_zero_event=ft_event,
             deviceio_capture_layer=deviceio_capture_layer,
+            dataset_name=dataset_name,
+            episode_index=episode_index,
+            attempt=attempt,
+            task_description=task_description,
         )
         self.manifest.write_atomic(self.manifest_path)
         self._critical_sequence = 0
         self._last_sequence_by_topic: dict[str, int] = {}
         self._stats_lock = threading.Lock()
+        self._recording_gate = recording_gate or threading.Event()
+        self._recording_gate.set()
+        self._pause_started_ns = 0
         self.recorder = None
         try:
             self.recorder = AsyncMcapRecorder(McapJsonSink(self.device_path))
             self.recorder.start()
-            self.submit(_critical_envelope(
+            self._submit_unchecked(_critical_envelope(
                 "/maintenance/ft_zero_event",
                 self._next_critical_sequence(),
                 ft_event,
             ), critical=True)
-            self.submit(_critical_envelope("/episode/events", self._next_critical_sequence(), {
+            self._submit_unchecked(_critical_envelope("/episode/events", self._next_critical_sequence(), {
                 "event_type": "episode_started", "episode_uuid": self.episode_uuid,
                 "session_id": session_id, "camera_recording_mode_declared": camera_recording_mode,
                 "capture_layer": deviceio_capture_layer,
@@ -387,6 +450,15 @@ class EpisodeSession:
         return self._critical_sequence
 
     def submit(self, envelope: RecordEnvelope, *, critical: bool = False) -> None:
+        if not self._recording_gate.is_set():
+            with self._stats_lock:
+                self.manifest.suppressed_samples += 1
+            return
+        self._submit_unchecked(envelope, critical=critical)
+
+    def _submit_unchecked(
+        self, envelope: RecordEnvelope, *, critical: bool = True
+    ) -> None:
         self.recorder.submit(envelope, critical=critical)
         name = envelope.topic.lstrip("/")
         with self._stats_lock:
@@ -406,6 +478,49 @@ class EpisodeSession:
             if stats.first_source_time_ns is None:
                 stats.first_source_time_ns = envelope.source_time_ns
             stats.last_source_time_ns = envelope.source_time_ns
+
+    def pause(self, *, reason: str) -> None:
+        if self._pause_started_ns:
+            return
+        self._recording_gate.clear()
+        self._pause_started_ns = time.monotonic_ns()
+        self.manifest.pause_count += 1
+        self._submit_unchecked(_critical_envelope(
+            "/episode/events",
+            self._next_critical_sequence(),
+            {
+                "event_type": "episode_paused",
+                "episode_uuid": self.episode_uuid,
+                "session_id": self.manifest.session_id,
+                "reason": reason,
+            },
+        ))
+
+    def resume(self, *, reason: str) -> None:
+        if self._recording_gate.is_set():
+            return
+        now = time.monotonic_ns()
+        if self._pause_started_ns:
+            self.manifest.paused_duration_ns += now - self._pause_started_ns
+        self._pause_started_ns = 0
+        self._submit_unchecked(_critical_envelope(
+            "/episode/events",
+            self._next_critical_sequence(),
+            {
+                "event_type": "episode_resumed",
+                "episode_uuid": self.episode_uuid,
+                "session_id": self.manifest.session_id,
+                "reason": reason,
+            },
+        ))
+        self._recording_gate.set()
+
+    def _finish_pause_interval(self) -> None:
+        if not self._recording_gate.is_set() and self._pause_started_ns:
+            self.manifest.paused_duration_ns += (
+                time.monotonic_ns() - self._pause_started_ns
+            )
+            self._pause_started_ns = 0
 
     def submit_native(self, document: Any) -> None:
         """Accept one validated producer-native envelope from the local ingress."""
@@ -455,8 +570,9 @@ class EpisodeSession:
 
     def abort(self, *, reason: str) -> None:
         errors: list[str] = []
+        self._finish_pause_interval()
         try:
-            self.submit(_critical_envelope(
+            self._submit_unchecked(_critical_envelope(
                 "/episode/events",
                 self._next_critical_sequence(),
                 {
@@ -479,8 +595,9 @@ class EpisodeSession:
 
     def finish(self, rosbag: RosbagProcess, *, reason: str) -> None:
         errors: list[str] = []
+        self._finish_pause_interval()
         try:
-            self.submit(_critical_envelope("/episode/events", self._next_critical_sequence(), {
+            self._submit_unchecked(_critical_envelope("/episode/events", self._next_critical_sequence(), {
                 "event_type": (
                     "episode_rerecord_requested"
                     if reason == "rerecord-requested" else "episode_stopped"
@@ -640,6 +757,12 @@ def _parse_args(argv=None):
     parser.add_argument("--deviceio-socket", type=Path, default=default_deviceio_socket())
     parser.add_argument("--extra-topic", action="append", default=[])
     parser.add_argument("--duration-s", type=float, default=0.0)
+    parser.add_argument("--dataset-name", default="")
+    parser.add_argument("--episode-index", type=int, default=0)
+    parser.add_argument("--attempt", type=int, default=1)
+    parser.add_argument("--task-description", default="")
+    parser.add_argument("--episode-directory-name", default="")
+    parser.add_argument("--control-state-file", type=Path, default=None)
     return parser.parse_args(argv)
 
 
@@ -656,16 +779,50 @@ def main(argv=None) -> int:
     reason = "operator-stop"
     failure: Exception | None = None
     rerecord_requested = threading.Event()
+    pause_requested = threading.Event()
+    resume_requested = threading.Event()
+    recording_gate = threading.Event()
+    recording_gate.set()
     previous_usr1_handler = None
+    previous_usr2_handler = None
+    previous_hup_handler = None
 
     def _request_rerecord(_signum, _frame) -> None:
         rerecord_requested.set()
+
+    def _request_pause(_signum, _frame) -> None:
+        # Close the producer gate in the signal callback. The parent waits for
+        # the PAUSED state file before it is allowed to request robot motion.
+        recording_gate.clear()
+        pause_requested.set()
+
+    def _request_resume(_signum, _frame) -> None:
+        resume_requested.set()
+
+    def _write_control_state(state: str, reason_text: str = "") -> None:
+        if options.control_state_file is None:
+            return
+        path = options.control_state_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps({
+            "pid": os.getpid(),
+            "state": state,
+            "reason": reason_text,
+            "episode_uuid": "" if episode is None else episode.episode_uuid,
+            "episode_directory": "" if episode is None else str(episode.directory),
+        }, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, path)
 
     try:
         # SIGUSR1 is reserved for an explicit left-pedal re-record request.
         # Install it before recorder startup to preserve an atomic manifest.
         if hasattr(signal, "SIGUSR1"):
             previous_usr1_handler = signal.signal(signal.SIGUSR1, _request_rerecord)
+        if hasattr(signal, "SIGUSR2"):
+            previous_usr2_handler = signal.signal(signal.SIGUSR2, _request_pause)
+        if hasattr(signal, "SIGHUP"):
+            previous_hup_handler = signal.signal(signal.SIGHUP, _request_resume)
         episode = EpisodeSession(
             options.root.resolve(),
             options.session_id,
@@ -674,6 +831,12 @@ def main(argv=None) -> int:
             ft_record,
             options.camera_recording_mode,
             "native-pre-dds" if options.deviceio_mode == "native" else "post-dds-typed-mirror",
+            dataset_name=options.dataset_name,
+            episode_index=options.episode_index,
+            attempt=options.attempt,
+            task_description=options.task_description,
+            episode_directory_name=options.episode_directory_name,
+            recording_gate=recording_gate,
         )
         if options.deviceio_mode == "native":
             ingress = NativeDeviceIOIngress(options.deviceio_socket, episode.submit_native)
@@ -683,9 +846,20 @@ def main(argv=None) -> int:
         rclpy_module.init(args=None)
         node = build_node(episode, record_ros_mirror=options.deviceio_mode != "native")
         rosbag.start()
+        _write_control_state("RECORDING")
         start = time.monotonic()
         while rclpy_module.ok():
             rclpy_module.spin_once(node, timeout_sec=0.1)
+            if pause_requested.is_set():
+                pause_requested.clear()
+                rosbag.pause(node)
+                episode.pause(reason="guarded-home")
+                _write_control_state("PAUSED")
+            if resume_requested.is_set():
+                resume_requested.clear()
+                rosbag.resume(node)
+                episode.resume(reason="guarded-home-complete")
+                _write_control_state("RECORDING")
             if rerecord_requested.is_set():
                 reason = "rerecord-requested"
                 break
@@ -703,6 +877,10 @@ def main(argv=None) -> int:
         reason = f"fault:{exc}"
         failure = exc
     finally:
+        try:
+            _write_control_state("STOPPING", reason)
+        except Exception:
+            pass
         cleanup_errors: list[str] = []
         if ingress is not None:
             try:
@@ -737,6 +915,15 @@ def main(argv=None) -> int:
                 failure = RuntimeError("; ".join(cleanup_errors))
         if previous_usr1_handler is not None:
             signal.signal(signal.SIGUSR1, previous_usr1_handler)
+        if previous_usr2_handler is not None:
+            signal.signal(signal.SIGUSR2, previous_usr2_handler)
+        if previous_hup_handler is not None:
+            signal.signal(signal.SIGHUP, previous_hup_handler)
+        if options.control_state_file is not None:
+            try:
+                _write_control_state("STOPPED", reason)
+            except Exception:
+                pass
     if episode is not None:
         print(str(episode.directory))
     if failure is not None:

@@ -121,3 +121,19 @@ def test_native_ingress_writes_actual_deviceio_mcap_and_source_stats(tmp_path):
     manifest = json.loads(episode.manifest_path.read_text())
     assert manifest["deviceio_capture_layer"] == "native-pre-dds"
     assert manifest["streams"]["robot/left_arm/state"]["samples"] == 1
+
+
+def test_episode_pause_suppresses_home_interval_and_resumes_same_manifest(tmp_path):
+    episode = _episode(tmp_path)
+    episode.submit_native(_envelope(1))
+    episode.pause(reason="guarded-home")
+    episode.submit_native(_envelope(2))
+    episode.resume(reason="guarded-home-complete")
+    episode.submit_native(_envelope(3))
+    episode.abort(reason="test-complete")
+
+    manifest = json.loads(episode.manifest_path.read_text())
+    assert manifest["pause_count"] == 1
+    assert manifest["paused_duration_ns"] > 0
+    assert manifest["suppressed_samples"] == 1
+    assert manifest["streams"]["robot/left_arm/state"]["samples"] == 2

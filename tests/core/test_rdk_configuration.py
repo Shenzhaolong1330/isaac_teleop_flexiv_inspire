@@ -51,15 +51,14 @@ def test_tool_payload_sha_is_canonical_but_touch_changes_fingerprint(tmp_path):
     assert first.fingerprint != second.fingerprint
 
 
-def test_locally_verified_tool_requires_physical_identity(tmp_path):
+def test_physical_identity_is_optional_traceability_metadata(tmp_path):
     document = tool_document()
     document["arms"]["left"]["tool"]["serial"] = ""
+    document["arms"]["left"]["tool"]["mounting_revision"] = "UNVERIFIED"
     path = tmp_path / "tool.yaml"
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
-    with pytest.raises(
-        ValueError, match=r"arms\.left\.tool\.serial is required"
-    ):
-        read_tool_payload_identity(path)
+    identity = read_tool_payload_identity(path)
+    assert identity.sha256
 
 
 def test_hardware_write_guard_requires_exact_file_content_and_mode(tmp_path):
@@ -92,16 +91,31 @@ class _Info:
     q_min = [-2.0] * 7
     q_max = [2.0] * 7
     dq_max = [1.0] * 7
+    K_x_nom = [10000.0, 10000.0, 10000.0, 2500.0, 2500.0, 2500.0]
 
 
 class _Robot:
     def __init__(self, serial):
         self.serial = serial
+        self.calls = []
 
     def info(self):
         value = _Info()
         value.serial_number = self.serial
         return value
+
+    def SwitchMode(self, mode):
+        self.calls.append(("SwitchMode", mode))
+
+    def SetCartesianImpedance(self, stiffness, damping_ratio):
+        self.calls.append(
+            ("SetCartesianImpedance", stiffness, damping_ratio)
+        )
+
+    def SendJointPosition(self, positions, velocities, max_vel, max_acc):
+        self.calls.append(
+            ("SendJointPosition", positions, velocities, max_vel, max_acc)
+        )
 
 
 class _ToolParams:
@@ -123,7 +137,15 @@ class _Tool:
 
 
 def test_connect_runs_read_only_robot_info_compatibility(monkeypatch):
-    module = types.SimpleNamespace(__version__="1.9.0", Robot=_Robot, Tool=_Tool)
+    module = types.SimpleNamespace(
+        __version__="1.9.0",
+        Robot=_Robot,
+        Tool=_Tool,
+        Mode=types.SimpleNamespace(
+            NRT_CARTESIAN_MOTION_FORCE="cartesian",
+            NRT_JOINT_POSITION="joint",
+        ),
+    )
     monkeypatch.setitem(sys.modules, "flexivrdk", module)
     backend = FlexivRDKBackend(
         (
@@ -141,6 +163,29 @@ def test_connect_runs_read_only_robot_info_compatibility(monkeypatch):
     backend.verify_active_tool_payload(
         json.dumps(tool_document(), sort_keys=True, separators=(",", ":"))
     )
+    backend.switch_cartesian_mode("left", local_console=True)
+    backend.set_cartesian_impedance(
+        "left",
+        np.asarray([1200.0, 1200.0, 1200.0, 80.0, 80.0, 80.0]),
+        np.asarray([0.7] * 6),
+        local_authorized=True,
+    )
+    backend.switch_joint_position_mode("left", local_console=True)
+    backend.send_joint_position(
+        "left",
+        np.zeros(7),
+        max_velocity=0.5,
+        max_acceleration=1.0,
+        local_authorized=True,
+    )
+    calls = backend._robots["left"].calls
+    assert ("SwitchMode", "cartesian") in calls
+    assert any(call[0] == "SetCartesianImpedance" for call in calls)
+    assert ("SwitchMode", "joint") in calls
+    joint_call = next(call for call in calls if call[0] == "SendJointPosition")
+    assert joint_call[2] == [0.0] * 7
+    assert joint_call[3] == [0.5] * 7
+    assert joint_call[4] == [1.0] * 7
 
 
 def test_connect_rejects_configured_serial_mismatch(monkeypatch):

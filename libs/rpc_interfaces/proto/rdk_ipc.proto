@@ -21,6 +21,10 @@ message Envelope {
     AuthorizeZeroFTResult authorize_zero_ft_result = 21;
     AuthorizeControlRequest authorize_control_request = 22;
     AuthorizeControlResult authorize_control_result = 23;
+    AuthorizeHomeRequest authorize_home_request = 24;
+    AuthorizeHomeResult authorize_home_result = 25;
+    HomeCommand home_command = 26;
+    HomeResult home_result = 27;
   }
 }
 
@@ -67,6 +71,8 @@ message CartesianTarget {
   double max_angular_velocity = 3;
   double max_linear_acceleration = 4;
   double max_angular_acceleration = 5;
+  repeated double cartesian_stiffness = 6;
+  repeated double cartesian_damping_ratio = 7;
 }
 
 message CartesianCommand {
@@ -150,6 +156,44 @@ message AuthorizeControlResult {
   string one_time_token = 2;
   uint64 expires_monotonic_ns = 3;
   string reason = 4;
+}
+
+message AuthorizeHomeRequest {
+  string session_id = 1;
+  string operator_confirmation = 2;
+  bool clear_hold_latched = 3;
+}
+
+message AuthorizeHomeResult {
+  bool authorized = 1;
+  string one_time_token = 2;
+  uint64 expires_monotonic_ns = 3;
+  string reason = 4;
+}
+
+message HomeCommand {
+  string session_id = 1;
+  uint64 request_sequence = 2;
+  uint64 expires_monotonic_ns = 3;
+  repeated double left_joint_positions = 4;
+  repeated double right_joint_positions = 5;
+  double max_velocity_rad_s = 6;
+  double max_acceleration_rad_s2 = 7;
+  double tolerance_rad = 8;
+  double timeout_s = 9;
+  bool safety_validated = 10;
+  bool local_permission = 11;
+  bool physical_pedal = 12;
+  bool collision_clear = 13;
+  string local_authorization_token = 14;
+}
+
+message HomeResult {
+  bool accepted = 1;
+  bool completed = 2;
+  string reason = 3;
+  double max_position_error_rad = 4;
+  uint64 applied_monotonic_ns = 5;
 }
 
 message ZeroFTArmResult {

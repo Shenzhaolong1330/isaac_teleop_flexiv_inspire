@@ -87,6 +87,45 @@ class MockBackend:
     def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None:
         self.events.append((side, "cartesian_mode"))
 
+    def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None:
+        self.events.append((side, "joint_position_mode"))
+
+    def joint_position_limits(self, side: str) -> tuple[np.ndarray, np.ndarray]:
+        return np.full(7, -3.0), np.full(7, 3.0)
+
+    def nominal_cartesian_stiffness(self, side: str) -> np.ndarray:
+        return np.asarray(
+            [10000.0, 10000.0, 10000.0, 2500.0, 2500.0, 2500.0]
+        )
+
+    def set_cartesian_impedance(
+        self,
+        side: str,
+        stiffness: np.ndarray,
+        damping_ratio: np.ndarray,
+        *,
+        local_authorized: bool,
+    ) -> None:
+        k_x = np.asarray(stiffness, dtype=np.float64)
+        z_x = np.asarray(damping_ratio, dtype=np.float64)
+        if k_x.shape != (6,) or z_x.shape != (6,):
+            raise ValueError("invalid mock Cartesian impedance")
+        self.events.append((side, "set_cartesian_impedance"))
+
+    def send_joint_position(
+        self,
+        side: str,
+        positions: np.ndarray,
+        *,
+        max_velocity: float,
+        max_acceleration: float,
+        local_authorized: bool,
+    ) -> None:
+        target = np.asarray(positions, dtype=np.float64)
+        if target.shape != (7,) or not np.all(np.isfinite(target)):
+            raise ValueError("invalid mock joint target")
+        self.events.append((side, "send_joint_position"))
+
     def rebase_from_measurement(self, side: str) -> np.ndarray:
         self.events.append((side, "rebase"))
         return self.samples[side].tcp_pose_rdk.copy()

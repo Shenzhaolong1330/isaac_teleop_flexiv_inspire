@@ -322,13 +322,12 @@ class TeleopInput(Node):
         try:
             value = msgpack.unpackb(_bytes(message), raw=False)
             self._squeeze = _validated_squeezes(value)
-            raw_button = value.get(str(self.get_parameter("home_button_key").value), False)
+            raw_button = value.get(
+                str(self.get_parameter("home_button_key").value), False
+            )
             if not isinstance(raw_button, (bool, int)):
                 raise ValueError("Quest home button must be boolean")
             home_button_down = bool(raw_button)
-            # A is a rising-edge Home request. It intentionally does not
-            # depend on the down-arrow pedal; the Home supervisor must enforce
-            # F/T zero, local permission, collision/limit and daemon checks.
             if home_button_down and not self._home_button_down:
                 self._home_pub.publish(Empty())
             self._home_button_down = home_button_down

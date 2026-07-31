@@ -30,6 +30,8 @@ def command(sequence: int = 1) -> dict:
         "max_angular_velocity": 0.05,
         "max_linear_acceleration": 0.05,
         "max_angular_acceleration": 0.1,
+        "cartesian_stiffness": [1200.0, 1200.0, 1200.0, 80.0, 80.0, 80.0],
+        "cartesian_damping_ratio": [0.7] * 6,
     }
     return {
         "session_id": "session",

@@ -23,6 +23,7 @@
     # manus_calibration_template.yaml before setting this path.
     manus_calibration: ""
     max_manus_age_s: 0.10
-    # Quest right A is a Home request edge; it does not replace safety gates.
+    # Quest right A requests guarded Home. A current local Home session lease
+    # is required; the teleoperation pedal is not a Home gate.
     home_button_key: right_primary_click
     home_topic: /control/home_request

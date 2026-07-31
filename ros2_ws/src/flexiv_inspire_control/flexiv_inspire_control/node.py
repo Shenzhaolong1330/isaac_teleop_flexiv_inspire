@@ -48,6 +48,7 @@ from isaac_teleop_core.control import (
 
 from .clock_mapper import OnlineClockMapper
 from .conversion import cartesian_target_from_point, command_from_ros
+from .frames import load_base_transforms, rdk_pose_base_to_world
 from .foot_pedal import FootPedalMonitor
 from .ipc_client import RDKIPCClient
 
@@ -102,6 +103,25 @@ class ControlBridge(Node):
         self.declare_parameter("max_angular_velocity_rad_s", 0.15)
         self.declare_parameter("max_linear_acceleration_m_s2", 0.25)
         self.declare_parameter("max_angular_acceleration_rad_s2", 0.50)
+        self.declare_parameter("cartesian_control_mode", "position")
+        self.declare_parameter(
+            "cartesian_position_stiffness",
+            [3000.0, 3000.0, 3000.0, 200.0, 200.0, 200.0],
+        )
+        self.declare_parameter(
+            "cartesian_impedance_stiffness",
+            [1200.0, 1200.0, 1200.0, 80.0, 80.0, 80.0],
+        )
+        self.declare_parameter(
+            "cartesian_damping_ratio",
+            [0.7, 0.7, 0.7, 0.7, 0.7, 0.7],
+        )
+        self.declare_parameter("home_left_joints_rad", [])
+        self.declare_parameter("home_right_joints_rad", [])
+        self.declare_parameter("home_max_velocity_rad_s", 0.50)
+        self.declare_parameter("home_max_acceleration_rad_s2", 1.0)
+        self.declare_parameter("home_tolerance_rad", 0.01)
+        self.declare_parameter("home_timeout_s", 20.0)
         self.declare_parameter("joint_lower_limits_rad", [])
         self.declare_parameter("joint_upper_limits_rad", [])
         self.declare_parameter("max_joint_velocity_rad_s", 0.75)
@@ -111,6 +131,12 @@ class ControlBridge(Node):
         self.declare_parameter("max_external_torque_nm", 8.0)
         self.declare_parameter("max_joint_temperature_c", 75.0)
         self.declare_parameter("hand_reference_tolerance", 1.0)
+        self.declare_parameter("frame_config", "")
+        frame_config = str(self.get_parameter("frame_config").value).strip()
+        if not frame_config:
+            raise RuntimeError("frame_config is required; arm base poses must be explicit")
+        self._world_frame, self._world_from_base = load_base_transforms(frame_config)
+        self._validate_motion_configuration()
         session = str(self.get_parameter("session_id").value).strip()
         self._session_id = session or f"hardware-{uuid.uuid4()}"
         socket_path = Path(str(self.get_parameter("rdk_socket").value))
@@ -154,6 +180,13 @@ class ControlBridge(Node):
         self._hold_sent_for_latch = False
         self._hold_request_inflight = False
         self._zero_goal_reserved = False
+        self._pending_home_token: str | None = None
+        self._pending_home_token_expiry_ns = 0
+        self._home_authorization_lease_active = False
+        self._home_inflight = False
+        self._home_sequence = 0
+        self._home_request_sequence = 0
+        self._home_thread: threading.Thread | None = None
         self._deviceio = AsyncDeviceIOEmitter("control")
 
         command_qos = QoSProfile(
@@ -175,6 +208,9 @@ class ControlBridge(Node):
         )
         self._control_state_pub = self.create_publisher(
             ControlStateMsg, "/control/state", command_qos
+        )
+        self._home_status_pub = self.create_publisher(
+            String, "/control/home_status", command_qos
         )
         self._arm_publishers = {
             side: self._create_arm_publishers(side) for side in ("left", "right")
@@ -203,6 +239,24 @@ class ControlBridge(Node):
         self.create_subscription(Bool, "/control/local_permission", self._on_local_permission, command_qos)
         self.create_subscription(Bool, "/safety/collision_clear", self._on_collision_clear, command_qos)
         self.create_subscription(String, "/control/local_arm_authorization", self._on_arm_authorization, command_qos)
+        self.create_subscription(
+            String,
+            "/control/local_home_authorization",
+            self._on_home_authorization,
+            command_qos,
+        )
+        self.create_subscription(
+            Empty,
+            "/control/home_request",
+            self._on_home_request,
+            command_qos,
+        )
+        self.create_subscription(
+            String,
+            "/control/home_request_context",
+            self._on_home_request_context,
+            command_qos,
+        )
         self.create_subscription(Empty, "/control/stop", lambda message: self._stop_control(), command_qos)
         self._zero_action = ActionServer(
             self,
@@ -244,9 +298,86 @@ class ControlBridge(Node):
             client.close()
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=1.0)
+        if self._home_thread is not None:
+            self._home_thread.join(timeout=1.0)
         self._zero_action.destroy()
         self._deviceio.close()
         return super().destroy_node()
+
+    def _validate_motion_configuration(self) -> None:
+        mode = str(self.get_parameter("cartesian_control_mode").value)
+        if mode not in {"position", "impedance"}:
+            raise RuntimeError(
+                "cartesian_control_mode must be position or impedance"
+            )
+        for name in (
+            "cartesian_position_stiffness",
+            "cartesian_impedance_stiffness",
+        ):
+            values = np.asarray(self.get_parameter(name).value, dtype=np.float64)
+            if (
+                values.shape != (6,)
+                or not np.all(np.isfinite(values))
+                or np.any(values < 0.0)
+            ):
+                raise RuntimeError(f"{name} must be a non-negative finite 6-vector")
+        damping = np.asarray(
+            self.get_parameter("cartesian_damping_ratio").value,
+            dtype=np.float64,
+        )
+        if (
+            damping.shape != (6,)
+            or not np.all(np.isfinite(damping))
+            or np.any(damping < 0.3)
+            or np.any(damping > 0.8)
+        ):
+            raise RuntimeError(
+                "cartesian_damping_ratio must be a finite 6-vector in [0.3,0.8]"
+            )
+        lower = np.asarray(
+            self.get_parameter("joint_lower_limits_rad").value,
+            dtype=np.float64,
+        )
+        upper = np.asarray(
+            self.get_parameter("joint_upper_limits_rad").value,
+            dtype=np.float64,
+        )
+        for side in ("left", "right"):
+            target = np.asarray(
+                self.get_parameter(f"home_{side}_joints_rad").value,
+                dtype=np.float64,
+            )
+            if (
+                target.shape != (7,)
+                or lower.shape != (7,)
+                or upper.shape != (7,)
+                or not np.all(np.isfinite(target))
+                or np.any(target < lower)
+                or np.any(target > upper)
+            ):
+                raise RuntimeError(
+                    f"home_{side}_joints_rad must be inside configured joint limits"
+                )
+        home_velocity = float(
+            self.get_parameter("home_max_velocity_rad_s").value
+        )
+        if not 0.0 < home_velocity <= min(
+            0.75, float(self.get_parameter("max_joint_velocity_rad_s").value)
+        ):
+            raise RuntimeError("home_max_velocity_rad_s exceeds the safety limit")
+        home_acceleration = float(
+            self.get_parameter("home_max_acceleration_rad_s2").value
+        )
+        if not 0.0 < home_acceleration <= 2.0:
+            raise RuntimeError(
+                "home_max_acceleration_rad_s2 must be in (0,2.0]"
+            )
+        tolerance = float(self.get_parameter("home_tolerance_rad").value)
+        timeout = float(self.get_parameter("home_timeout_s").value)
+        if not 0.0 < tolerance <= 0.1:
+            raise RuntimeError("home_tolerance_rad must be in (0,0.1]")
+        if not 1.0 <= timeout <= 60.0:
+            raise RuntimeError("home_timeout_s must be in [1,60]")
 
     def _observation_loop(self) -> None:
         observation_rate_hz = float(self.get_parameter("observation_rate_hz").value)
@@ -268,6 +399,9 @@ class ControlBridge(Node):
                         self._pending_arm_token = None
                         self._pending_arm_token_expiry_ns = 0
                         self._rdk_control_lease_active = False
+                        self._pending_home_token = None
+                        self._pending_home_token_expiry_ns = 0
+                        self._home_authorization_lease_active = False
                         for mapper in self._clock_mappers.values():
                             mapper.reset()
                     self._daemon_instance_id = instance_id
@@ -299,6 +433,9 @@ class ControlBridge(Node):
                 self._pending_arm_token = None
                 self._pending_arm_token_expiry_ns = 0
                 self._rdk_control_lease_active = False
+                self._pending_home_token = None
+                self._pending_home_token_expiry_ns = 0
+                self._home_authorization_lease_active = False
                 for mapper in self._clock_mappers.values():
                     mapper.reset()
             self._latest_wire[side] = wire
@@ -324,7 +461,7 @@ class ControlBridge(Node):
             self._limits_ok = all(self._arm_safety_ok.values())
         state = ArmStateMsg()
         state.header.stamp = stamp
-        state.header.frame_id = "world"
+        state.header.frame_id = self._world_frame
         state.side = side
         state.robot_time_sec = int(wire.get("robot_time_sec", "0"))
         state.robot_time_nsec = int(wire.get("robot_time_nsec", 0))
@@ -360,8 +497,12 @@ class ControlBridge(Node):
         state.connected = bool(wire.get("connected", False))
         state.fault = str(wire.get("fault", ""))
         state.rdk_connection_generation = generation
-        self._fill_pose(state.tcp_pose, wire["tcp_pose_rdk_xyz_wxyz"])
-        self._fill_twist(state.tcp_twist, wire["tcp_velocity"])
+        pose_world = rdk_pose_base_to_world(pose_rdk, self._world_from_base[side])
+        self._fill_pose(state.tcp_pose, pose_world)
+        velocity_base = np.asarray(wire["tcp_velocity"], dtype=float)
+        rotation = self._world_from_base[side].rotation
+        velocity_world = np.concatenate((rotation @ velocity_base[:3], rotation @ velocity_base[3:]))
+        self._fill_twist(state.tcp_twist, velocity_world)
         self._fill_wrench(state.raw_ft, wire["raw_ft"])
         self._fill_wrench(state.tcp_wrench, wire["external_wrench"])
         pubs = self._arm_publishers[side]
@@ -664,6 +805,22 @@ class ControlBridge(Node):
         result: dict[str, dict] = {}
         candidate_poses: dict[str, np.ndarray] = {}
         candidate_quaternions: dict[str, np.ndarray] = {}
+        cartesian_mode = str(
+            self.get_parameter("cartesian_control_mode").value
+        )
+        stiffness_parameter = (
+            "cartesian_position_stiffness"
+            if cartesian_mode == "position"
+            else "cartesian_impedance_stiffness"
+        )
+        stiffness = [
+            float(value)
+            for value in self.get_parameter(stiffness_parameter).value
+        ]
+        damping_ratio = [
+            float(value)
+            for value in self.get_parameter("cartesian_damping_ratio").value
+        ]
         for side, bit in (("left", ValidMask.LEFT_ARM), ("right", ValidMask.RIGHT_ARM)):
             if not command.valid_mask & bit:
                 continue
@@ -680,6 +837,7 @@ class ControlBridge(Node):
                 max_translation_step_m=float(self.get_parameter("max_translation_step_m").value),
                 max_rotation_step_rad=float(self.get_parameter("max_rotation_step_rad").value),
                 previous_output_quaternion_xyzw=previous_quaternion,
+                world_from_base=self._world_from_base[side],
             )
             candidate_poses[side] = target.copy()
             candidate_quaternions[side] = output_quaternion.copy()
@@ -689,6 +847,8 @@ class ControlBridge(Node):
                 "max_angular_velocity": float(self.get_parameter("max_angular_velocity_rad_s").value),
                 "max_linear_acceleration": float(self.get_parameter("max_linear_acceleration_m_s2").value),
                 "max_angular_acceleration": float(self.get_parameter("max_angular_acceleration_rad_s2").value),
+                "cartesian_stiffness": stiffness,
+                "cartesian_damping_ratio": damping_ratio,
             }
         return result, candidate_poses, candidate_quaternions
 
@@ -792,6 +952,238 @@ class ControlBridge(Node):
         except Exception as exc:
             self.get_logger().error(f"control authorization rejected: {exc}")
         self._publish_control_state()
+
+    def _on_home_authorization(self, message: String) -> None:
+        try:
+            payload = json.loads(message.data)
+            if payload["session_id"] != self._session_id:
+                raise ValueError("Home authorization session mismatch")
+            token = str(payload["one_time_token"])
+            expires = int(payload["expires_monotonic_ns"])
+            if not token:
+                raise ValueError("empty Home authorization token")
+            if expires <= time.monotonic_ns():
+                raise ValueError("Home authorization token is already expired")
+            with self._state_lock:
+                if self._home_inflight:
+                    raise RuntimeError("Home is already active")
+                self._pending_home_token = token
+                self._pending_home_token_expiry_ns = expires
+            self._publish_home_status("authorized", "")
+        except Exception as exc:
+            self.get_logger().error(f"Home authorization rejected: {exc}")
+            self._publish_home_status("authorization_rejected", str(exc))
+
+    def _on_home_request(self, message: Empty) -> None:
+        del message
+        self._begin_home_request(self._new_home_request_id("quest"))
+
+    def _on_home_request_context(self, message: String) -> None:
+        request_id = ""
+        try:
+            payload = json.loads(message.data)
+            request_id = str(payload.get("request_id", "")).strip()
+            source = str(payload.get("source", "")).strip()
+            session_id = str(payload.get("session_id", "")).strip()
+            if session_id != self._session_id:
+                raise ValueError("Home request session mismatch")
+            if source != "episode_rerecord":
+                raise ValueError("unsupported contextual Home source")
+            if not request_id or len(request_id) > 128:
+                raise ValueError("Home request_id must contain 1..128 characters")
+        except Exception as exc:
+            self.get_logger().error(f"contextual Home request rejected: {exc}")
+            if request_id:
+                self._publish_home_status(
+                    "rejected", str(exc), request_id=request_id
+                )
+            return
+        self._begin_home_request(request_id)
+
+    def _new_home_request_id(self, source: str) -> str:
+        with self._state_lock:
+            self._home_request_sequence += 1
+            sequence = self._home_request_sequence
+        return f"{source}-{sequence}"
+
+    def _begin_home_request(self, request_id: str) -> None:
+        now = time.monotonic_ns()
+        self._update_gates(now)
+        try:
+            with self._state_lock:
+                if self._home_inflight:
+                    raise RuntimeError("Home is already active")
+                if self._arbiter.snapshot.state is not ControlState.READY:
+                    raise RuntimeError("Home requires control state READY")
+                if (
+                    not self._home_authorization_lease_active
+                    and (
+                        not self._pending_home_token
+                        or now >= self._pending_home_token_expiry_ns
+                    )
+                ):
+                    raise RuntimeError(
+                        "local Home session authorization is required"
+                    )
+                reason = self._home_gate_failure(now)
+                if reason:
+                    raise RuntimeError(reason)
+                self._home_inflight = True
+            thread = threading.Thread(
+                target=self._run_home,
+                args=(request_id,),
+                name="guarded-dual-arm-home",
+                daemon=True,
+            )
+            self._home_thread = thread
+            thread.start()
+        except Exception as exc:
+            self.get_logger().error(f"Home request rejected: {exc}")
+            self._publish_home_status("rejected", str(exc), request_id=request_id)
+
+    def _home_gate_failure(self, now: int) -> str:
+        if not self._local_permission:
+            return "local_permission_missing"
+        if not self._collision_clear:
+            return "collision_not_clear"
+        if not self._limits_ok or not all(self._arm_safety_ok.values()):
+            return "arm_safety_not_validated"
+        if not all(
+            self._last_arm_observation_ns[side] > 0
+            and now - self._last_arm_observation_ns[side] <= 100_000_000
+            and bool(self._latest_wire.get(side, {}).get("connected", False))
+            and not str(self._latest_wire.get(side, {}).get("fault", ""))
+            for side in ("left", "right")
+        ):
+            return "arm_observation_stale"
+        if not all(
+            self._hand_connected[side]
+            and now - self._last_hand_observation_ns[side] <= 200_000_000
+            for side in ("left", "right")
+        ):
+            return "hand_observation_stale"
+        return ""
+
+    def _run_home(self, request_id: str) -> None:
+        started = False
+        failure = ""
+        try:
+            timeout_s = float(self.get_parameter("home_timeout_s").value)
+            local_deadline = time.monotonic() + timeout_s + 5.0
+            first = True
+            while not self._stop.is_set():
+                now = time.monotonic_ns()
+                with self._state_lock:
+                    gate_failure = self._home_gate_failure(now)
+                    token = self._pending_home_token or ""
+                if gate_failure:
+                    raise RuntimeError(gate_failure)
+                if time.monotonic() > local_deadline:
+                    raise RuntimeError("local Home supervisor timeout")
+                self._home_sequence += 1
+                payload = {
+                    "session_id": self._session_id,
+                    "request_sequence": str(self._home_sequence),
+                    "expires_monotonic_ns": str(now + 150_000_000),
+                    "left_joint_positions": list(
+                        self.get_parameter("home_left_joints_rad").value
+                    ),
+                    "right_joint_positions": list(
+                        self.get_parameter("home_right_joints_rad").value
+                    ),
+                    "max_velocity_rad_s": float(
+                        self.get_parameter("home_max_velocity_rad_s").value
+                    ),
+                    "max_acceleration_rad_s2": float(
+                        self.get_parameter(
+                            "home_max_acceleration_rad_s2"
+                        ).value
+                    ),
+                    "tolerance_rad": float(
+                        self.get_parameter("home_tolerance_rad").value
+                    ),
+                    "timeout_s": timeout_s,
+                    "safety_validated": True,
+                    "local_permission": self._local_permission,
+                    "collision_clear": self._collision_clear,
+                    "local_authorization_token": (
+                        token
+                        if first and not self._home_authorization_lease_active
+                        else ""
+                    ),
+                }
+                kind, response = self._ipc_maintenance.request(
+                    "home_command",
+                    payload,
+                    timeout_s=20.0 if first else 0.10,
+                )
+                if kind != "home_result" or not response.get("accepted", False):
+                    raise RuntimeError(response.get("reason", kind))
+                started = True
+                first = False
+                with self._state_lock:
+                    self._home_authorization_lease_active = True
+                    self._pending_home_token = None
+                    self._pending_home_token_expiry_ns = 0
+                error = float(response.get("max_position_error_rad", 0.0))
+                self._publish_home_status(
+                    "complete" if response.get("completed", False) else "moving",
+                    "",
+                    max_position_error_rad=error,
+                    request_id=request_id,
+                )
+                if response.get("completed", False):
+                    self.get_logger().info("dual-arm Home completed")
+                    return
+                if self._stop.wait(0.04):
+                    raise RuntimeError("control bridge is stopping")
+        except Exception as exc:
+            failure = str(exc)
+            self.get_logger().error(f"dual-arm Home stopped: {failure}")
+            if started:
+                try:
+                    self._ipc_maintenance.request(
+                        "hold",
+                        {"reason": f"home_abort:{failure}", "latch": True},
+                        timeout_s=5.0,
+                    )
+                except Exception as hold_exc:
+                    failure = f"{failure}; hold failed: {hold_exc}"
+            if not started:
+                with self._state_lock:
+                    self._home_authorization_lease_active = False
+            self._publish_home_status(
+                "failed", failure, request_id=request_id
+            )
+        finally:
+            with self._state_lock:
+                self._home_inflight = False
+                self._pending_home_token = None
+                self._pending_home_token_expiry_ns = 0
+
+    def _publish_home_status(
+        self,
+        state: str,
+        reason: str,
+        *,
+        max_position_error_rad: float = 0.0,
+        request_id: str = "",
+    ) -> None:
+        publisher = getattr(self, "_home_status_pub", None)
+        if publisher is None:
+            return
+        message = String()
+        message.data = json.dumps(
+            {
+                "state": state,
+                "reason": reason,
+                "max_position_error_rad": max_position_error_rad,
+                "session_id": self._session_id,
+                "request_id": request_id,
+            },
+            separators=(",", ":"),
+        )
+        publisher.publish(message)
 
     def _update_gates(self, now: int) -> None:
         hands_online = all(

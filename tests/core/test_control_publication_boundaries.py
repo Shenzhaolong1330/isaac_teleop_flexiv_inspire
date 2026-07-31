@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("flexiv_inspire_interfaces")
 
 from flexiv_inspire_control.node import ControlBridge
+from flexiv_inspire_control.frames import BaseTransform
 from isaac_teleop_core.command import (
     BimanualCommand,
     CommandPoint,
@@ -119,6 +120,13 @@ def _bridge(*, token: str | None, rdk_accepts: bool) -> ControlBridge:
         "left": np.array([0, 0, 0, 1, 0, 0, 0], dtype=float)
     }
     bridge._previous_output_quaternion = {"left": None, "right": None}
+    bridge._world_from_base = {
+        side: BaseTransform(
+            np.zeros(3, dtype=float),
+            np.array([0.0, 0.0, 0.0, 1.0], dtype=float),
+        )
+        for side in ("left", "right")
+    }
     bridge._pending_arm_token = token
     bridge._pending_arm_token_expiry_ns = (
         time.monotonic_ns() + 1_000_000_000 if token else 0
@@ -141,6 +149,10 @@ def _bridge(*, token: str | None, rdk_accepts: bool) -> ControlBridge:
         "max_angular_velocity_rad_s": 0.15,
         "max_linear_acceleration_m_s2": 0.25,
         "max_angular_acceleration_rad_s2": 0.50,
+        "cartesian_control_mode": "impedance",
+        "cartesian_position_stiffness": [3000.0, 3000.0, 3000.0, 200.0, 200.0, 200.0],
+        "cartesian_impedance_stiffness": [1200.0, 1200.0, 1200.0, 80.0, 80.0, 80.0],
+        "cartesian_damping_ratio": [0.7] * 6,
     }
     bridge.get_parameter = lambda name: _Parameter(values[name])
     return bridge

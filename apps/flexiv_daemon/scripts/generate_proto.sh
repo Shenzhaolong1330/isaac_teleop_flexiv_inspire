@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 RDK_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-WORKSPACE_ROOT="$(cd -- "${RDK_ROOT}/.." && pwd)"
+WORKSPACE_ROOT="$(cd -- "${RDK_ROOT}/../.." && pwd)"
 PROTO="${WORKSPACE_ROOT}/libs/rpc_interfaces/proto/rdk_ipc.proto"
 OUT="${RDK_ROOT}/src/flexiv_rdk_daemon/generated"
 

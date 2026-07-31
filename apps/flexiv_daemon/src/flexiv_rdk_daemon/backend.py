@@ -32,6 +32,26 @@ class ArmBackend(Protocol):
     def primitive_state(self, side: str) -> Mapping[str, Any]: ...
     def switch_idle(self, side: str, *, local_console: bool) -> None: ...
     def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None: ...
+    def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None: ...
+    def joint_position_limits(self, side: str) -> tuple[np.ndarray, np.ndarray]: ...
+    def nominal_cartesian_stiffness(self, side: str) -> np.ndarray: ...
+    def set_cartesian_impedance(
+        self,
+        side: str,
+        stiffness: np.ndarray,
+        damping_ratio: np.ndarray,
+        *,
+        local_authorized: bool,
+    ) -> None: ...
+    def send_joint_position(
+        self,
+        side: str,
+        positions: np.ndarray,
+        *,
+        max_velocity: float,
+        max_acceleration: float,
+        local_authorized: bool,
+    ) -> None: ...
     def rebase_from_measurement(self, side: str) -> np.ndarray: ...
     def send_cartesian_target(
         self,
@@ -70,6 +90,7 @@ class RobotMetadata:
     q_min: tuple[float, ...]
     q_max: tuple[float, ...]
     dq_max: tuple[float, ...]
+    nominal_cartesian_stiffness: tuple[float, ...]
     active_tool_name: str
     active_tool_mass_kg: float
     active_tool_center_of_mass_m: tuple[float, ...]
@@ -94,6 +115,9 @@ class FlexivRDKBackend:
         self._rdk: Any | None = None
         self._connection_generation = 0
         self._safe_targets: dict[str, np.ndarray] = {}
+        self._cartesian_impedance: dict[
+            str, tuple[tuple[float, ...], tuple[float, ...]]
+        ] = {}
         self._metadata: dict[str, RobotMetadata] = {}
         # RDK does not document Robot as thread-safe. Every call for a given
         # robot is serialized; dual-arm operations always acquire left then right.
@@ -141,6 +165,7 @@ class FlexivRDKBackend:
         self._metadata = metadata
         self._connection_generation += 1
         self._safe_targets.clear()
+        self._cartesian_impedance.clear()
 
     def disconnect(self) -> None:
         self._robots.clear()
@@ -148,6 +173,7 @@ class FlexivRDKBackend:
         self._rdk = None
         self._connection_generation += 1
         self._safe_targets.clear()
+        self._cartesian_impedance.clear()
 
     def _robot(self, side: str) -> Any:
         if side not in {"left", "right"}:
@@ -233,6 +259,11 @@ class FlexivRDKBackend:
         dq_max = cls._finite_tuple(
             cls._info_field(info, ("dq_max",)), 7, f"{side} RobotInfo.dq_max"
         )
+        nominal_cartesian_stiffness = cls._finite_tuple(
+            cls._info_field(info, ("K_x_nom",)),
+            6,
+            f"{side} RobotInfo.K_x_nom",
+        )
         if any(lower >= upper for lower, upper in zip(q_min, q_max)):
             raise RuntimeError(f"{side} RobotInfo joint limits are invalid")
 
@@ -296,6 +327,7 @@ class FlexivRDKBackend:
             q_min=q_min,
             q_max=q_max,
             dq_max=dq_max,
+            nominal_cartesian_stiffness=nominal_cartesian_stiffness,
             active_tool_name=active_tool_name,
             active_tool_mass_kg=active_tool_mass_kg,
             active_tool_center_of_mass_m=active_tool_center_of_mass_m,
@@ -493,6 +525,104 @@ class FlexivRDKBackend:
 
     def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None:
         self._switch_mode(side, "NRT_CARTESIAN_MOTION_FORCE", local_console=local_console)
+
+    def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None:
+        self._switch_mode(side, "NRT_JOINT_POSITION", local_console=local_console)
+
+    def joint_position_limits(self, side: str) -> tuple[np.ndarray, np.ndarray]:
+        try:
+            metadata = self._metadata[side]
+        except KeyError as exc:
+            raise RuntimeError(f"{side} RobotInfo metadata is unavailable") from exc
+        return (
+            np.asarray(metadata.q_min, dtype=np.float64),
+            np.asarray(metadata.q_max, dtype=np.float64),
+        )
+
+    def nominal_cartesian_stiffness(self, side: str) -> np.ndarray:
+        try:
+            values = self._metadata[side].nominal_cartesian_stiffness
+        except KeyError as exc:
+            raise RuntimeError(f"{side} RobotInfo metadata is unavailable") from exc
+        return np.asarray(values, dtype=np.float64)
+
+    def set_cartesian_impedance(
+        self,
+        side: str,
+        stiffness: np.ndarray,
+        damping_ratio: np.ndarray,
+        *,
+        local_authorized: bool,
+    ) -> None:
+        """Apply one explicit RDK Cartesian impedance profile."""
+
+        self._guard.require("SetCartesianImpedance", local_console=local_authorized)
+        k_x = np.asarray(stiffness, dtype=np.float64).reshape(-1)
+        z_x = np.asarray(damping_ratio, dtype=np.float64).reshape(-1)
+        if k_x.shape != (6,) or not np.all(np.isfinite(k_x)):
+            raise ValueError("Cartesian stiffness must be a finite 6-vector")
+        if z_x.shape != (6,) or not np.all(np.isfinite(z_x)):
+            raise ValueError("Cartesian damping ratio must be a finite 6-vector")
+        nominal = self.nominal_cartesian_stiffness(side)
+        if np.any(k_x < 0.0) or np.any(k_x > nominal):
+            raise ValueError("Cartesian stiffness exceeds RobotInfo.K_x_nom")
+        if np.any(z_x < 0.3) or np.any(z_x > 0.8):
+            raise ValueError("Cartesian damping ratio must be in [0.3,0.8]")
+        signature = (
+            tuple(float(value) for value in k_x),
+            tuple(float(value) for value in z_x),
+        )
+        with self._arm_locks[side]:
+            if self._cartesian_impedance.get(side) == signature:
+                return
+            self._invoke(
+                self._robot(side),
+                "set_cartesian_impedance",
+                "SetCartesianImpedance",
+                args=(k_x.tolist(), z_x.tolist()),
+            )
+            self._cartesian_impedance[side] = signature
+
+    def send_joint_position(
+        self,
+        side: str,
+        positions: np.ndarray,
+        *,
+        max_velocity: float,
+        max_acceleration: float,
+        local_authorized: bool,
+    ) -> None:
+        """Send one smoothed RDK NRT joint-position target."""
+
+        self._guard.require("SendJointPosition", local_console=local_authorized)
+        target = np.asarray(positions, dtype=np.float64).reshape(-1)
+        if target.shape != (7,) or not np.all(np.isfinite(target)):
+            raise ValueError("joint target must be a finite 7-vector")
+        lower, upper = self.joint_position_limits(side)
+        if np.any(target < lower) or np.any(target > upper):
+            raise ValueError("joint target exceeds RobotInfo position limits")
+        if (
+            not math.isfinite(max_velocity)
+            or max_velocity <= 0.0
+            or not math.isfinite(max_acceleration)
+            or max_acceleration <= 0.0
+        ):
+            raise ValueError("joint velocity/acceleration limits must be positive")
+        metadata = self._metadata[side]
+        if max_velocity > min(metadata.dq_max):
+            raise ValueError("joint max velocity exceeds RobotInfo.dq_max")
+        with self._arm_locks[side]:
+            self._invoke(
+                self._robot(side),
+                "send_joint_position",
+                "SendJointPosition",
+                args=(
+                    target.tolist(),
+                    [0.0] * 7,
+                    [float(max_velocity)] * 7,
+                    [float(max_acceleration)] * 7,
+                ),
+            )
 
     def rebase_from_measurement(self, side: str) -> np.ndarray:
         """Update the daemon's safe target without issuing an RDK command."""

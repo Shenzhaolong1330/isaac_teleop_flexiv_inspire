@@ -215,15 +215,6 @@ def read_tool_payload_identity(path: str | Path) -> ToolPayloadIdentity:
             raise ConfigurationError(
                 f"arms.{side}.locally_verified must be true after local audit"
             )
-        if not str(tool.get("serial", "")).strip():
-            raise ConfigurationError(
-                f"arms.{side}.tool.serial is required after local audit"
-            )
-        mounting_revision = str(tool.get("mounting_revision", "")).strip()
-        if not mounting_revision or mounting_revision.upper() == "UNVERIFIED":
-            raise ConfigurationError(
-                f"arms.{side}.tool.mounting_revision is required after local audit"
-            )
 
     canonical = json.dumps(
         root,

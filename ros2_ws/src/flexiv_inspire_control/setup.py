@@ -31,8 +31,11 @@ setup(
         "console_scripts": [
             "control_bridge = flexiv_inspire_control.node:main",
             "authorize_control = flexiv_inspire_control.authorize_control:main",
+            "authorize_home = flexiv_inspire_control.authorize_home:main",
+            "home = flexiv_inspire_control.authorize_home:request_main",
             "zero_ft_local = flexiv_inspire_control.zero_ft_local:main",
             "teleop_input = flexiv_inspire_control.teleop_input_node:main",
+            "manus_calibrate = flexiv_inspire_control.manus_calibration:main",
         ],
     },
 )

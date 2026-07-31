@@ -11,6 +11,7 @@ from flexiv_rdk_daemon.server import (
     DaemonInterlock,
     HandObservationCache,
     LocalControlAuthorization,
+    LocalHomeAuthorization,
     LocalZeroAuthorization,
     RDKRequestDispatcher,
 )
@@ -37,6 +38,16 @@ class TokenAuthority:
         self.consumed.append((token, session_id, source))
 
 
+class HomeTokenAuthority:
+    def __init__(self) -> None:
+        self.consumed = 0
+
+    def consume(self, token: str, *, session_id: str) -> None:
+        if token != "home-token" or session_id != "session":
+            raise PermissionError("bad Home token")
+        self.consumed += 1
+
+
 def dispatcher():
     backend = MockBackend()
     interlock = DaemonInterlock()
@@ -49,6 +60,7 @@ def dispatcher():
         hands,
         interlock,
         control_authorizations=TokenAuthority(),
+        home_authorizations=HomeTokenAuthority(),
         watchdog_period_s=0.001,
     )
     return value, backend
@@ -61,6 +73,8 @@ def command(source: str, sequence: int, ttl_s: float = 0.05):
         "max_angular_velocity": 0.05,
         "max_linear_acceleration": 0.05,
         "max_angular_acceleration": 0.1,
+        "cartesian_stiffness": [1200.0, 1200.0, 1200.0, 80.0, 80.0, 80.0],
+        "cartesian_damping_ratio": [0.7] * 6,
     }
     return {
         "session_id": "session",
@@ -74,6 +88,30 @@ def command(source: str, sequence: int, ttl_s: float = 0.05):
         "local_permission": True,
         "physical_pedal": True,
         "local_arm_token": "token",
+    }
+
+
+def home_command(
+    sequence: int,
+    *,
+    target: float = 0.0,
+    physical_pedal: bool = True,
+) -> dict:
+    return {
+        "session_id": "session",
+        "request_sequence": str(sequence),
+        "expires_monotonic_ns": str(time.monotonic_ns() + 100_000_000),
+        "left_joint_positions": [target] * 7,
+        "right_joint_positions": [target] * 7,
+        "max_velocity_rad_s": 0.5,
+        "max_acceleration_rad_s2": 1.0,
+        "tolerance_rad": 0.01,
+        "timeout_s": 5.0,
+        "safety_validated": True,
+        "local_permission": True,
+        "physical_pedal": physical_pedal,
+        "collision_clear": True,
+        "local_authorization_token": "home-token",
     }
 
 
@@ -140,6 +178,89 @@ def test_local_authorization_is_single_use(monkeypatch) -> None:
     authority.consume(token, session_id="session", source="teleop")
     with pytest.raises(PermissionError):
         authority.consume(token, session_id="session", source="teleop")
+
+
+def test_home_authorization_requires_separate_confirmation(monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "peer_has_local_tty", lambda pid: True)
+    authority = LocalHomeAuthorization()
+    with pytest.raises(PermissionError):
+        authority.mint(
+            pid=10,
+            session_id="session",
+            confirmation="FLEXIV-CONTROL-ARM",
+        )
+    token, _ = authority.mint(
+        pid=10,
+        session_id="session",
+        confirmation="FLEXIV-HOME-MOVE",
+    )
+    authority.consume(token, session_id="session")
+
+
+def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
+    value, backend = dispatcher()
+    kind, response = value(
+        "home_command", 1, home_command(1), (777, 0, 0)
+    )
+    assert kind == "home_result"
+    assert response["accepted"] and response["completed"]
+    for side in ("left", "right"):
+        assert (side, "joint_position_mode") in backend.events
+        assert (side, "send_joint_position") in backend.events
+        assert (side, "cartesian_mode") in backend.events
+        assert (side, "send_hold") in backend.events
+    assert not value.hold_latched
+
+
+def test_home_does_not_require_pedal_and_reuses_process_session_lease() -> None:
+    value, _ = dispatcher()
+    first = home_command(1, physical_pedal=False)
+    _, first_response = value("home_command", 1, first, (777, 0, 0))
+    second = home_command(2, physical_pedal=False)
+    second["local_authorization_token"] = ""
+    _, second_response = value("home_command", 2, second, (777, 0, 0))
+
+    assert first_response["accepted"] and first_response["completed"]
+    assert second_response["accepted"] and second_response["completed"]
+
+
+def test_home_session_lease_is_revoked_when_bridge_disconnects() -> None:
+    value, _ = dispatcher()
+    value("home_command", 1, home_command(1), (780, 0, 0))
+    value.peer_disconnected((780, 0, 0))
+    retry = home_command(2)
+    retry["local_authorization_token"] = ""
+
+    with pytest.raises(PermissionError, match="bad Home token"):
+        value("home_command", 2, retry, (780, 0, 0))
+
+
+def test_home_watchdog_stops_joint_motion_without_keepalive() -> None:
+    value, backend = dispatcher()
+    value.start_watchdog()
+    _, response = value(
+        "home_command", 1, home_command(1, target=0.2), (778, 0, 0)
+    )
+    assert response["accepted"] and not response["completed"]
+    deadline = time.monotonic() + 0.5
+    while not value.hold_latched and time.monotonic() < deadline:
+        time.sleep(0.002)
+    value.close()
+    assert value.hold_latched
+    assert ("left", "cartesian_mode") in backend.events
+    assert ("right", "cartesian_mode") in backend.events
+
+
+def test_cartesian_command_applies_impedance_before_motion() -> None:
+    value, backend = dispatcher()
+    _, response = value(
+        "cartesian_command", 1, command("teleop", 1), (779, 0, 0)
+    )
+    assert response["accepted"]
+    for side in ("left", "right"):
+        impedance = backend.events.index((side, "set_cartesian_impedance"))
+        motion = backend.events.index((side, "send_cartesian"))
+        assert impedance < motion
 
 
 class CaptureEmitter:

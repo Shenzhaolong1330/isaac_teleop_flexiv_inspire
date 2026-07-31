@@ -231,6 +231,32 @@ class LocalControlAuthorization:
         self._inner.consume(token, binding=(session_id, source))
 
 
+class LocalHomeAuthorization:
+    """One-shot bootstrap token for a process-bound Home session lease."""
+
+    CONFIRMATION = "FLEXIV-HOME-MOVE"
+
+    def __init__(self, lifetime_s: float = 30.0) -> None:
+        self._inner = _LocalAuthorization(lifetime_s)
+
+    def mint(
+        self,
+        *,
+        pid: int,
+        session_id: str,
+        confirmation: str,
+    ) -> tuple[str, int]:
+        return self._inner.mint(
+            pid=pid,
+            confirmation=confirmation,
+            expected_confirmation=self.CONFIRMATION,
+            binding=(session_id,),
+        )
+
+    def consume(self, token: str, *, session_id: str) -> None:
+        self._inner.consume(token, binding=(session_id,))
+
+
 class RDKRequestDispatcher:
     """Last-line RDK safety supervisor.
 
@@ -249,6 +275,7 @@ class RDKRequestDispatcher:
         observe_provider: Callable[[], Any] | None = None,
         zero_authorizations: LocalZeroAuthorization | None = None,
         control_authorizations: LocalControlAuthorization | None = None,
+        home_authorizations: LocalHomeAuthorization | None = None,
         deviceio_emitter: Any | None = None,
         watchdog_period_s: float = 0.005,
     ) -> None:
@@ -259,10 +286,19 @@ class RDKRequestDispatcher:
         self._observe_provider = observe_provider or backend.observe_both
         self._zero_authorizations = zero_authorizations or LocalZeroAuthorization()
         self._control_authorizations = control_authorizations or LocalControlAuthorization()
+        self._home_authorizations = home_authorizations or LocalHomeAuthorization()
         self._deviceio_emitter = deviceio_emitter
         self._deviceio_sequence = {"left": 0, "right": 0}
         self._last_command_sequence: dict[str, int] = {}
+        self._last_home_sequence = -1
         self._active = False
+        self._home_active = False
+        self._home_started_ns = 0
+        self._home_timeout_ns = 0
+        self._home_signature: tuple[object, ...] | None = None
+        self._home_authorized_session: str | None = None
+        self._home_authorized_owner_pid: int | None = None
+        self._home_authorized_generation: int | None = None
         self._active_source: str | None = None
         self._active_session: str | None = None
         self._owner_pid: int | None = None
@@ -320,6 +356,8 @@ class RDKRequestDispatcher:
         with self._lock:
             if self._active and self._owner_pid == pid:
                 self._latch_hold_locked("command_peer_disconnected")
+            if self._home_authorized_owner_pid == pid:
+                self._clear_home_authorization_locked()
 
     def __call__(
         self,
@@ -361,10 +399,14 @@ class RDKRequestDispatcher:
             }
         if kind == "authorize_control":
             return self._authorize_control(pid, payload)
+        if kind == "authorize_home":
+            return self._authorize_home(pid, payload)
         if kind == "zero_ft":
             return self._zero_ft_request(payload)
         if kind == "cartesian_command":
             return self._cartesian_command(payload, owner_pid=pid)
+        if kind == "home_command":
+            return self._home_command(payload, owner_pid=pid)
         if kind == "hold":
             return self._hold(sequence, str(payload.get("reason", "hold")))
         raise ValueError(f"packet kind {kind!r} is not valid as a request")
@@ -430,7 +472,39 @@ class RDKRequestDispatcher:
                 self._command_deadline_ns = 0
                 self._hold_latched = False
                 self._hold_reason = ""
+                self._last_command_sequence.pop(source, None)
         return "authorize_control_result", {
+            "authorized": True,
+            "one_time_token": token,
+            "expires_monotonic_ns": str(expires),
+            "reason": "local_tty_confirmed",
+        }
+
+    def _authorize_home(
+        self, pid: int, payload: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        session = str(payload.get("session_id", ""))
+        token, expires = self._home_authorizations.mint(
+            pid=pid,
+            session_id=session,
+            confirmation=str(payload.get("operator_confirmation", "")),
+        )
+        if bool(payload.get("clear_hold_latched", False)):
+            with self._lock:
+                if not self._ft_zero.is_zeroed_for(session):
+                    raise PermissionError(
+                        "cannot clear hold before this session is F/T-zeroed"
+                    )
+                if self._active:
+                    raise RuntimeError("cannot clear hold while motion is active")
+                self._active_source = None
+                self._active_session = None
+                self._owner_pid = None
+                self._command_deadline_ns = 0
+                self._hold_latched = False
+                self._hold_reason = ""
+                self._last_home_sequence = -1
+        return "authorize_home_result", {
             "authorized": True,
             "one_time_token": token,
             "expires_monotonic_ns": str(expires),
@@ -448,6 +522,7 @@ class RDKRequestDispatcher:
         with self._lock:
             if self._active:
                 raise RuntimeError("cannot zero F/T while a command source is active")
+            self._clear_home_authorization_locked()
             self._hold_latched = True
             self._hold_reason = "maintenance"
         request = ZeroFTRequest(
@@ -604,10 +679,14 @@ class RDKRequestDispatcher:
                 raise
         return self._ack(source_sequence, True, "sent")
 
-    @staticmethod
     def _validate_target(
-        side: str, target: object
-    ) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+        self, side: str, target: object
+    ) -> tuple[
+        np.ndarray,
+        tuple[float, float, float, float],
+        np.ndarray,
+        np.ndarray,
+    ]:
         if not isinstance(target, dict):
             raise ValueError(f"{side} Cartesian target is missing")
         pose = np.asarray(target.get("tcp_pose_rdk", []), dtype=np.float64).reshape(-1)
@@ -628,14 +707,50 @@ class RDKRequestDispatcher:
             for value, maximum in zip(limits, maxima, strict=True)
         ):
             raise ValueError(f"{side} Cartesian safety limit is invalid")
-        return pose, limits
+        stiffness = np.asarray(
+            target.get("cartesian_stiffness", []), dtype=np.float64
+        ).reshape(-1)
+        damping_ratio = np.asarray(
+            target.get("cartesian_damping_ratio", []), dtype=np.float64
+        ).reshape(-1)
+        if stiffness.shape != (6,) or not np.all(np.isfinite(stiffness)):
+            raise ValueError(f"{side} Cartesian stiffness must be a finite 6-vector")
+        if damping_ratio.shape != (6,) or not np.all(np.isfinite(damping_ratio)):
+            raise ValueError(
+                f"{side} Cartesian damping ratio must be a finite 6-vector"
+            )
+        nominal = np.asarray(
+            self._backend.nominal_cartesian_stiffness(side), dtype=np.float64
+        )
+        if nominal.shape != (6,) or np.any(stiffness < 0.0) or np.any(
+            stiffness > nominal
+        ):
+            raise ValueError(
+                f"{side} Cartesian stiffness exceeds RobotInfo.K_x_nom"
+            )
+        if np.any(damping_ratio < 0.3) or np.any(damping_ratio > 0.8):
+            raise ValueError(
+                f"{side} Cartesian damping ratio must be in [0.3,0.8]"
+            )
+        return pose, limits, stiffness, damping_ratio
 
     def _send_validated_target(
         self,
         side: str,
-        validated: tuple[np.ndarray, tuple[float, float, float, float]],
+        validated: tuple[
+            np.ndarray,
+            tuple[float, float, float, float],
+            np.ndarray,
+            np.ndarray,
+        ],
     ) -> None:
-        pose, limits = validated
+        pose, limits, stiffness, damping_ratio = validated
+        self._backend.set_cartesian_impedance(
+            side,
+            stiffness,
+            damping_ratio,
+            local_authorized=True,
+        )
         self._backend.send_cartesian_target(
             side,
             pose,
@@ -645,6 +760,266 @@ class RDKRequestDispatcher:
             max_angular_acceleration=limits[3],
             local_authorized=True,
         )
+
+    def _home_command(
+        self,
+        payload: dict[str, Any],
+        *,
+        owner_pid: int,
+    ) -> tuple[str, dict[str, Any]]:
+        """Start or keep alive one guarded, configured dual-arm Home motion."""
+
+        now = time.monotonic_ns()
+        session_id = str(payload.get("session_id", ""))
+        sequence = self._uint64(payload.get("request_sequence"), "request_sequence")
+        expires = self._uint64(
+            payload.get("expires_monotonic_ns"), "expires_monotonic_ns"
+        )
+        if self._interlock.maintenance_active:
+            return self._home_result(False, False, "maintenance_active")
+        if not self._ft_zero.is_zeroed_for(session_id):
+            return self._home_result(False, False, "ft_not_zeroed_for_session")
+        if self._interlock.ready_generation != self._backend.connection_generation:
+            return self._home_result(
+                False, False, "rdk_connection_generation_changed"
+            )
+        for field, reason in (
+            ("safety_validated", "safety_not_validated"),
+            ("local_permission", "local_permission_missing"),
+            ("collision_clear", "collision_not_clear"),
+        ):
+            if not bool(payload.get(field, False)):
+                with self._lock:
+                    if self._home_active:
+                        self._latch_hold_locked(reason, force_hardware_hold=True)
+                return self._home_result(False, False, reason)
+        if expires <= now:
+            return self._home_result(False, False, "home_keepalive_expired")
+        if expires - now > 250_000_000:
+            return self._home_result(
+                False, False, "home_keepalive_ttl_exceeds_250_ms"
+            )
+        try:
+            targets, limits, signature = self._validate_home(payload)
+        except Exception:
+            with self._lock:
+                if self._home_active:
+                    self._latch_hold_locked(
+                        "invalid_home_command", force_hardware_hold=True
+                    )
+            raise
+        with self._lock:
+            just_started = False
+            if self._hold_latched:
+                return self._home_result(
+                    False, False, f"hold_latched:{self._hold_reason}"
+                )
+            if self._active and not self._home_active:
+                return self._home_result(False, False, "command_source_active")
+            if self._home_active:
+                if owner_pid != self._owner_pid or session_id != self._active_session:
+                    self._latch_hold_locked(
+                        "home_owner_or_session_changed",
+                        force_hardware_hold=True,
+                    )
+                    return self._home_result(
+                        False, False, "home_owner_or_session_changed"
+                    )
+                if signature != self._home_signature:
+                    self._latch_hold_locked(
+                        "home_configuration_changed",
+                        force_hardware_hold=True,
+                    )
+                    return self._home_result(
+                        False, False, "home_configuration_changed"
+                    )
+                if sequence <= self._last_home_sequence:
+                    self._latch_hold_locked(
+                        "non_monotonic_home_sequence",
+                        force_hardware_hold=True,
+                    )
+                    return self._home_result(
+                        False, False, "non_monotonic_home_sequence"
+                    )
+            else:
+                generation = self._backend.connection_generation
+                lease_active = (
+                    session_id == self._home_authorized_session
+                    and owner_pid == self._home_authorized_owner_pid
+                    and generation == self._home_authorized_generation
+                )
+                if not lease_active:
+                    self._home_authorizations.consume(
+                        str(payload.get("local_authorization_token", "")),
+                        session_id=session_id,
+                    )
+                sample = self._backend.observe_both()
+                for side in ("left", "right"):
+                    arm = getattr(sample, side)
+                    if not arm.connected or arm.fault:
+                        raise RuntimeError(f"{side} arm is not healthy for Home")
+                    if np.max(np.abs(arm.dq)) > 0.05:
+                        raise RuntimeError(f"{side} arm must be stationary before Home")
+                    if not self._backend.operational(side):
+                        raise RuntimeError(f"{side} arm is not operational")
+                if not lease_active:
+                    self._home_authorized_session = session_id
+                    self._home_authorized_owner_pid = owner_pid
+                    self._home_authorized_generation = generation
+                self._active = True
+                self._home_active = True
+                self._active_source = "home"
+                self._active_session = session_id
+                self._owner_pid = owner_pid
+                self._home_timeout_ns = int(limits[3] * 1e9)
+                self._home_signature = signature
+                # Mark active before the first arm write so partial mode/command
+                # transitions are always stopped by the same hold path.
+                try:
+                    for side in ("left", "right"):
+                        self._backend.switch_joint_position_mode(
+                            side, local_console=True
+                        )
+                    for side in ("left", "right"):
+                        self._backend.send_joint_position(
+                            side,
+                            targets[side],
+                            max_velocity=limits[0],
+                            max_acceleration=limits[1],
+                            local_authorized=True,
+                        )
+                except Exception:
+                    self._latch_hold_locked(
+                        "home_start_failure", force_hardware_hold=True
+                    )
+                    raise
+                just_started = True
+                now = time.monotonic_ns()
+                self._home_started_ns = now
+            self._last_home_sequence = sequence
+            self._command_deadline_ns = (
+                now + 150_000_000 if just_started else expires
+            )
+            if now - self._home_started_ns > self._home_timeout_ns:
+                self._latch_hold_locked("home_timeout", force_hardware_hold=True)
+                return self._home_result(False, False, "home_timeout")
+            sample = self._backend.observe_both()
+            errors = [
+                float(np.max(np.abs(getattr(sample, side).q - targets[side])))
+                for side in ("left", "right")
+            ]
+            max_error = max(errors)
+            max_speed = max(
+                float(np.max(np.abs(getattr(sample, side).dq)))
+                for side in ("left", "right")
+            )
+            if max_error <= limits[2] and max_speed <= 0.02:
+                cleanup_errors = self._complete_home_locked()
+                if cleanup_errors:
+                    return self._home_result(
+                        False,
+                        False,
+                        f"home_completion_hold_failed:{';'.join(cleanup_errors)}",
+                        max_error,
+                    )
+                return self._home_result(
+                    True, True, "home_complete", max_error
+                )
+        return self._home_result(True, False, "home_in_progress", max_error)
+
+    def _clear_home_authorization_locked(self) -> None:
+        self._home_authorized_session = None
+        self._home_authorized_owner_pid = None
+        self._home_authorized_generation = None
+
+    def _validate_home(
+        self, payload: dict[str, Any]
+    ) -> tuple[
+        dict[str, np.ndarray],
+        tuple[float, float, float, float],
+        tuple[object, ...],
+    ]:
+        targets: dict[str, np.ndarray] = {}
+        for side in ("left", "right"):
+            target = np.asarray(
+                payload.get(f"{side}_joint_positions", []),
+                dtype=np.float64,
+            ).reshape(-1)
+            if target.shape != (7,) or not np.all(np.isfinite(target)):
+                raise ValueError(f"{side} Home target must be a finite 7-vector")
+            lower, upper = self._backend.joint_position_limits(side)
+            if np.any(target < lower) or np.any(target > upper):
+                raise ValueError(
+                    f"{side} Home target exceeds RobotInfo joint limits"
+                )
+            targets[side] = target
+        max_velocity = float(payload.get("max_velocity_rad_s", 0.0))
+        max_acceleration = float(payload.get("max_acceleration_rad_s2", 0.0))
+        tolerance = float(payload.get("tolerance_rad", 0.0))
+        timeout = float(payload.get("timeout_s", 0.0))
+        if not 0.0 < max_velocity <= 0.75:
+            raise ValueError("Home max velocity must be in (0,0.75] rad/s")
+        if not 0.0 < max_acceleration <= 2.0:
+            raise ValueError("Home max acceleration must be in (0,2.0] rad/s^2")
+        if not 0.0 < tolerance <= 0.1:
+            raise ValueError("Home tolerance must be in (0,0.1] rad")
+        if not 1.0 <= timeout <= 60.0:
+            raise ValueError("Home timeout must be in [1,60] seconds")
+        limits = (max_velocity, max_acceleration, tolerance, timeout)
+        signature: tuple[object, ...] = (
+            tuple(float(value) for value in targets["left"]),
+            tuple(float(value) for value in targets["right"]),
+            *limits,
+        )
+        return targets, limits, signature
+
+    def _complete_home_locked(self) -> list[str]:
+        errors: list[str] = []
+        for side in ("left", "right"):
+            try:
+                # SwitchMode stops ongoing motion before transitioning. Stop
+                # both arms first, then issue either arm's measured hold.
+                self._backend.switch_cartesian_mode(
+                    side, local_console=True
+                )
+            except Exception as exc:
+                errors.append(f"{side}:stop:{type(exc).__name__}:{exc}")
+        for side in ("left", "right"):
+            try:
+                self._backend.send_hold_from_measurement(
+                    side, local_authorized=True
+                )
+            except Exception as exc:
+                errors.append(f"{side}:hold:{type(exc).__name__}:{exc}")
+        self._active = False
+        self._home_active = False
+        self._active_source = None
+        self._active_session = None
+        self._owner_pid = None
+        self._command_deadline_ns = 0
+        self._home_started_ns = 0
+        self._home_timeout_ns = 0
+        self._home_signature = None
+        self._hold_latched = bool(errors)
+        self._hold_reason = "home_completion_hold_failed" if errors else ""
+        return errors
+
+    @staticmethod
+    def _home_result(
+        accepted: bool,
+        completed: bool,
+        reason: str,
+        max_error: float = 0.0,
+    ) -> tuple[str, dict[str, Any]]:
+        return "home_result", {
+            "accepted": accepted,
+            "completed": completed,
+            "reason": reason,
+            "max_position_error_rad": float(max_error),
+            "applied_monotonic_ns": (
+                str(time.monotonic_ns()) if accepted else "0"
+            ),
+        }
 
     def _hold(self, sequence: int, reason: str) -> tuple[str, dict[str, Any]]:
         with self._lock:
@@ -658,13 +1033,31 @@ class RDKRequestDispatcher:
         self, reason: str, *, force_hardware_hold: bool = False
     ) -> list[str]:
         errors: list[str] = []
+        was_home = self._home_active
         if self._active or force_hardware_hold:
+            if was_home:
+                for side in ("left", "right"):
+                    try:
+                        self._backend.switch_cartesian_mode(
+                            side, local_console=True
+                        )
+                    except Exception as exc:
+                        errors.append(
+                            f"{side}:stop:{type(exc).__name__}:{exc}"
+                        )
             for side in ("left", "right"):
                 try:
-                    self._backend.send_hold_from_measurement(side, local_authorized=True)
+                    if was_home or self._active or force_hardware_hold:
+                        self._backend.send_hold_from_measurement(
+                            side, local_authorized=True
+                        )
                 except Exception as exc:
-                    errors.append(f"{side}:{type(exc).__name__}:{exc}")
+                    errors.append(f"{side}:hold:{type(exc).__name__}:{exc}")
         self._active = False
+        self._home_active = False
+        self._home_started_ns = 0
+        self._home_timeout_ns = 0
+        self._home_signature = None
         self._hold_latched = True
         self._hold_reason = reason
         self._command_deadline_ns = 0

@@ -110,6 +110,60 @@ def test_typed_codec_preserves_empty_observe_oneof_presence() -> None:
     assert payload == {}
 
 
+def test_typed_codec_roundtrips_home_and_cartesian_impedance_fields() -> None:
+    codec = TypedEnvelopeCodec.load()
+    home = {
+        "session_id": "session",
+        "request_sequence": "42",
+        "expires_monotonic_ns": "123456789",
+        "left_joint_positions": [0.0] * 7,
+        "right_joint_positions": [0.1] * 7,
+        "max_velocity_rad_s": 0.5,
+        "max_acceleration_rad_s2": 1.0,
+        "tolerance_rad": 0.01,
+        "timeout_s": 20.0,
+        "safety_validated": True,
+        "local_permission": True,
+        "physical_pedal": True,
+        "collision_clear": True,
+        "local_authorization_token": "token",
+    }
+    kind, _, decoded_home = codec.decode(codec.encode("home_command", 3, home))
+    assert kind == "home_command"
+    assert decoded_home["request_sequence"] == "42"
+    assert decoded_home["right_joint_positions"] == [0.1] * 7
+    target = {
+        "tcp_pose_rdk": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "max_linear_velocity": 0.05,
+        "max_angular_velocity": 0.15,
+        "max_linear_acceleration": 0.25,
+        "max_angular_acceleration": 0.5,
+        "cartesian_stiffness": [1200.0, 1200.0, 1200.0, 80.0, 80.0, 80.0],
+        "cartesian_damping_ratio": [0.7] * 6,
+    }
+    packet = codec.encode(
+        "cartesian_command",
+        4,
+        {
+            "session_id": "session",
+            "source": "teleop",
+            "source_sequence": "1",
+            "expires_monotonic_ns": "123456789",
+            "left": target,
+            "valid_mask": 1,
+            "safety_validated": True,
+            "local_permission": True,
+            "physical_pedal": True,
+            "local_arm_token": "token",
+        },
+    )
+    _, _, decoded_cartesian = codec.decode(packet)
+    assert decoded_cartesian["left"]["cartesian_stiffness"] == target[
+        "cartesian_stiffness"
+    ]
+    assert decoded_cartesian["left"]["cartesian_damping_ratio"] == [0.7] * 6
+
+
 def test_four_persistent_typed_clients_can_send_empty_observe(
     tmp_path: Path,
 ) -> None:
@@ -269,6 +323,10 @@ def test_client_reports_closed_connection_before_protobuf_decode(
         "authorize_zero_ft_result",
         "authorize_control",
         "authorize_control_result",
+        "authorize_home",
+        "authorize_home_result",
+        "home_command",
+        "home_result",
         "zero_ft",
         "zero_ft_result",
         "hold",

@@ -1,0 +1,12 @@
+# world_T_base transforms.  world is the midpoint of the two physical bases.
+schema_version: 1
+world_frame: world
+bases:
+  left:
+    frame_id: left_base
+    translation_m: [-0.25, 0.0, 0.0]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]
+  right:
+    frame_id: right_base
+    translation_m: [0.25, 0.0, 0.0]
+    rotation_xyzw: [0.0, 0.0, 0.0, 1.0]

@@ -90,6 +90,12 @@ MANUS_SMOKE_EXIT=124
 许可，因此没有许可阻塞，也没有修改或重试许可。`lsusb` 同时能看到
 MANUS Sensor Dongle。
 
+Flexiv/Inspire 运行链路使用仓库提供的
+`flexiv-inspire-xr-raw-source`，直接输出 `/xr_teleop/hand` 的
+left25+right25 原始 OpenXR Pose。它不实例化 NVIDIA Sharpa
+retargeter，所以不需要 Sharpa URDF；后级再用现场张开/握拳端点映射为
+Inspire 六路命令。
+
 ## 当前 OpenXR/Quest 状态
 
 smoke 没有启动 CloudXR/OpenXR runtime，所以插件明确降级为

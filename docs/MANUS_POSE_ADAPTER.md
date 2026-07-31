@@ -20,6 +20,12 @@
 CMC/MCP/IP 屈曲特征；拇指外展使用腕坐标系中的有符号掌骨方向角。
 这些特征只进入现场标定映射，不直接当作 Inspire 命令。
 
+这里不需要 Sharpa URDF：Sharpa 只属于 NVIDIA 示例的目标手模型。本项目
+没有把 MANUS 关节先变成 Sharpa 关节，而是把原始 OpenXR 特征直接标定为
+Inspire 的六个执行器端点。当前映射也不做 Inspire 手部 IK，因此不需要
+Inspire URDF；若将来改为模型 IK，目标模型才应换成经过核对的 Inspire
+URDF。
+
 `ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml`
 默认 `calibrated: false`。默认
 空 `manus_calibration` 参数时系统仅允许手臂遥操作，手的 valid mask
@@ -28,3 +34,7 @@ CMC/MCP/IP 屈曲特征；拇指外展使用腕坐标系中的有符号掌骨方
 `manus_calibration` 指向该文件。错误 pose 数、零 Pose、NaN/Inf、
 非法四元数、缺失特征、未知标定字段或超时都会 fail closed，不会沿用
 上一帧手命令。
+
+现场工具 `flexiv-inspire-manus-calibrate` 分两次采集双手
+张开/握拳各 90 帧，以中位数生成左右手独立端点。完整命令见
+`docs/RUNBOOK.md` 4.4。

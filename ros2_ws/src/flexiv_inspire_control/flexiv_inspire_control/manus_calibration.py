@@ -1,0 +1,197 @@
+"""Capture and finalize site-specific MANUS-to-Inspire endpoint calibration."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+from datetime import datetime, timezone
+from pathlib import Path
+import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PoseArray
+from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+import yaml
+
+from .manus_pose import pose_message_values, split_bimanual_pose_array
+
+
+CAPTURE_SCHEMA = "MANUS_OPENXR_FEATURE_CAPTURE_V1"
+CALIBRATION_SOURCE = "ISAAC_XR_HAND_POSEARRAY_LEFT25_RIGHT25"
+
+
+def _write_new_yaml(path: Path, document: dict) -> None:
+    target = path.expanduser().resolve()
+    if target.exists():
+        raise FileExistsError(f"refusing to overwrite existing file: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+    )
+
+
+def summarize_samples(
+    samples: list[dict[str, dict[str, float]]], pose_name: str
+) -> dict:
+    if pose_name not in {"open", "closed"}:
+        raise ValueError("pose_name must be open or closed")
+    if not samples:
+        raise ValueError("at least one valid MANUS sample is required")
+    output = {
+        "schema": CAPTURE_SCHEMA,
+        "pose": pose_name,
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "sample_count": len(samples),
+        "sides": {},
+    }
+    for side in ("left", "right"):
+        names = set(samples[0][side])
+        if any(set(sample[side]) != names for sample in samples):
+            raise ValueError(f"{side} feature sets differ between samples")
+        output["sides"][side] = {}
+        for name in sorted(names):
+            values = np.asarray(
+                [sample[side][name] for sample in samples], dtype=np.float64
+            )
+            output["sides"][side][name] = {
+                "median": float(np.median(values)),
+                "minimum": float(np.min(values)),
+                "maximum": float(np.max(values)),
+            }
+    return output
+
+
+def _capture_value(document: dict, side: str, feature: str) -> float:
+    return float(document["sides"][side][feature]["median"])
+
+
+def build_calibration(template: dict, opened: dict, closed: dict) -> dict:
+    for name, document, expected_pose in (
+        ("open", opened, "open"),
+        ("closed", closed, "closed"),
+    ):
+        if (
+            document.get("schema") != CAPTURE_SCHEMA
+            or document.get("pose") != expected_pose
+        ):
+            raise ValueError(f"{name} capture has the wrong schema or pose")
+    if (
+        template.get("schema_version") != 1
+        or template.get("source_format") != CALIBRATION_SOURCE
+    ):
+        raise ValueError("unsupported MANUS calibration template")
+    result = copy.deepcopy(template)
+    result["calibrated"] = True
+    result["calibration"] = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "open_samples": int(opened["sample_count"]),
+        "closed_samples": int(closed["sample_count"]),
+    }
+    for side in ("left", "right"):
+        for actuator, channel in result["sides"][side].items():
+            sources = [str(value) for value in channel["sources"]]
+            weights = [float(value) for value in channel["weights"]]
+            bias = float(channel.get("bias", 0.0))
+            open_value = bias + sum(
+                weight * _capture_value(opened, side, source)
+                for source, weight in zip(sources, weights, strict=True)
+            )
+            closed_value = bias + sum(
+                weight * _capture_value(closed, side, source)
+                for source, weight in zip(sources, weights, strict=True)
+            )
+            if abs(closed_value - open_value) < 0.03:
+                raise ValueError(
+                    f"{side}.{actuator} open/closed separation is too small"
+                )
+            channel["source_open"] = float(open_value)
+            channel["source_closed"] = float(closed_value)
+    return result
+
+
+class _CaptureNode(Node):
+    def __init__(self, topic: str, frame_count: int) -> None:
+        super().__init__("manus_calibration_capture")
+        self.samples: list[dict[str, dict[str, float]]] = []
+        self.frame_count = frame_count
+        self.create_subscription(
+            PoseArray, topic, self._on_pose, qos_profile_sensor_data
+        )
+
+    def _on_pose(self, message: PoseArray) -> None:
+        if len(self.samples) >= self.frame_count:
+            return
+        try:
+            self.samples.append(
+                split_bimanual_pose_array(pose_message_values(message.poses))
+            )
+        except Exception as exc:
+            self.get_logger().warning(
+                f"discarding invalid MANUS frame: {exc}",
+                throttle_duration_sec=1.0,
+            )
+
+
+def capture(
+    *, topic: str, pose_name: str, frames: int, timeout_s: float
+) -> dict:
+    if frames < 10:
+        raise ValueError("frames must be at least 10")
+    if timeout_s <= 0.0:
+        raise ValueError("timeout must be positive")
+    rclpy.init(args=[])
+    node = _CaptureNode(topic, frames)
+    deadline = time.monotonic() + timeout_s
+    try:
+        while len(node.samples) < frames and time.monotonic() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+        if len(node.samples) < frames:
+            raise TimeoutError(
+                f"received {len(node.samples)}/{frames} valid MANUS frames"
+            )
+        return summarize_samples(node.samples, pose_name)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Calibrate raw /xr_teleop/hand poses for Inspire actuators"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    capture_parser = subparsers.add_parser("capture")
+    capture_parser.add_argument("--pose", choices=("open", "closed"), required=True)
+    capture_parser.add_argument("--output", type=Path, required=True)
+    capture_parser.add_argument("--topic", default="/xr_teleop/hand")
+    capture_parser.add_argument("--frames", type=int, default=90)
+    capture_parser.add_argument("--timeout", type=float, default=20.0)
+    finalize_parser = subparsers.add_parser("finalize")
+    finalize_parser.add_argument("--open", type=Path, required=True)
+    finalize_parser.add_argument("--closed", type=Path, required=True)
+    finalize_parser.add_argument("--template", type=Path, required=True)
+    finalize_parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+
+    if args.command == "capture":
+        document = capture(
+            topic=args.topic,
+            pose_name=args.pose,
+            frames=args.frames,
+            timeout_s=args.timeout,
+        )
+        _write_new_yaml(args.output, document)
+    else:
+        template = yaml.safe_load(args.template.expanduser().read_text())
+        opened = yaml.safe_load(args.open.expanduser().read_text())
+        closed = yaml.safe_load(args.closed.expanduser().read_text())
+        _write_new_yaml(
+            args.output, build_calibration(template, opened, closed)
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

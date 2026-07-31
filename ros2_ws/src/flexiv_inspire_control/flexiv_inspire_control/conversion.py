@@ -24,6 +24,7 @@ from isaac_teleop_core.rotation6d import (
     rdk_pose_to_ros_pose,
     ros_pose_to_rdk_pose,
 )
+from .frames import BaseTransform, world_delta_target_to_rdk
 
 
 def duration_ns(message: Any) -> int:
@@ -90,6 +91,7 @@ def cartesian_target_from_point(
     max_translation_step_m: float,
     max_rotation_step_rad: float,
     previous_output_quaternion_xyzw: np.ndarray | None,
+    world_from_base: BaseTransform | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     if side not in {"left", "right"}:
         raise ValueError("side must be left or right")
@@ -120,5 +122,10 @@ def cartesian_target_from_point(
         new_rotation,
         previous=(previous_quaternion if previous_output_quaternion_xyzw is None else previous_output_quaternion_xyzw),
     )
-    target = ros_pose_to_rdk_pose(position + delta_xyz, output_quaternion)
-    return target, output_quaternion
+    if world_from_base is None:
+        target = ros_pose_to_rdk_pose(position + delta_xyz, output_quaternion)
+        return target, output_quaternion
+    return world_delta_target_to_rdk(
+        previous_safe_pose_rdk, delta_xyz, new_rotation @ previous_rotation.T,
+        world_from_base, previous_output_quaternion_xyzw=previous_output_quaternion_xyzw,
+    )

@@ -987,7 +987,11 @@ class ControlBridge(Node):
             session_id = str(payload.get("session_id", "")).strip()
             if session_id != self._session_id:
                 raise ValueError("Home request session mismatch")
-            if source not in {"episode_rerecord", "episode_controller"}:
+            if source not in {
+                "episode_rerecord",
+                "episode_controller",
+                "replay_controller",
+            }:
                 raise ValueError("unsupported contextual Home source")
             if not request_id or len(request_id) > 128:
                 raise ValueError("Home request_id must contain 1..128 characters")

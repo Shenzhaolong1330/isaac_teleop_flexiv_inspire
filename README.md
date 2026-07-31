@@ -157,6 +157,19 @@ output layout.
 recording and runtime fragments. Generated runtime snapshots are not operator
 configuration and no `artifacts/site/` directory is required.
 
+Dataset playback is configured separately in `config/playback.yaml`:
+
+```bash
+./scripts/visualize.sh  # offline DeviceIO MCAP -> Rerun; robot never moves
+./scripts/replay.sh     # guarded, timing-faithful execution on the robot
+```
+
+Visualization has no ROS publishers or hardware connections. Hardware replay
+is disabled by default, accepts only recorded `sent_command` samples, Homes
+first, and remains behind the existing local authorization, physical pedal,
+F/T-zero, collision, health, limit, freshness, and source-exclusivity gates.
+See [`docs/PLAYBACK.md`](docs/PLAYBACK.md).
+
 ## Recording, visualization, and policy
 
 The low-level recording entry point is `isaac-flexiv-episode`; it requires

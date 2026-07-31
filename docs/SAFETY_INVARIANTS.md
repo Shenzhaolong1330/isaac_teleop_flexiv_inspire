@@ -42,3 +42,8 @@ warning.
 11. Device and host receive timestamps, sequence numbers, validity, and age are
    retained. Missing data is invalid, never a zero-valued observation.
 12. The legacy workspace is neither sourced, imported, linked, nor executed.
+13. Offline visualization never initializes ROS or publishes a topic. Hardware
+   replay consumes only recorded `sent_command` DeviceIO records, rebuilds
+   every command with the current session/time/TTL, starts from a verified
+   configured Home, cannot run faster than the recording, and uses the normal
+   replay-source gates. Raw ROS bag playback is not a hardware replay path.

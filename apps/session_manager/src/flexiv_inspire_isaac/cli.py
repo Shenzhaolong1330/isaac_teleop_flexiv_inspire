@@ -127,10 +127,8 @@ def _parser() -> argparse.ArgumentParser:
     xr_group.add_argument("--no-xr", action="store_true", help="keep RTP bridge available but do not start the Quest receiver")
     sub.add_parser("stop", help="stop services started by record")
     sub.add_parser("collect", help="run the configured multi-episode collection in the foreground")
-    visualize = sub.add_parser("visualize", help="start read-only live Rerun")
-    visualize.add_argument("--save", default="")
-    replay = sub.add_parser("replay", help="offline replay inspection only; never moves hardware")
-    replay.add_argument("--episode", required=True, type=Path)
+    sub.add_parser("visualize", help="play the configured dataset in read-only Rerun")
+    sub.add_parser("replay", help="guarded hardware replay from config/playback.yaml")
     xr_view = sub.add_parser("xr-view", help="one-command IsaacTeleop camera display in Quest/monitor")
     xr_view.add_argument("--dry-run", action="store_true")
     sub.add_parser("xr-doctor", help="check ffmpeg, Docker, IsaacTeleop and CloudXR prerequisites")
@@ -202,16 +200,12 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         print("stop requested; captured episodes are retained"); return 0
     if args.operation == "visualize":
-        command = ["flexiv-inspire-rerun"] + (["--save", args.save] if args.save else ["--spawn"])
-        return subprocess.call(command)
-    episode = args.episode.expanduser().resolve(strict=True)
-    manifest = episode / "manifest.json"
-    if not manifest.is_file():
-        raise SystemExit("--episode must be an episode directory containing manifest.json")
-    data = json.loads(manifest.read_text(encoding="utf-8"))
-    print(json.dumps({"mode": "offline-shadow-replay", "hardware_writes": False, "episode": str(episode),
-                      "completed": bool(data.get("completed")), "reason": data.get("completion_reason", "")}, indent=2))
-    return 0
+        from flexiv_inspire_isaac.rerun_viz.offline import main as visualize_main
+
+        return visualize_main([])
+    from .replay import main as replay_main
+
+    return replay_main([])
 
 
 def _run_collection(config, rendered: dict[str, Path]) -> int:

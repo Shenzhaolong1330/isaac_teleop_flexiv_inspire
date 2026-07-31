@@ -348,6 +348,12 @@ ros2 topic hz /camera/head/color/frame
 Rerun 是 latest-only 可视化，不是记录真源。空 fault/hold、invalid timing
 和缺失流都应在界面中明确显示为已清除或无效，不能沿用旧值。
 
+这里是在线状态查看。完整 episode 的离线 Rerun 播放以及受控真机 Replay
+统一读取 `config/playback.yaml`，分别运行 `./scripts/visualize.sh` 和
+`./scripts/replay.sh`；真机条件和拒绝规则见
+[`PLAYBACK.md`](PLAYBACK.md)。禁止用 `ros2 bag play` 回放 episode，因为
+ROS bag 包含带历史授权上下文的控制 topic，而不是一个安全的执行接口。
+
 若清零前只想排障，可用：
 
 ```bash

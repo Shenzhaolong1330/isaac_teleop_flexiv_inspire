@@ -12,13 +12,16 @@ from flexiv_inspire_isaac.cameras.verify import DEFAULT_CONFIG as VERIFY_DEFAULT
 CONFIG = Path(__file__).parents[1] / "ros2_ws" / "src" / "flexiv_inspire_cameras" / "realsense_rgb.yaml"
 
 
-def test_three_camera_config_is_rgb_only_424x240_at_30():
+def test_three_camera_config_records_aligned_depth_and_pointcloud_at_30():
     cameras = load_camera_configs(CONFIG)
     assert set(cameras) == {"head", "left_wrist", "right_wrist"}
     assert len({camera.serial for camera in cameras.values()}) == 3
     for camera in cameras.values():
         assert (camera.width, camera.height, camera.fps) == (424, 240, 30)
-        assert not camera.depth_enabled
+        assert camera.depth_enabled
+        assert (camera.depth_width, camera.depth_height, camera.depth_fps) == (424, 240, 30)
+        assert camera.pointcloud_enabled is (camera.name == "head")
+        assert camera.pointcloud_stride == 2
         assert camera.jpeg_quality == 90
 
 

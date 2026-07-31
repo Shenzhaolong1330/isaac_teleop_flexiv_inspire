@@ -23,6 +23,7 @@ def main(args=None) -> int:
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from sensor_msgs.msg import CompressedImage
+    from sensor_msgs.msg import Image, PointCloud2, PointField
     from std_msgs.msg import String
     from flexiv_inspire_interfaces.msg import AcquisitionInfo, CameraFrame as CameraFrameMsg
 
@@ -43,6 +44,8 @@ def main(args=None) -> int:
             }
             self._status_queue: deque[CameraStatus] = deque(maxlen=100)
             self._image_publishers = {}
+            self._depth_publishers = {}
+            self._pointcloud_publishers = {}
             self._acquisition_publishers = {}
             self._frame_publishers = {}
             self._status_publishers = {}
@@ -53,6 +56,9 @@ def main(args=None) -> int:
                     f"{root}/image_raw/compressed",
                     qos_profile_sensor_data,
                 )
+                if self._configs[name].depth_enabled:
+                    self._depth_publishers[name] = self.create_publisher(Image, f"/camera/{name}/depth/image_rect_raw", qos_profile_sensor_data)
+                    self._pointcloud_publishers[name] = self.create_publisher(PointCloud2, f"/camera/{name}/depth/points", qos_profile_sensor_data)
                 self._frame_publishers[name] = self.create_publisher(
                     CameraFrameMsg, f"{root}/frame", qos_profile_sensor_data
                 )
@@ -87,8 +93,8 @@ def main(args=None) -> int:
             self.create_timer(0.002, self._drain)
             self._capture.start()
             self.get_logger().info(
-                "three independent RealSense RGB-only pipelines started; "
-                f"424x240@30, ROS JPEG90, DeviceIO mode={recording_mode}, depth disabled"
+                "three independent RealSense RGB+depth pipelines started; "
+                f"424x240@30, ROS JPEG90, DeviceIO mode={recording_mode}"
             )
 
         def destroy_node(self):
@@ -150,6 +156,22 @@ def main(args=None) -> int:
             image.format = f"jpeg; {frame.pixel_format}"
             image.data = frame.jpeg
             self._image_publishers[name].publish(image)
+            if frame.depth_z16 is not None:
+                depth = Image()
+                depth.header = image.header
+                depth.height, depth.width = frame.depth_height, frame.depth_width
+                depth.encoding, depth.is_bigendian = "16UC1", False
+                depth.step, depth.data = int(frame.depth_width) * 2, frame.depth_z16
+                self._depth_publishers[name].publish(depth)
+            if frame.pointcloud_xyz_f32 is not None:
+                cloud = PointCloud2()
+                cloud.header = image.header
+                cloud.height, cloud.width = frame.pointcloud_height, frame.pointcloud_width
+                cloud.fields = [PointField(name=axis, offset=index * 4, datatype=PointField.FLOAT32, count=1) for index, axis in enumerate(("x", "y", "z"))]
+                cloud.is_bigendian, cloud.point_step = False, 12
+                cloud.row_step = cloud.point_step * cloud.width
+                cloud.is_dense, cloud.data = False, frame.pointcloud_xyz_f32
+                self._pointcloud_publishers[name].publish(cloud)
 
             acquisition = AcquisitionInfo()
             _assign_time(acquisition.source_time, frame.source_time_ns)

@@ -26,6 +26,12 @@ class CameraConfig:
     pixel_format: str
     jpeg_quality: int
     depth_enabled: bool
+    depth_width: int | None = None
+    depth_height: int | None = None
+    depth_fps: int | None = None
+    pointcloud_enabled: bool = False
+    pointcloud_stride: int = 2
+    record_depth: bool = True
 
     def __post_init__(self) -> None:
         if not MIN_WIDTH <= self.width <= MAX_WIDTH:
@@ -37,7 +43,17 @@ class CameraConfig:
         if self.pixel_format.lower() not in {"rgb8", "bgr8"}:
             raise ValueError("camera stream must be RGB")
         if self.depth_enabled:
-            raise ValueError("depth is intentionally disabled in this system")
+            for value, name, minimum, maximum in (
+                (self.depth_width, "depth_width", MIN_WIDTH, MAX_WIDTH),
+                (self.depth_height, "depth_height", MIN_HEIGHT, MAX_HEIGHT),
+                (self.depth_fps, "depth_fps", MIN_FPS, MAX_FPS),
+            ):
+                if value is None or not minimum <= value <= maximum:
+                    raise ValueError(f"{name} must be in {minimum}..{maximum} when depth is enabled")
+        elif self.pointcloud_enabled:
+            raise ValueError("pointcloud_enabled requires depth_enabled")
+        if not 1 <= self.pointcloud_stride <= 32:
+            raise ValueError("pointcloud_stride must be in 1..32")
         if not 1 <= self.jpeg_quality <= 100:
             raise ValueError("JPEG quality must be in 1..100")
 
@@ -49,10 +65,22 @@ def load_camera_configs(path: str | Path) -> Mapping[str, CameraConfig]:
             f"librealsense must be pinned to {PINNED_LIBREALSENSE}; mixing 2.57/2.58 "
             "is forbidden"
         )
-    cameras = {
-        name: CameraConfig(name=name, **config)
-        for name, config in document["cameras"].items()
-    }
+    cameras = {}
+    for name, source in document["cameras"].items():
+        config = dict(source)
+        recording = config.pop("recording", {})
+        if not isinstance(recording, Mapping):
+            raise ValueError(f"camera {name}.recording must be a mapping")
+        if not bool(recording.get("rgb", True)):
+            raise ValueError("RGB recording cannot be disabled: color frames provide the atomic timeline")
+        record_depth = bool(recording.get("depth", config.get("depth_enabled", False)))
+        pointcloud = bool(recording.get("pointcloud", config.get("pointcloud_enabled", False)))
+        config["record_depth"] = record_depth
+        config["pointcloud_enabled"] = pointcloud
+        # A point cloud needs depth acquisition even when raw depth recording
+        # was intentionally disabled for that camera.
+        config["depth_enabled"] = record_depth or pointcloud
+        cameras[name] = CameraConfig(name=name, **config)
     if set(cameras) != {"head", "left_wrist", "right_wrist"}:
         raise ValueError("exactly head, left_wrist and right_wrist cameras are required")
     serials = [camera.serial for camera in cameras.values()]

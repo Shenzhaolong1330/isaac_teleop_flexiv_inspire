@@ -26,6 +26,15 @@ def camera_config() -> CameraConfig:
     )
 
 
+def depth_camera_config() -> CameraConfig:
+    return CameraConfig(
+        name="head", serial="serial-1", width=424, height=240, fps=30,
+        pixel_format="rgb8", jpeg_quality=90, depth_enabled=True,
+        depth_width=424, depth_height=240, depth_fps=30,
+        pointcloud_enabled=True, pointcloud_stride=2,
+    )
+
+
 def test_hardware_clock_mapping_is_explicitly_invalid_during_warmup():
     mapper = RealSenseClockMapper(minimum_samples=4, window=20)
     mapped = []
@@ -84,10 +93,58 @@ class FakeFrames:
         return FakeColor()
 
 
+class FakeIntrinsics:
+    fx, fy, ppx, ppy = 200.0, 200.0, 211.5, 119.5
+
+
+class FakeProfile:
+    def as_video_stream_profile(self):
+        return self
+
+    def get_intrinsics(self):
+        return FakeIntrinsics()
+
+
+class FakeDepth:
+    profile = FakeProfile()
+
+    def get_data(self):
+        return np.full((240, 424), 1000, dtype=np.uint16)
+
+    def get_units(self):
+        return 0.001
+
+
+class FakeDepthFrames(FakeFrames):
+    def get_depth_frame(self):
+        return FakeDepth()
+
+
+class FakeAlign:
+    def process(self, frames):
+        return frames
+
+
+class FakeDepthRs:
+    __file__ = __file__
+    class stream:
+        color = object()
+
+    @staticmethod
+    def align(_stream):
+        return FakeAlign()
+
+
 class FakePipeline:
     def wait_for_frames(self, timeout_ms):
         assert timeout_ms == 1000
         return FakeFrames()
+
+
+class FakeDepthPipeline(FakePipeline):
+    def wait_for_frames(self, timeout_ms):
+        assert timeout_ms == 1000
+        return FakeDepthFrames()
 
 
 class FakeRs:
@@ -111,10 +168,23 @@ def test_capture_once_produces_jpeg_record_without_zero_filling():
     envelope = frame.to_record_envelope()
     assert envelope.valid is True
     assert envelope.source_clock_domain == "realsense_hardware_clock"
-    assert (
-        base64.b64decode(envelope.payload["jpeg_b64"])
-        == b"jpeg-payload"
+    assert base64.b64decode(envelope.payload["jpeg_b64"]) == b"jpeg-payload"
+
+
+def test_capture_once_records_aligned_z16_and_organized_pointcloud():
+    capture = RealSenseRgbCapture(
+        depth_camera_config(), rs_module=FakeDepthRs(),
+        jpeg_encoder=lambda image, quality, pixel_format: b"jpeg-payload",
+        monotonic_ns=iter([10_000, 20_000]).__next__,
+        wall_ns=lambda: 1_700_000_000_000_000_000,
     )
+    frame = capture.capture_once(FakeDepthPipeline())
+    assert len(frame.depth_z16 or b"") == 424 * 240 * 2
+    assert (frame.pointcloud_width, frame.pointcloud_height) == (212, 120)
+    assert len(frame.pointcloud_xyz_f32 or b"") == 212 * 120 * 3 * 4
+    envelope = frame.to_record_envelope()
+    assert envelope.payload["depth_frame_id"] == "head_color_optical_frame"
+    assert envelope.payload["pointcloud_encoding"] == "xyz_f32_le"
 
 
 def test_linkage_preflight_rejects_pkg_config_mismatch(monkeypatch):

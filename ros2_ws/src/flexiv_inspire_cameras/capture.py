@@ -204,6 +204,15 @@ class CameraFrame:
     jpeg: bytes
     recording_mode: str = "jpeg"
     raw_rgb: bytes | None = None
+    depth_z16: bytes | None = None
+    depth_width: int | None = None
+    depth_height: int | None = None
+    depth_scale_m: float | None = None
+    depth_intrinsics: dict[str, float] | None = None
+    pointcloud_xyz_f32: bytes | None = None
+    pointcloud_width: int | None = None
+    pointcloud_height: int | None = None
+    pointcloud_stride: int | None = None
     valid: bool = True
     invalid_reason: str = ""
 
@@ -230,6 +239,23 @@ class CameraFrame:
             payload["raw_rgb_b64"] = base64.b64encode(self.raw_rgb).decode("ascii")
         else:
             payload["jpeg_b64"] = base64.b64encode(self.jpeg).decode("ascii")
+        if self.depth_z16 is not None:
+            if self.depth_width is None or self.depth_height is None or self.depth_scale_m is None or self.depth_intrinsics is None:
+                raise ValueError("depth recording is missing metadata")
+            payload.update({
+                "depth_encoding": "z16", "depth_width": self.depth_width,
+                "depth_height": self.depth_height, "depth_scale_m": self.depth_scale_m,
+                "depth_intrinsics": self.depth_intrinsics,
+                "depth_z16_b64": base64.b64encode(self.depth_z16).decode("ascii"),
+                "depth_frame_id": f"{self.camera_name}_color_optical_frame",
+            })
+        if self.pointcloud_xyz_f32 is not None:
+            payload.update({
+                "pointcloud_encoding": "xyz_f32_le", "pointcloud_frame_id": f"{self.camera_name}_color_optical_frame",
+                "pointcloud_width": self.pointcloud_width, "pointcloud_height": self.pointcloud_height,
+                "pointcloud_stride": self.pointcloud_stride,
+                "pointcloud_xyz_f32_b64": base64.b64encode(self.pointcloud_xyz_f32).decode("ascii"),
+            })
         return RecordEnvelope(
             topic=topic,
             source_time_ns=self.source_time_ns,
@@ -325,6 +351,7 @@ class RealSenseRgbCapture:
         self._reconnects = 0
         self._encode_failures = 0
         self._lock = threading.Lock()
+        self._align = self.rs.align(self.rs.stream.color) if self.config.depth_enabled else None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -389,6 +416,14 @@ class RealSenseRgbCapture:
             rs_format,
             self.config.fps,
         )
+        if self.config.depth_enabled:
+            rs_config.enable_stream(
+                self.rs.stream.depth,
+                self.config.depth_width,
+                self.config.depth_height,
+                self.rs.format.z16,
+                self.config.depth_fps,
+            )
         return pipeline, rs_config
 
     def run(self) -> None:
@@ -431,10 +466,44 @@ class RealSenseRgbCapture:
     def capture_once(self, pipeline) -> CameraFrame:
         acquisition_start = self.monotonic_ns()
         frames = pipeline.wait_for_frames(timeout_ms=1000)
+        if self._align is not None:
+            frames = self._align.process(frames)
         color = frames.get_color_frame()
         if not color:
             raise RuntimeError("frameset did not contain a color frame")
         image = np.asanyarray(color.get_data())
+        depth_z16 = None
+        depth_width = depth_height = None
+        depth_scale_m = None
+        depth_intrinsics = None
+        pointcloud_xyz_f32 = None
+        pointcloud_width = pointcloud_height = pointcloud_stride = None
+        if self.config.depth_enabled:
+            depth = frames.get_depth_frame()
+            if not depth:
+                raise RuntimeError("frameset did not contain a depth frame")
+            depth_image = np.asanyarray(depth.get_data())
+            if depth_image.dtype != np.uint16 or depth_image.shape != (self.config.height, self.config.width):
+                raise RuntimeError("aligned depth frame has unexpected z16 shape")
+            profile = depth.profile.as_video_stream_profile()
+            intrinsics = profile.get_intrinsics()
+            depth_width, depth_height = int(depth_image.shape[1]), int(depth_image.shape[0])
+            depth_scale_m = float(depth.get_units())
+            depth_intrinsics = {key: float(getattr(intrinsics, key)) for key in ("fx", "fy", "ppx", "ppy")}
+            if self.config.record_depth:
+                depth_z16 = depth_image.astype("<u2", copy=False).tobytes(order="C")
+            if self.config.pointcloud_enabled:
+                stride = self.config.pointcloud_stride
+                sampled = depth_image[::stride, ::stride].astype(np.float32) * depth_scale_m
+                v, u = np.indices(sampled.shape, dtype=np.float32)
+                u *= stride
+                v *= stride
+                xyz = np.stack(((u - depth_intrinsics["ppx"]) * sampled / depth_intrinsics["fx"],
+                                (v - depth_intrinsics["ppy"]) * sampled / depth_intrinsics["fy"], sampled), axis=-1)
+                xyz[sampled <= 0.0] = np.nan
+                pointcloud_xyz_f32 = xyz.astype("<f4", copy=False).tobytes(order="C")
+                pointcloud_height, pointcloud_width = sampled.shape
+                pointcloud_stride = stride
         acquisition_end = self.monotonic_ns()
         host_wall = self.wall_ns()
         if image.shape[:2] != (self.config.height, self.config.width):
@@ -489,6 +558,10 @@ class RealSenseRgbCapture:
             jpeg=jpeg,
             recording_mode=self.recording_mode,
             raw_rgb=image.tobytes(order="C") if self.recording_mode == "raw_rgb" else None,
+            depth_z16=depth_z16, depth_width=depth_width, depth_height=depth_height,
+            depth_scale_m=depth_scale_m, depth_intrinsics=depth_intrinsics,
+            pointcloud_xyz_f32=pointcloud_xyz_f32, pointcloud_width=pointcloud_width,
+            pointcloud_height=pointcloud_height, pointcloud_stride=pointcloud_stride,
         )
 
 

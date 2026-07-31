@@ -152,6 +152,7 @@ class LocalWritePermit:
 
 
 class CommandCapableModbusTcpClient(ReadOnlyModbusTcpClient):
+    WRITE_SINGLE_REGISTER = 0x06
     WRITE_MULTIPLE_REGISTERS = 0x10
 
     def __init__(self, *args: object, permit: LocalWritePermit, **kwargs: object) -> None:
@@ -159,6 +160,17 @@ class CommandCapableModbusTcpClient(ReadOnlyModbusTcpClient):
             raise WriteNotAuthorized("a valid local write permit is required")
         super().__init__(*args, **kwargs)
         self._permit = permit
+
+    def write_single_u16(self, byte_address: int, value: int) -> None:
+        if not 0 <= byte_address <= 0xFFFF:
+            raise ValueError("byte_address must fit uint16")
+        if not 0 <= value <= 0xFFFF:
+            raise ValueError("value must fit uint16")
+        request = struct.pack(">HH", byte_address, value)
+        with self._lock:
+            response = self._request(self.WRITE_SINGLE_REGISTER, request, 0)
+        if response != request:
+            raise ModbusProtocolError("write response did not echo address/value")
 
     def write_i16(self, byte_address: int, values: tuple[int, ...]) -> None:
         if not values or len(values) > 123:

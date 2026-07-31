@@ -27,6 +27,10 @@ ACTUATOR_NAMES = (
 
 
 class Register:
+    # Writing 1 with Modbus function 0x06 starts the vendor force-sensor
+    # calibration routine. The hand must be open and unloaded.
+    FORCE_CALIBRATION = 1009
+
     POSITION_ACTUAL = 1534
     ANGLE_ACTUAL = 1546
     FORCE_ACTUAL = 1582

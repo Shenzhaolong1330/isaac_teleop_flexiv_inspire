@@ -40,6 +40,8 @@ ROS_BAG_TOPICS = (
     "/camera/head/color/image_raw/compressed",
     "/camera/left_wrist/color/image_raw/compressed",
     "/camera/right_wrist/color/image_raw/compressed",
+    "/camera/head/depth/image_rect_raw", "/camera/left_wrist/depth/image_rect_raw", "/camera/right_wrist/depth/image_rect_raw",
+    "/camera/head/depth/points", "/camera/left_wrist/depth/points", "/camera/right_wrist/depth/points",
     "/control/state", "/control/requested_command", "/control/safe_command",
     "/control/sent_command", "/control/command_trace", "/control/stop",
     "/xr_teleop/ee_poses", "/xr_teleop/controller_data", "/xr_teleop/hand",

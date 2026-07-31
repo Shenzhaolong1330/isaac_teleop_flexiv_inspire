@@ -2,6 +2,11 @@ import struct
 
 import pytest
 
+from flexiv_inspire_isaac.dftp.force_calibration import _assert_safe_to_calibrate
+from flexiv_inspire_isaac.dftp.modbus import (
+    CommandCapableModbusTcpClient,
+    LocalWritePermit,
+)
 from flexiv_inspire_isaac.dftp.models import Acquisition, HandState
 from flexiv_inspire_isaac.dftp.protocol import (
     TACTILE_LAYOUT,
@@ -47,3 +52,28 @@ def test_hand_state_requires_six_values():
             acquisition=Acquisition(1, 2, 3),
             field_times_ns={},
         )
+
+
+def test_force_calibration_uses_single_register_echo_protocol():
+    class Client(CommandCapableModbusTcpClient):
+        def _request(self, function, payload, expected_bytes):
+            self.seen = (function, payload, expected_bytes)
+            return payload
+
+    permit = LocalWritePermit.issue_after_local_authorization(
+        "test", "DFTP-LOCAL-CONTROL-AUTHORIZED"
+    )
+    client = Client("127.0.0.1", permit=permit)
+    client.write_single_u16(1009, 1)
+    assert client.seen == (0x06, struct.pack(">HH", 1009, 1), 0)
+
+
+def test_force_calibration_precheck_rejects_loaded_hand():
+    state = {
+        "angles": [1000] * 6,
+        "forces_g": [0] * 6,
+        "currents_ma": [0, 0, 101, 0, 0, 0],
+        "errors": [0] * 6,
+    }
+    with pytest.raises(RuntimeError, match="not idle"):
+        _assert_safe_to_calibrate(state)

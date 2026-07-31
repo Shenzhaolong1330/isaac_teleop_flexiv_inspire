@@ -40,27 +40,27 @@ cd "$ROOT"
 ./scripts/verify_independence.sh
 
 source "$ROOT/scripts/env/activate_ros.sh"
-colcon --log-base "$ROOT/log/ros" build \
+colcon --log-base "$ROOT/ros2_ws/log" build \
   --base-paths \
-    "$ROOT/interfaces/flexiv_inspire_interfaces" \
-    "$ROOT/core/ros2/flexiv_inspire_control" \
-  --build-base "$ROOT/build/ros" \
-  --install-base "$ROOT/install/ros" \
+    "$ROOT/ros2_ws/src/flexiv_inspire_interfaces" \
+    "$ROOT/ros2_ws/src/flexiv_inspire_control" \
+  --build-base "$ROOT/ros2_ws/build" \
+  --install-base "$ROOT/ros2_ws/install" \
   --symlink-install \
-  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+  --cmake-args -DPython3_EXECUTABLE="$ROOT/envs/ros-py312/bin/python3"
 
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 ros2 pkg executables flexiv_inspire_control
 ```
 
-不要运行无 `--base-paths` 的裸 `colcon build`。`envs/`、`upstream/` 和
+不要运行无 `--base-paths` 的裸 `colcon build`。`envs/`、`third_party/IsaacTeleop/` 和
 `vendor/` 带有 `COLCON_IGNORE`，但精确指定两包仍是受支持方式。
 
 若 MANUS 插件尚未安装，按 [MANUS_SETUP.md](MANUS_SETUP.md) 构建。安装后
 必须存在：
 
 ```bash
-test -x "$ROOT/install/manus-isaac/plugins/manus/manus_hand_plugin"
+test -x "$ROOT/third_party/IsaacTeleop/install/manus-isaac/plugins/manus/manus_hand_plugin"
 ```
 
 CUDA 12.8 只由 `activate_isaac.sh`/`activate_data.sh` 局部选择。不要改
@@ -75,23 +75,23 @@ export ROOT=/home/hb/isaac_teleop_flexiv_inspire
 export SITE="$ROOT/artifacts/site"
 mkdir -p "$SITE"
 
-cp --no-clobber "$ROOT/rdk_daemon/config/robots.yaml" \
+cp --no-clobber "$ROOT/apps/flexiv_daemon/config/robots.yaml" \
   "$SITE/robots.yaml"
-cp --no-clobber "$ROOT/rdk_daemon/config/tool_payload.yaml" \
+cp --no-clobber "$ROOT/apps/flexiv_daemon/config/tool_payload.yaml" \
   "$SITE/tool_payload.yaml"
 cp --no-clobber \
-  "$ROOT/core/ros2/flexiv_inspire_control/config/control_bridge.yaml" \
+  "$ROOT/ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml" \
   "$SITE/control_bridge.yaml"
 cp --no-clobber \
-  "$ROOT/core/ros2/flexiv_inspire_control/config/teleop.yaml" \
+  "$ROOT/ros2_ws/src/flexiv_inspire_control/config/teleop.yaml" \
   "$SITE/teleop.yaml"
 cp --no-clobber \
-  "$ROOT/core/ros2/flexiv_inspire_control/config/manus_calibration_template.yaml" \
+  "$ROOT/ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml" \
   "$SITE/manus_calibration.yaml"
-cp --no-clobber "$ROOT/src/flexiv_inspire_isaac/dftp/dual_hands.yaml" \
+cp --no-clobber "$ROOT/ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml" \
   "$SITE/dual_hands.yaml"
 cp --no-clobber \
-  "$ROOT/src/flexiv_inspire_isaac/cameras/realsense_rgb.yaml" \
+  "$ROOT/ros2_ws/src/flexiv_inspire_cameras/realsense_rgb.yaml" \
   "$SITE/realsense_rgb.yaml"
 ```
 
@@ -181,7 +181,7 @@ flexiv-rdk-daemon \
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 flexiv-inspire-camera-verify --config "$SITE/realsense_rgb.yaml"
 flexiv-inspire-camera-node --ros-args \
   -p config:="$SITE/realsense_rgb.yaml"
@@ -196,7 +196,7 @@ RGB-only。不要混入 2.58 或默认开启深度。
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 flexiv-inspire-dftp-read-only --include-tactile
 ```
 
@@ -217,9 +217,9 @@ flexiv-inspire-dftp-node --ros-args \
 ```bash
 adb devices -l
 test -f \
-  "$ROOT/upstream/IsaacTeleop/examples/teleop_ros2/assets/urdf/sharpa_standalone/left_sharpa_wave.urdf"
+  "$ROOT/third_party/IsaacTeleop/examples/teleop_ros2/assets/urdf/sharpa_standalone/left_sharpa_wave.urdf"
 test -f \
-  "$ROOT/upstream/IsaacTeleop/examples/teleop_ros2/assets/urdf/sharpa_standalone/right_sharpa_wave.urdf"
+  "$ROOT/third_party/IsaacTeleop/examples/teleop_ros2/assets/urdf/sharpa_standalone/right_sharpa_wave.urdf"
 ```
 
 若 URDF 缺失，按上游
@@ -228,12 +228,12 @@ test -f \
 
 ```bash
 source "$ROOT/scripts/env/activate_isaac.sh"
-source "$ROOT/install/ros/setup.bash"
-cd "$ROOT/upstream/IsaacTeleop/examples/teleop_ros2/python"
+source "$ROOT/ros2_ws/install/setup.bash"
+cd "$ROOT/third_party/IsaacTeleop/examples/teleop_ros2/python"
 python teleop_ros2_node.py --ros-args \
   -p mode:=controller_teleop \
   -p hand_retargeter:=dexpilot \
-  -p config_asset_root:="$ROOT/upstream/IsaacTeleop/examples/teleop_ros2" \
+  -p config_asset_root:="$ROOT/third_party/IsaacTeleop/examples/teleop_ros2" \
   -p cloudxr_accept_eula:=false \
   -p cloudxr_setup_oob:=true \
   -p cloudxr_usb_local:=true
@@ -247,11 +247,11 @@ CloudXR 运行并生成 `~/.cloudxr/run/cloudxr.env` 后，在终端 E 启动 MA
 
 ```bash
 source "$ROOT/scripts/env/activate_isaac.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 set -a
 source "$HOME/.cloudxr/run/cloudxr.env"
 set +a
-"$ROOT/install/manus-isaac/plugins/manus/manus_hand_plugin"
+"$ROOT/third_party/IsaacTeleop/install/manus-isaac/plugins/manus/manus_hand_plugin"
 ```
 
 先验证 `/xr_teleop/ee_poses`、`/xr_teleop/controller_data`、`/tf` 和
@@ -264,7 +264,7 @@ set +a
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 ros2 run flexiv_inspire_control control_bridge --ros-args \
   --params-file "$SITE/control_bridge.yaml" \
   -p session_id:="$SESSION_ID" \
@@ -276,7 +276,7 @@ ros2 run flexiv_inspire_control control_bridge --ros-args \
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 ros2 run flexiv_inspire_control teleop_input --ros-args \
   --params-file "$SITE/teleop.yaml" \
   -p session_id:="$SESSION_ID" \
@@ -292,7 +292,7 @@ ros2 run flexiv_inspire_control teleop_input --ros-args \
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 flexiv-inspire-rerun --spawn
 ```
 
@@ -345,7 +345,7 @@ flexiv-rdk-daemon \
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 ros2 run flexiv_inspire_control zero_ft_local \
   --rdk-socket "$RDK_SOCKET" \
   --tool-payload-config "$SITE/tool_payload.yaml"
@@ -454,7 +454,7 @@ ros2 run flexiv_inspire_control authorize_control \
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 isaac-flexiv-episode \
   --root "$ROOT/sessions" \
   --session-id "$SESSION_ID" \
@@ -505,7 +505,7 @@ Rotation-6D 顺序固定为
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
-source "$ROOT/install/ros/setup.bash"
+source "$ROOT/ros2_ws/install/setup.bash"
 flexiv-inspire-policy-server \
   --bind 127.0.0.1 \
   --port 50051 \

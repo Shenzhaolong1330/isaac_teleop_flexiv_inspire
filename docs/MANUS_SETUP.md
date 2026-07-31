@@ -27,9 +27,9 @@ Isaac Teleop 1.3.131 的官方 MANUS CMake 目标：
 cd /home/hb/isaac_teleop_flexiv_inspire
 source scripts/env/activate_isaac.sh
 
-cmake -S upstream/IsaacTeleop -B build/manus-isaac -G Ninja \
+cmake -S third_party/IsaacTeleop -B build/manus-isaac -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/home/hb/isaac_teleop_flexiv_inspire/install/manus-isaac \
+  -DCMAKE_INSTALL_PREFIX=/home/hb/isaac_teleop_flexiv_inspire/third_party/IsaacTeleop/install/manus-isaac \
   -DISAAC_TELEOP_PYTHON_VERSION=3.12 \
   -DUV_EXECUTABLE=/home/hb/.local/bin/uv \
   -DMANUS_SDK_ROOT=/home/hb/isaac_teleop_flexiv_inspire/vendor/ManusSDK \
@@ -52,14 +52,14 @@ cmake --install build/manus-isaac --component manus
 安装产物：
 
 ```text
-install/manus-isaac/plugins/manus/manus_hand_plugin
-install/manus-isaac/bin/manus_hand_tracker_printer
-install/manus-isaac/lib/libIsaacTeleopPluginsManus.so
-install/manus-isaac/lib/libManusSDK_Integrated.so
+third_party/IsaacTeleop/install/manus-isaac/plugins/manus/manus_hand_plugin
+third_party/IsaacTeleop/install/manus-isaac/bin/manus_hand_tracker_printer
+third_party/IsaacTeleop/install/manus-isaac/lib/libIsaacTeleopPluginsManus.so
+third_party/IsaacTeleop/install/manus-isaac/lib/libManusSDK_Integrated.so
 ```
 
 `ldd` 对插件和诊断工具均没有 `not found`；安装后的 RUNPATH 分别指向
-项目自己的 `install/manus-isaac/lib`。
+项目自己的 `third_party/IsaacTeleop/install/manus-isaac/lib`。
 
 ## 一次性只读 smoke 结果
 
@@ -68,7 +68,7 @@ install/manus-isaac/lib/libManusSDK_Integrated.so
 ```bash
 source scripts/env/activate_isaac.sh
 timeout --signal=TERM --kill-after=2s 10s \
-  install/manus-isaac/plugins/manus/manus_hand_plugin
+  third_party/IsaacTeleop/install/manus-isaac/plugins/manus/manus_hand_plugin
 ```
 
 关键结果：

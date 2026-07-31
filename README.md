@@ -50,17 +50,18 @@ to and from `wxyz`.
 
 ## Repository layout
 
-- `core/`: Rotation-6D, command schema, safety state machine, clock mapping, and
-  the ROS 2 control/teleop bridge.
-- `rdk_daemon/`: isolated Python 3.10 Flexiv RDK 1.9 daemon and typed local IPC.
-- `src/flexiv_inspire_isaac/dftp/`: project-owned Modbus TCP driver for DFTP-2.
-- `src/flexiv_inspire_isaac/cameras/`: three-camera RGB acquisition.
-- `src/flexiv_inspire_isaac/policy_api/`: TLS gRPC PolicyService v1.
-- `src/flexiv_inspire_isaac/data_pipeline/`: asynchronous MCAP recording and
+- `libs/control_core/`: Rotation-6D, command schema, safety state machine and clock mapping.
+- `ros2_ws/src/flexiv_inspire_control/`: ROS 2 control, Quest/MANUS mapping, pedal and F/T action.
+- `apps/flexiv_daemon/`: isolated Python 3.10 Flexiv RDK 1.9 daemon and typed local IPC.
+- `ros2_ws/src/flexiv_inspire_dftp/`: project-owned Modbus TCP driver for DFTP-2.
+- `ros2_ws/src/flexiv_inspire_cameras/`: three-camera RGB acquisition.
+- `apps/policy_server/src/flexiv_inspire_isaac/policy_api/`: TLS gRPC PolicyService v1.
+- `libs/data_core/src/flexiv_inspire_isaac/data_pipeline/`: asynchronous MCAP recording and
   deterministic LeRobot v3 export.
-- `src/flexiv_inspire_isaac/rerun_viz/`: live/offline Rerun visualization.
-- `interfaces/`: ROS 2 messages/actions and protobuf schemas.
-- `requirements/` and `scripts/env/`: four pinned environments.
+- `ros2_ws/src/flexiv_inspire_rerun/`: live/offline Rerun visualization.
+- `ros2_ws/src/flexiv_inspire_interfaces/`: ROS 2 messages/actions.
+- `libs/rpc_interfaces/proto/`: protobuf schemas.
+- `scripts/env/`: four pinned environments.
 
 Start with the exact, fail-closed startup sequence in
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md). Also read `docs/ENVIRONMENTS.md`,
@@ -89,7 +90,7 @@ The four environments are:
 - `envs/rdk-py310`: exactly `flexivrdk==1.9.0`, with no ROS import.
 - `envs/data-py312`: LeRobot 0.6.0 and offline MCAP conversion.
 
-Canonical protobuf sources are under `interfaces/proto`; regenerate checked-in
+Canonical protobuf sources are under `libs/rpc_interfaces/proto`; regenerate checked-in
 Python stubs with:
 
 ```bash
@@ -99,18 +100,19 @@ Python stubs with:
 ## Build and software-only validation
 
 ```bash
-source scripts/env/activate_ros.sh
-colcon --log-base log/ros build \
-  --base-paths interfaces/flexiv_inspire_interfaces \
-               core/ros2/flexiv_inspire_control \
-  --build-base build/ros \
-  --install-base install/ros \
+export PROJECT_ROOT=/home/hb/isaac_teleop_flexiv_inspire
+cd "$PROJECT_ROOT"
+source "$PROJECT_ROOT/scripts/env/activate_ros.sh"
+colcon --log-base "$PROJECT_ROOT/ros2_ws/log" build \
+  --base-paths "$PROJECT_ROOT/ros2_ws/src" \
+  --build-base "$PROJECT_ROOT/ros2_ws/build" \
+  --install-base "$PROJECT_ROOT/ros2_ws/install" \
   --symlink-install \
-  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+  --cmake-args -DPython3_EXECUTABLE="$PROJECT_ROOT/envs/ros-py312/bin/python3"
 
-source install/ros/setup.bash
-envs/ros-py312/bin/python -m pytest
-./scripts/verify_independence.sh
+source "$PROJECT_ROOT/ros2_ws/install/setup.bash"
+"$PROJECT_ROOT/envs/ros-py312/bin/python" -m pytest
+"$PROJECT_ROOT/scripts/verify_independence.sh"
 ```
 
 Mock and static tests never issue hardware commands. The control bridge starts

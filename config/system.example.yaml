@@ -26,6 +26,26 @@ pedal:
 flexiv:
   rdk_config: apps/flexiv_daemon/config/robots.yaml
   tool_payload_config: apps/flexiv_daemon/config/tool_payload.yaml
+  safety:
+    # Rizon4s manufacturer defaults. Re-read RobotInfo from both controllers
+    # during site commissioning and reject the hardware session on mismatch.
+    # Degrees: [-160,-130,-170,-107,-170,-80,-170] and
+    # [160,130,170,154,170,260,170].
+    joint_lower_limits_rad: [-2.7925667762756348, -2.2689666748046875, -2.967066764831543, -1.8674668073654175, -2.967066764831543, -1.3962668180465698, -2.967066764831543]
+    joint_upper_limits_rad: [2.7925667762756348, 2.2689666748046875, 2.967066764831543, 2.6877667903900146, 2.967066764831543, 4.537866592407227, 2.967066764831543]
+    max_joint_velocity_rad_s: 0.75
+    max_tcp_linear_speed_m_s: 0.35
+    max_tcp_angular_speed_rad_s: 1.0
+    max_external_force_n: 60.0
+    max_external_torque_nm: 8.0
+    max_joint_temperature_c: 75.0
+    hand_reference_tolerance: 1.0
+    max_translation_step_m: 0.01
+    max_rotation_step_rad: 0.10
+    max_linear_velocity_m_s: 0.05
+    max_angular_velocity_rad_s: 0.15
+    max_linear_acceleration_m_s2: 0.25
+    max_angular_acceleration_rad_s2: 0.50
   cartesian_control:
     # Both choices use RDK NRT_CARTESIAN_MOTION_FORCE.  "position" uses high
     # configured stiffness; "impedance" sends the explicit stiffness/damping below.
@@ -116,6 +136,7 @@ recording:
   snapshot_config: true
 
 commands:
-  # Kept explicit so the launcher never guesses an environment or starts hardware writes.
+  # The unified launcher stays mock/shadow. Real hardware uses the staged
+  # local RUNBOOK flow; never make this an implicit hardware-write path.
   rdk_daemon: ["flexiv-rdk-daemon", "--mock"]
   teleop_launch: ["ros2", "launch", "flexiv_inspire_control", "teleop_control.launch.py"]

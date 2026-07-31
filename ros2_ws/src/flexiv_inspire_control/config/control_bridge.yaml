@@ -2,9 +2,11 @@
   ros__parameters:
     # Requested arm observation rate; actual achieved rate is recorded in MCAP.
     observation_rate_hz: 200.0
-    # Fail-closed until seven audited Rizon4s limits are supplied locally.
-    joint_lower_limits_rad: []
-    joint_upper_limits_rad: []
+    # Rizon4s manufacturer defaults returned by RobotInfo on both site arms.
+    # Degrees: [-160,-130,-170,-107,-170,-80,-170] and
+    # [160,130,170,154,170,260,170].
+    joint_lower_limits_rad: [-2.7925667762756348, -2.2689666748046875, -2.967066764831543, -1.8674668073654175, -2.967066764831543, -1.3962668180465698, -2.967066764831543]
+    joint_upper_limits_rad: [2.7925667762756348, 2.2689666748046875, 2.967066764831543, 2.6877667903900146, 2.967066764831543, 4.537866592407227, 2.967066764831543]
     max_joint_velocity_rad_s: 0.75
     max_tcp_linear_speed_m_s: 0.35
     max_tcp_angular_speed_rad_s: 1.0

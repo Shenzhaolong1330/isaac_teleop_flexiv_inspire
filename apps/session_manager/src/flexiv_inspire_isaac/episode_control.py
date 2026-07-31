@@ -54,18 +54,21 @@ class EpisodeController(Node):
 
     def _command(self) -> list[str]:
         self._sequence += 1
-        return [
+        command = [
             sys.executable, "-m", "flexiv_inspire_isaac.data_pipeline.episode_manager",
             "--root", self._required("sessions_root"),
             "--session-id", self._required("session_id"),
             "--tool-config", self._required("tool_config"),
             "--ft-zero-record", self._required("ft_zero_record"),
             "--calibration", f"cameras={self._required('camera_config')}",
-            "--calibration", f"manus={self._required('manus_calibration')}",
             "--camera-recording-mode", str(self.get_parameter("camera_recording_mode").value),
             "--deviceio-mode", "native",
             "--deviceio-socket", self._required("deviceio_socket"),
         ]
+        manus = str(self.get_parameter("manus_calibration").value).strip()
+        if manus:
+            command.extend(("--calibration", f"manus={manus}"))
+        return command
 
     def _publish(self, value: str) -> None:
         message = String()

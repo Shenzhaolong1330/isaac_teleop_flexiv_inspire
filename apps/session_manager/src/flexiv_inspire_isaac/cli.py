@@ -20,10 +20,7 @@ def _runtime_dir(config) -> Path:
 
 
 def _project_root(config) -> Path:
-    candidate = config.path.parent.parent
-    if (candidate / "pyproject.toml").is_file():
-        return candidate
-    return Path.cwd().resolve()
+    return config.root
 
 
 def _write_state(directory: Path, config, processes: list[subprocess.Popen]) -> None:
@@ -54,18 +51,32 @@ def _xr_receiver_command(config, rendered: dict[str, Path]) -> list[str]:
 def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -> list[list[str]]:
     root = config.document
     session = root["session"]
-    commands = [list(root["commands"]["rdk_daemon"])]
+    runtime_root = Path(session["runtime_root"]).expanduser()
+    rdk_socket = runtime_root / "rdk.sock"
+    ft_zero_record = runtime_root / "ft_zero_events.jsonl"
+    rdk_command = [
+        *root["commands"]["rdk_daemon"],
+        "--config",
+        str(config.resolve(root["flexiv"]["rdk_config"])),
+        "--socket",
+        str(rdk_socket),
+        "--events",
+        str(ft_zero_record),
+    ]
+    commands = [rdk_command]
     commands += [
         [*root["commands"]["teleop_launch"], f"session_id:={session['id']}",
-         f"rdk_socket:={Path(session['runtime_root']) / 'rdk.sock'}", f"foot_pedal:={root['pedal']['device']}",
+         f"rdk_socket:={rdk_socket}", f"foot_pedal:={root['pedal']['device']}",
          f"control_config:={rendered['control_bridge.yaml']}", f"teleop_config:={rendered['teleop.yaml']}"],
         ["flexiv-inspire-camera-node", "--ros-args", "-p", f"config:={rendered['camera.yaml']}"],
         ["flexiv-inspire-dftp-node", "--ros-args", "--params-file", str(rendered["dftp.yaml"])],
         ["flexiv-inspire-pedal-router", "--ros-args", "--params-file", str(rendered["pedal.yaml"])],
-        ["flexiv-inspire-episode-controller", "--ros-args", "-p", f"sessions_root:={root['session']['sessions_root']}",
-         "-p", f"session_id:={session['id']}", "-p", f"tool_config:={root['flexiv']['tool_payload_config']}",
-         "-p", f"camera_config:={rendered['camera.yaml']}", "-p", f"manus_calibration:={root['teleop']['manus_calibration']}",
-         "-p", f"deviceio_socket:={Path(session['runtime_root']) / 'deviceio.sock'}",
+        ["flexiv-inspire-episode-controller", "--ros-args", "-p", f"sessions_root:={config.resolve(root['session']['sessions_root'])}",
+         "-p", f"session_id:={session['id']}", "-p", f"tool_config:={config.resolve(root['flexiv']['tool_payload_config'])}",
+         "-p", f"ft_zero_record:={ft_zero_record}",
+         "-p", f"camera_config:={rendered['camera.yaml']}",
+         "-p", f"manus_calibration:={config.resolve(root['teleop']['manus_calibration']) if str(root['teleop']['manus_calibration']).strip() else ''}",
+         "-p", f"deviceio_socket:={runtime_root / 'deviceio.sock'}",
          "-p", f"camera_recording_mode:={root['recording']['camera_recording_mode']}"],
     ]
     if bool(root["xr_video"]["enabled"]):

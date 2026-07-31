@@ -53,7 +53,8 @@ class SystemConfig:
 
     @property
     def root(self) -> Path:
-        return self.path.parent
+        candidate = self.path.parent.parent
+        return candidate if (candidate / "pyproject.toml").is_file() else self.path.parent
 
     def resolve(self, raw: str) -> Path:
         candidate = Path(raw).expanduser()
@@ -82,6 +83,41 @@ def load_system_config(path: str | Path) -> SystemConfig:
     if len(set(codes)) != 3 or any(code <= 0 for code in codes):
         raise SystemConfigError("pedal key codes must be three distinct positive Linux input codes")
     flexiv = _mapping(root.get("flexiv"), "flexiv")
+    for key in ("rdk_config", "tool_payload_config"):
+        if not str(flexiv.get(key, "")).strip():
+            raise SystemConfigError(f"flexiv.{key} is required")
+    safety = _mapping(flexiv.get("safety"), "flexiv.safety")
+    joint_lower = _vector(
+        safety.get("joint_lower_limits_rad"),
+        "flexiv.safety.joint_lower_limits_rad",
+        7,
+    )
+    joint_upper = _vector(
+        safety.get("joint_upper_limits_rad"),
+        "flexiv.safety.joint_upper_limits_rad",
+        7,
+    )
+    if any(lower >= upper for lower, upper in zip(joint_lower, joint_upper)):
+        raise SystemConfigError(
+            "flexiv.safety joint lower limits must be smaller than upper limits"
+        )
+    safety_limit_names = (
+        "max_joint_velocity_rad_s",
+        "max_tcp_linear_speed_m_s",
+        "max_tcp_angular_speed_rad_s",
+        "max_external_force_n",
+        "max_external_torque_nm",
+        "max_joint_temperature_c",
+        "hand_reference_tolerance",
+        "max_translation_step_m",
+        "max_rotation_step_rad",
+        "max_linear_velocity_m_s",
+        "max_angular_velocity_rad_s",
+        "max_linear_acceleration_m_s2",
+        "max_angular_acceleration_rad_s2",
+    )
+    for key in safety_limit_names:
+        _positive(safety.get(key), f"flexiv.safety.{key}")
     cartesian = _mapping(flexiv.get("cartesian_control"), "flexiv.cartesian_control")
     if cartesian.get("mode") not in {"position", "impedance"}:
         raise SystemConfigError("flexiv.cartesian_control.mode must be position or impedance")
@@ -89,8 +125,21 @@ def load_system_config(path: str | Path) -> SystemConfig:
         if any(item < 0.0 for item in _vector(cartesian.get(key), f"flexiv.cartesian_control.{key}", 6)):
             raise SystemConfigError(f"flexiv.cartesian_control.{key} must be non-negative")
     home = _mapping(flexiv.get("home"), "flexiv.home")
-    _vector(home.get("left_joints_rad"), "flexiv.home.left_joints_rad", 7)
-    _vector(home.get("right_joints_rad"), "flexiv.home.right_joints_rad", 7)
+    for side in ("left", "right"):
+        positions = _vector(
+            home.get(f"{side}_joints_rad"),
+            f"flexiv.home.{side}_joints_rad",
+            7,
+        )
+        if any(
+            position < lower or position > upper
+            for position, lower, upper in zip(
+                positions, joint_lower, joint_upper
+            )
+        ):
+            raise SystemConfigError(
+                f"flexiv.home.{side}_joints_rad is outside configured safety limits"
+            )
     for key in ("max_velocity_rad_s", "max_acceleration_rad_s2", "tolerance_rad", "timeout_s"):
         _positive(home.get(key), f"flexiv.home.{key}")
     if not str(home.get("quest_button", "")).strip():
@@ -161,6 +210,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
     out.mkdir(parents=True, exist_ok=True)
     root = config.document
     sampling, pedal, flexiv = root["sampling"], root["pedal"], root["flexiv"]
+    safety = flexiv["safety"]
     cameras, inspire, teleop = root["cameras"], root["inspire"], root["teleop"]
     xr = root["xr_video"]
     session = root["session"]
@@ -212,8 +262,68 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
         "xr_bridge.yaml": {"flexiv_inspire_xr_bridge": {"ros__parameters": xr_params}},
         "isaac_camera_receiver.yaml": receiver,
         "dftp.yaml": {"flexiv_inspire_dftp_driver": {"ros__parameters": {"left_host": inspire["left_host"], "right_host": inspire["right_host"], "port": inspire["port"], "state_hz": sampling["hand_state_hz"], "tactile_hz": sampling["tactile_hz"], "hardware_write_enabled": bool(inspire["hardware_write_enabled"]), "local_session_id": session["id"], "local_write_confirmation": ""}}},
-        "control_bridge.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "foot_pedal": pedal["device"], "observation_rate_hz": sampling["arm_observation_hz"], "enable_key_code": pedal["enable_key_code"], "cartesian_control_mode": flexiv["cartesian_control"]["mode"], "cartesian_position_stiffness": flexiv["cartesian_control"]["position_stiffness"], "cartesian_impedance_stiffness": flexiv["cartesian_control"]["impedance_stiffness"], "cartesian_damping": flexiv["cartesian_control"]["damping"], "home_left_joints_rad": flexiv["home"]["left_joints_rad"], "home_right_joints_rad": flexiv["home"]["right_joints_rad"], "home_max_velocity_rad_s": flexiv["home"]["max_velocity_rad_s"], "home_max_acceleration_rad_s2": flexiv["home"]["max_acceleration_rad_s2"], "home_tolerance_rad": flexiv["home"]["tolerance_rad"], "home_timeout_s": flexiv["home"]["timeout_s"]}}},
-        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": teleop["manus_calibration"], "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/control/home_request"}}},
+        "control_bridge.yaml": {
+            "/**": {
+                "ros__parameters": {
+                    "session_id": session["id"],
+                    "foot_pedal": pedal["device"],
+                    "observation_rate_hz": sampling["arm_observation_hz"],
+                    "joint_lower_limits_rad": safety["joint_lower_limits_rad"],
+                    "joint_upper_limits_rad": safety["joint_upper_limits_rad"],
+                    "max_joint_velocity_rad_s": safety["max_joint_velocity_rad_s"],
+                    "max_tcp_linear_speed_m_s": safety[
+                        "max_tcp_linear_speed_m_s"
+                    ],
+                    "max_tcp_angular_speed_rad_s": safety[
+                        "max_tcp_angular_speed_rad_s"
+                    ],
+                    "max_external_force_n": safety["max_external_force_n"],
+                    "max_external_torque_nm": safety["max_external_torque_nm"],
+                    "max_joint_temperature_c": safety[
+                        "max_joint_temperature_c"
+                    ],
+                    "hand_reference_tolerance": safety[
+                        "hand_reference_tolerance"
+                    ],
+                    "max_translation_step_m": safety["max_translation_step_m"],
+                    "max_rotation_step_rad": safety["max_rotation_step_rad"],
+                    "max_linear_velocity_m_s": safety[
+                        "max_linear_velocity_m_s"
+                    ],
+                    "max_angular_velocity_rad_s": safety[
+                        "max_angular_velocity_rad_s"
+                    ],
+                    "max_linear_acceleration_m_s2": safety[
+                        "max_linear_acceleration_m_s2"
+                    ],
+                    "max_angular_acceleration_rad_s2": safety[
+                        "max_angular_acceleration_rad_s2"
+                    ],
+                    "enable_key_code": pedal["enable_key_code"],
+                    "cartesian_control_mode": flexiv["cartesian_control"]["mode"],
+                    "cartesian_position_stiffness": flexiv[
+                        "cartesian_control"
+                    ]["position_stiffness"],
+                    "cartesian_impedance_stiffness": flexiv[
+                        "cartesian_control"
+                    ]["impedance_stiffness"],
+                    "cartesian_damping": flexiv["cartesian_control"]["damping"],
+                    "home_left_joints_rad": flexiv["home"]["left_joints_rad"],
+                    "home_right_joints_rad": flexiv["home"][
+                        "right_joints_rad"
+                    ],
+                    "home_max_velocity_rad_s": flexiv["home"][
+                        "max_velocity_rad_s"
+                    ],
+                    "home_max_acceleration_rad_s2": flexiv["home"][
+                        "max_acceleration_rad_s2"
+                    ],
+                    "home_tolerance_rad": flexiv["home"]["tolerance_rad"],
+                    "home_timeout_s": flexiv["home"]["timeout_s"],
+                }
+            }
+        },
+        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/control/home_request"}}},
         "pedal.yaml": {"/**": {"ros__parameters": {"foot_pedal": pedal["device"], "rerecord_key_code": pedal["rerecord_key_code"], "enable_key_code": pedal["enable_key_code"], "record_toggle_key_code": pedal["record_toggle_key_code"]}}},
         "lerobot_export.yaml": root["lerobot_export"],
     }

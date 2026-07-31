@@ -5,15 +5,11 @@ import sys
 import pytest
 
 from flexiv_inspire_isaac.cameras.config import load_camera_configs
+from flexiv_inspire_isaac.cameras.smoke import DEFAULT_CONFIG as SMOKE_DEFAULT_CONFIG
+from flexiv_inspire_isaac.cameras.verify import DEFAULT_CONFIG as VERIFY_DEFAULT_CONFIG
 
 
-CONFIG = (
-    Path(__file__).parents[1]
-    / "src"
-    / "flexiv_inspire_isaac"
-    / "cameras"
-    / "realsense_rgb.yaml"
-)
+CONFIG = Path(__file__).parents[1] / "ros2_ws" / "src" / "flexiv_inspire_cameras" / "realsense_rgb.yaml"
 
 
 def test_three_camera_config_is_rgb_only_424x240_at_30():
@@ -26,8 +22,16 @@ def test_three_camera_config_is_rgb_only_424x240_at_30():
         assert camera.jpeg_quality == 90
 
 
+def test_camera_cli_defaults_follow_the_packaged_config():
+    assert SMOKE_DEFAULT_CONFIG == CONFIG.resolve()
+    assert VERIFY_DEFAULT_CONFIG == CONFIG.resolve()
+    assert SMOKE_DEFAULT_CONFIG.is_file()
+
+
 def test_camera_launch_uses_active_python_and_packaged_config():
-    pytest.importorskip("launch")
+    launch_module = pytest.importorskip("launch")
+    if not hasattr(launch_module, "LaunchContext"):
+        pytest.skip("ROS 2 launch Python package is unavailable")
     from launch import LaunchContext
 
     launch_file = CONFIG.parent / "launch" / "triple_rgb.launch.py"

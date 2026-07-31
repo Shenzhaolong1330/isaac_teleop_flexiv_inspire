@@ -72,24 +72,22 @@ ROS 环境通过项目内 `.pth` 使用
 `librealsense2.so` 均为 2.57.7，`pkg-config --modversion realsense2`
 返回 `2.57.7`。
 
-## 已执行的 smoke
+## 推荐 smoke
 
 ```bash
-# RDK：38 个核心/daemon 测试
+# RDK 核心/daemon 测试
 source scripts/env/activate_rdk.sh
-pytest -q --confcutdir=tests/core tests/core
+python -m pytest -q --confcutdir=tests/core tests/core
 
-# ROS：31 个 DFTP、映射、数学和配置测试
+# ROS、DFTP、映射、数据、可视化与配置测试
 source scripts/env/activate_ros.sh
-pytest -q tests/test_dftp_command_gate.py tests/test_dftp_protocol.py \
-  tests/test_dftp_reconnect.py tests/test_dftp_worker.py \
-  tests/test_mapping_valid.py tests/test_math3d.py tests/test_protocol_config.py
+python -m pytest -q
 
 # 环境、CUDA 与项目导入
 ./scripts/env/smoke_switch_isolation.sh
 ```
 
-RDK 的 `flexiv-rdk-daemon --help`、ROS 的 `isaac-flexiv-ros2 --help`、
+RDK 的 `flexiv-rdk-daemon --help`、ROS 的 `flexiv-inspire --help`、
 Isaac Teleop/CloudXR 模块导入，以及 Data 环境的 LeRobot、MCAP、
 Rerun、TorchCodec 导入均已通过。所有 GPU smoke 都在 RTX 5070 上使用
 Torch CUDA 12.8 完成。

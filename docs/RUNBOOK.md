@@ -17,7 +17,7 @@
 
 首次真机验收前仍必须由现场人员完成这些外部条件：
 
-1. 核对并填写真实工具、payload、七轴软限位、相机序列号和 MANUS 标定；
+1. 核对控制器当前工具及 payload、默认七轴限位、相机序列号和 MANUS 标定；
 2. 阅读并亲自接受 NVIDIA CloudXR EULA；不得脚本代替接受；
 3. 连接 Quest，并确认 `adb devices -l` 能看到设备；
 4. 按上游许可要求获取官方 Sharpa Wave 左右手 URDF。缺少它们时
@@ -41,9 +41,7 @@ cd "$ROOT"
 
 source "$ROOT/scripts/env/activate_ros.sh"
 colcon --log-base "$ROOT/ros2_ws/log" build \
-  --base-paths \
-    "$ROOT/ros2_ws/src/flexiv_inspire_interfaces" \
-    "$ROOT/ros2_ws/src/flexiv_inspire_control" \
+  --base-paths "$ROOT/ros2_ws/src" \
   --build-base "$ROOT/ros2_ws/build" \
   --install-base "$ROOT/ros2_ws/install" \
   --symlink-install \
@@ -53,8 +51,9 @@ source "$ROOT/ros2_ws/install/setup.bash"
 ros2 pkg executables flexiv_inspire_control
 ```
 
-不要运行无 `--base-paths` 的裸 `colcon build`。`envs/`、`third_party/IsaacTeleop/` 和
-`vendor/` 带有 `COLCON_IGNORE`，但精确指定两包仍是受支持方式。
+不要运行无 `--base-paths` 的裸 `colcon build`。该命令构建
+`ros2_ws/src` 下的全部八个 ROS 包；`envs/`、`third_party/IsaacTeleop/`
+和 `vendor/` 不会进入工作空间扫描。
 
 若 MANUS 插件尚未安装，按 [MANUS_SETUP.md](MANUS_SETUP.md) 构建。安装后
 必须存在：
@@ -66,55 +65,44 @@ test -x "$ROOT/third_party/IsaacTeleop/install/manus-isaac/plugins/manus/manus_h
 CUDA 12.8 只由 `activate_isaac.sh`/`activate_data.sh` 局部选择。不要改
 `.bashrc`、`/usr/bin/nvcc` 或系统 CUDA 12.0。
 
-## 2. 创建仅本机使用的现场配置
+## 2. 核对现场配置
 
-`artifacts/` 已被 Git 忽略。模板不能直接用于真机：
+不需要创建固定的 `artifacts/site/`。`config/site.yaml` 是统一入口；
+RDK 工具审计、MANUS 标定等需要独立哈希的记录由它引用。`render` 会把
+进程级配置生成到本会话的 runtime 目录：
 
 ```bash
 export ROOT=/home/hb/isaac_teleop_flexiv_inspire
-export SITE="$ROOT/artifacts/site"
-mkdir -p "$SITE"
-
-cp --no-clobber "$ROOT/apps/flexiv_daemon/config/robots.yaml" \
-  "$SITE/robots.yaml"
-cp --no-clobber "$ROOT/apps/flexiv_daemon/config/tool_payload.yaml" \
-  "$SITE/tool_payload.yaml"
-cp --no-clobber \
-  "$ROOT/ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml" \
-  "$SITE/control_bridge.yaml"
-cp --no-clobber \
-  "$ROOT/ros2_ws/src/flexiv_inspire_control/config/teleop.yaml" \
-  "$SITE/teleop.yaml"
-cp --no-clobber \
-  "$ROOT/ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml" \
-  "$SITE/manus_calibration.yaml"
-cp --no-clobber "$ROOT/ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml" \
-  "$SITE/dual_hands.yaml"
-cp --no-clobber \
-  "$ROOT/ros2_ws/src/flexiv_inspire_cameras/realsense_rgb.yaml" \
-  "$SITE/realsense_rgb.yaml"
+source "$ROOT/scripts/env/activate_ros.sh"
+flexiv-inspire --config "$ROOT/config/site.yaml" validate
+flexiv-inspire --config "$ROOT/config/site.yaml" render
 ```
 
-现场逐项编辑并双人复核：
+真机前逐项复核：
 
-- `tool_payload.yaml`：真实工具序列号、安装修订、质量、质心和惯量；核对后
-  两臂才可设 `locally_verified: true`。
-- `robots.yaml`：序列号、机器人软件兼容前缀和相对
-  `tool_payload_config: tool_payload.yaml`。
-- `control_bridge.yaml`：左右臂均适用且经过审计的 7 个
-  `joint_lower_limits_rad`/`joint_upper_limits_rad`。空数组会安全地阻止控制。
-- `teleop.yaml`：坐标映射、deadman、绝对 MANUS 标定路径。未完成标定时
-  保持 `manus_calibration: ""`，此时只允许手臂 shadow。
-- 相机和 DFTP IP/序列号。不要把真实凭据或私钥放入仓库。
+- `apps/flexiv_daemon/config/robots.yaml`：机器人序列号、软件兼容前缀和
+  期望活动工具名。当前两臂均应为 `inspire_rs`。
+- `apps/flexiv_daemon/config/tool_payload.yaml`：这是控制器工具的本地审计
+  快照，不负责选择或切换工具。质量、质心、惯量和 TCP 由 RDK 从当前
+  `inspire_rs` 读取；物理工具序列号与安装修订仍需现场确认。确认后才可
+  设置 `locally_verified: true`。
+- `config/site.yaml`：当前已填写两台控制器 `RobotInfo` 返回的 Rizon4s
+  默认七轴限位。生成的控制配置会携带这些值，控制时软件仍会逐帧检查。
+- `teleop.manus_calibration`：未完成标定时保持空值，只允许手臂
+  shadow/录制；手指命令保持 invalid。
+- 相机序列号、DFTP IP 和脚踏 by-id。不要把凭据或私钥放入仓库。
 
 只读验证工具/payload 记录：
 
 ```bash
 source "$ROOT/scripts/env/activate_rdk.sh"
 flexiv-rdk-daemon \
-  --config "$SITE/robots.yaml" \
+  --config "$ROOT/apps/flexiv_daemon/config/robots.yaml" \
   --print-tool-payload-hash
 ```
+
+在 `locally_verified` 仍为 `false` 时，这条命令应拒绝，这是现场物理审计
+尚未完成的证据，不是要求在 RDK 中再次选择工具。
 
 ## 3. 为一次硬件会话固定变量
 
@@ -125,10 +113,22 @@ export ROOT=/home/hb/isaac_teleop_flexiv_inspire
 export SESSION_ID="hardware-$(date -u +%Y%m%dT%H%M%SZ)"
 export RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/isaac_teleop"
 mkdir -p "$ROOT/artifacts/runtime" "$RUNTIME_DIR"
+source "$ROOT/scripts/env/activate_ros.sh"
+export RENDER_DIR="$(
+  flexiv-inspire --config "$ROOT/config/site.yaml" render |
+    python -c 'import json,pathlib,sys; print(pathlib.Path(json.load(sys.stdin)["snapshot"]).parent)'
+)"
+test -d "$RENDER_DIR"
 umask 077
 printf '%s\n' \
   "export ROOT='$ROOT'" \
-  "export SITE='$ROOT/artifacts/site'" \
+  "export RDK_CONFIG='$ROOT/apps/flexiv_daemon/config/robots.yaml'" \
+  "export TOOL_CONFIG='$ROOT/apps/flexiv_daemon/config/tool_payload.yaml'" \
+  "export CONTROL_CONFIG='$RENDER_DIR/control_bridge.yaml'" \
+  "export TELEOP_CONFIG='$RENDER_DIR/teleop.yaml'" \
+  "export DFTP_CONFIG='$RENDER_DIR/dftp.yaml'" \
+  "export CAMERA_CONFIG='$RENDER_DIR/camera.yaml'" \
+  "export MANUS_CONFIG=''" \
   "export SESSION_ID='$SESSION_ID'" \
   "export RUNTIME_DIR='$RUNTIME_DIR'" \
   "export RDK_SOCKET='$RUNTIME_DIR/rdk.sock'" \
@@ -158,17 +158,19 @@ source "$ROOT/scripts/env/activate_rdk.sh"
 flexiv-rdk-daemon \
   --hardware \
   --verify-compatibility \
-  --config "$SITE/robots.yaml"
+  --config "$RDK_CONFIG"
 ```
 
-这一步只读 `RobotInfo`；它不会升级控制器。必须人工确认 RDK 为 1.9.x，
-两台机器人分别为 `Rizon4s-063326`/`Rizon4s-063806`、软件前缀和许可兼容。
+这一步只读 `RobotInfo` 和当前 `Tool.params()`；它不会升级控制器、选择
+工具或修改 payload。必须确认 RDK 为 1.9.x、两台机器人分别为
+`Rizon4s-063326`/`Rizon4s-063806`、软件前缀和许可兼容，活动工具均为
+`inspire_rs`，并查看控制器返回的关节限位。
 然后启动只读 daemon：
 
 ```bash
 flexiv-rdk-daemon \
   --hardware \
-  --config "$SITE/robots.yaml" \
+  --config "$RDK_CONFIG" \
   --socket "$RDK_SOCKET" \
   --events "$RDK_EVENTS"
 ```
@@ -182,9 +184,9 @@ flexiv-rdk-daemon \
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-flexiv-inspire-camera-verify --config "$SITE/realsense_rgb.yaml"
+flexiv-inspire-camera-verify --config "$CAMERA_CONFIG"
 flexiv-inspire-camera-node --ros-args \
-  -p config:="$SITE/realsense_rgb.yaml"
+  -p config:="$CAMERA_CONFIG"
 ```
 
 必须看到三台正确序列号、librealsense 2.57.7、`424x240@30`、JPEG90、
@@ -204,7 +206,7 @@ flexiv-inspire-dftp-read-only --include-tactile
 
 ```bash
 flexiv-inspire-dftp-node --ros-args \
-  --params-file "$SITE/dual_hands.yaml"
+  --params-file "$DFTP_CONFIG"
 ```
 
 确认配置仍是 `hardware_write_enabled: false`。此阶段只能读角度、位置、力、
@@ -266,7 +268,7 @@ set +a
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
 ros2 run flexiv_inspire_control control_bridge --ros-args \
-  --params-file "$SITE/control_bridge.yaml" \
+  --params-file "$CONTROL_CONFIG" \
   -p session_id:="$SESSION_ID" \
   -p rdk_socket:="$RDK_SOCKET" \
   -p foot_pedal:=/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
@@ -278,7 +280,7 @@ ros2 run flexiv_inspire_control control_bridge --ros-args \
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
 ros2 run flexiv_inspire_control teleop_input --ros-args \
-  --params-file "$SITE/teleop.yaml" \
+  --params-file "$TELEOP_CONFIG" \
   -p session_id:="$SESSION_ID" \
   -p command_enabled:=false
 ```
@@ -333,13 +335,15 @@ flexiv-rdk-daemon \
   --hardware \
   --allow-hardware-writes \
   --local-permit-file "$WRITE_PERMIT" \
-  --config "$SITE/robots.yaml" \
+  --config "$RDK_CONFIG" \
   --socket "$RDK_SOCKET" \
   --events "$RDK_EVENTS"
 ```
 
 三个条件只开放 daemon 写边界，不会自行 Enable、清零或运动。daemon
-重启会使旧 F/T 状态失效，桥必须仍显示 `MAINTENANCE`。
+会在清零前再次将 `$TOOL_CONFIG` 的审计快照与控制器当前工具逐项比较；
+任一名称、质量、质心、惯量或 TCP 不一致都会拒绝。重启会使旧 F/T 状态
+失效，桥必须仍显示 `MAINTENANCE`。
 
 先在另一个本地 ROS TTY 做不执行的预览：
 
@@ -348,7 +352,7 @@ source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
 ros2 run flexiv_inspire_control zero_ft_local \
   --rdk-socket "$RDK_SOCKET" \
-  --tool-payload-config "$SITE/tool_payload.yaml"
+  --tool-payload-config "$TOOL_CONFIG"
 ```
 
 核对输出的 session、配置 SHA-256、双手姿态和两秒稳定性。确认无人接触、
@@ -357,7 +361,7 @@ ros2 run flexiv_inspire_control zero_ft_local \
 ```bash
 ros2 run flexiv_inspire_control zero_ft_local \
   --rdk-socket "$RDK_SOCKET" \
-  --tool-payload-config "$SITE/tool_payload.yaml" \
+  --tool-payload-config "$TOOL_CONFIG" \
   --confirm-ft-unloaded FLEXIV-FT-UNLOADED
 ```
 
@@ -391,8 +395,10 @@ ros2 topic pub --once /safety/collision_clear std_msgs/msg/Bool \
 若要控制灵巧手，先停止只读 DFTP 节点，再以本会话的显式写门禁重启：
 
 ```bash
+test -n "$MANUS_CONFIG"
+test -f "$MANUS_CONFIG"
 flexiv-inspire-dftp-node --ros-args \
-  --params-file "$SITE/dual_hands.yaml" \
+  --params-file "$DFTP_CONFIG" \
   -p hardware_write_enabled:=true \
   -p local_session_id:="$SESSION_ID" \
   -p local_write_confirmation:=DFTP-LOCAL-CONTROL-AUTHORIZED
@@ -415,7 +421,8 @@ ros2 run flexiv_inspire_control authorize_control \
 
 ```bash
 ros2 run flexiv_inspire_control teleop_input --ros-args \
-  --params-file "$SITE/teleop.yaml" \
+  --params-file "$TELEOP_CONFIG" \
+  -p manus_calibration:="$MANUS_CONFIG" \
   -p session_id:="$SESSION_ID" \
   -p command_enabled:=true
 ```
@@ -423,10 +430,10 @@ ros2 run flexiv_inspire_control teleop_input --ros-args \
 先保持 deadman 松开完成 rebase。严格按以下顺序逐级验收，每一级都记录
 requested/safe/sent、wrench 和现场结果，失败立即松脚踏并停止：
 
-1. 单手；
-2. 单臂，速度/加速度上限降到额定值的 10%；
-3. 双臂；
-4. 双臂 + 双手；
+1. 单臂，速度/加速度上限降到额定值的 10%；
+2. 双臂；
+3. 完成 MANUS 标定后单手；
+4. 完成 MANUS 标定后双臂 + 双手；
 5. 策略 shadow；
 6. 策略真机。
 
@@ -458,15 +465,18 @@ source "$ROOT/ros2_ws/install/setup.bash"
 isaac-flexiv-episode \
   --root "$ROOT/sessions" \
   --session-id "$SESSION_ID" \
-  --tool-config "$SITE/tool_payload.yaml" \
+  --tool-config "$TOOL_CONFIG" \
   --ft-zero-record "$RDK_EVENTS" \
-  --calibration cameras="$SITE/realsense_rgb.yaml" \
-  --calibration manus="$SITE/manus_calibration.yaml" \
+  --calibration cameras="$CAMERA_CONFIG" \
   --camera-recording-mode jpeg \
   --deviceio-mode native \
   --deviceio-socket "$DEVICEIO_SOCKET" \
   --duration-s 1800
 ```
+
+完成 MANUS 标定后再额外传入
+`--calibration manus="$MANUS_CONFIG"`；手臂-only 数据不伪造 MANUS 标定
+记录。
 
 正式运动前必须先确认该进程仍在运行，socket 权限为 `0600`。各硬件进程可
 先于 recorder 启动；此时传感器记录会明确计为 transport drop，而控制关键

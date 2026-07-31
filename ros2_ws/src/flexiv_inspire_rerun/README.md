@@ -16,7 +16,7 @@ From the project root:
 
 ```bash
 source scripts/env/activate_ros.sh
-source install/core_ros/setup.bash  # use the active colcon install directory
+source ros2_ws/install/setup.bash
 flexiv-inspire-rerun --spawn
 ```
 

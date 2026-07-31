@@ -22,7 +22,7 @@ warning.
 6. Timeouts hold measured arm poses and measured hand angles. They never open
    the hands or replay a stale target.
 7. Requested, safe, and sent commands are distinct, timestamped records.
-   `safe_command` is the default training action; MCAP remains the immutable
+   `sent_command` is the default training action; MCAP remains the immutable
    asynchronous source of truth.
 8. A watchdog, communication loss, lease loss, pedal release, source change, or
    hardware fault transitions to `HOLD_LATCHED`. Resuming requires an explicit

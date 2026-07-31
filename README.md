@@ -116,7 +116,7 @@ source "$PROJECT_ROOT/ros2_ws/install/setup.bash"
 ```
 
 Mock and static tests never issue hardware commands. The control bridge starts
-in `DISABLED`; the DFTP driver starts read-only; the RDK daemon requires a
+the hardware session in `MAINTENANCE`; the DFTP driver starts read-only; the RDK daemon requires a
 short-lived local write permit before accepting a command session.
 
 ## Hardware-session gate

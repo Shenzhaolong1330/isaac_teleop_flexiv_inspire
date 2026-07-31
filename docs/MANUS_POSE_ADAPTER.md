@@ -20,7 +20,8 @@
 CMC/MCP/IP 屈曲特征；拇指外展使用腕坐标系中的有符号掌骨方向角。
 这些特征只进入现场标定映射，不直接当作 Inspire 命令。
 
-`config/manus_calibration_template.yaml` 默认 `calibrated: false`。默认
+`ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml`
+默认 `calibrated: false`。默认
 空 `manus_calibration` 参数时系统仅允许手臂遥操作，手的 valid mask
 不会置位。必须在真实操作者、手套和双手上分别采集开/闭端点，审核
 权重与方向，然后复制模板、设为 `calibrated: true` 并把

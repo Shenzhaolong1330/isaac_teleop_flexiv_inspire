@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -48,6 +49,39 @@ def _xr_receiver_command(config, rendered: dict[str, Path]) -> list[str]:
     ]
 
 
+def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
+    root = config.document
+    session = root["session"]
+    recording = root["recording"]
+    runtime_root = Path(session["runtime_root"]).expanduser()
+    return [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_isaac.episode_control",
+        "--ros-args",
+        "-p", f"sessions_root:={config.resolve(recording['output_root'])}",
+        "-p", f"dataset_name:={recording['dataset_name']}",
+        "-p", f"episode_count:={int(recording['episode_count'])}",
+        "-p", "task_description:=" + json.dumps(
+            str(recording["task_description"]), ensure_ascii=False
+        ),
+        "-p", f"session_id:={session['id']}",
+        "-p", f"tool_config:={config.resolve(root['flexiv']['tool_payload_config'])}",
+        "-p", f"ft_zero_record:={runtime_root / 'ft_zero_events.jsonl'}",
+        "-p", f"camera_config:={rendered['camera.yaml']}",
+        "-p", f"manus_calibration:={config.resolve(root['teleop']['manus_calibration']) if str(root['teleop']['manus_calibration']).strip() else ''}",
+        "-p", f"deviceio_socket:={runtime_root / 'deviceio.sock'}",
+        "-p", f"runtime_dir:={runtime_root}",
+        "-p", f"rdk_socket:={runtime_root / 'rdk.sock'}",
+        "-p", f"camera_recording_mode:={recording['camera_recording_mode']}",
+        "-p", f"deviceio_mode:={recording['deviceio_mode']}",
+        "-p", f"auto_start:={str(bool(recording.get('auto_start', True))).lower()}",
+        "-p", f"auto_authorize_home:={str(bool(recording.get('auto_authorize_home', True))).lower()}",
+        "-p", f"auto_authorize_control:={str(bool(recording.get('auto_authorize_control', True))).lower()}",
+        "-p", f"home_result_timeout_s:={float(root['flexiv']['home']['timeout_s']) + 10.0}",
+    ]
+
+
 def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -> list[list[str]]:
     root = config.document
     session = root["session"]
@@ -71,14 +105,7 @@ def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -
         ["flexiv-inspire-camera-node", "--ros-args", "-p", f"config:={rendered['camera.yaml']}"],
         ["flexiv-inspire-dftp-node", "--ros-args", "--params-file", str(rendered["dftp.yaml"])],
         ["flexiv-inspire-pedal-router", "--ros-args", "--params-file", str(rendered["pedal.yaml"])],
-        ["flexiv-inspire-episode-controller", "--ros-args", "-p", f"sessions_root:={config.resolve(root['session']['sessions_root'])}",
-         "-p", f"session_id:={session['id']}", "-p", f"tool_config:={config.resolve(root['flexiv']['tool_payload_config'])}",
-         "-p", f"ft_zero_record:={ft_zero_record}",
-         "-p", f"camera_config:={rendered['camera.yaml']}",
-         "-p", f"manus_calibration:={config.resolve(root['teleop']['manus_calibration']) if str(root['teleop']['manus_calibration']).strip() else ''}",
-         "-p", f"deviceio_socket:={runtime_root / 'deviceio.sock'}",
-         "-p", f"camera_recording_mode:={root['recording']['camera_recording_mode']}",
-         "-p", f"home_result_timeout_s:={float(root['flexiv']['home']['timeout_s']) + 10.0}"],
+        _episode_command(config, rendered),
     ]
     if bool(root["xr_video"]["enabled"]):
         commands.append(["flexiv-inspire-xr-bridge", "--ros-args", "--params-file", str(rendered["xr_bridge.yaml"])])
@@ -99,6 +126,7 @@ def _parser() -> argparse.ArgumentParser:
     xr_group.add_argument("--with-xr", action="store_true", help="start the IsaacTeleop Quest video receiver")
     xr_group.add_argument("--no-xr", action="store_true", help="keep RTP bridge available but do not start the Quest receiver")
     sub.add_parser("stop", help="stop services started by record")
+    sub.add_parser("collect", help="run the configured multi-episode collection in the foreground")
     visualize = sub.add_parser("visualize", help="start read-only live Rerun")
     visualize.add_argument("--save", default="")
     replay = sub.add_parser("replay", help="offline replay inspection only; never moves hardware")
@@ -159,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
         _write_state(runtime, config, processes)
         print(f"started {len(processes)} services; XR receiver={'on' if include_xr else 'off'}; robot writes remain locally gated")
         return 0
+    if args.operation == "collect":
+        rendered = render_runtime_configs(config, runtime / config.sha256[:12])
+        return _run_collection(config, rendered)
     if args.operation == "stop":
         state = runtime / "processes.json"
         if not state.is_file():
@@ -181,6 +212,117 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({"mode": "offline-shadow-replay", "hardware_writes": False, "episode": str(episode),
                       "completed": bool(data.get("completed")), "reason": data.get("completion_reason", "")}, indent=2))
     return 0
+
+
+def _run_collection(config, rendered: dict[str, Path]) -> int:
+    _collection_preflight(config, rendered)
+    runtime_root = Path(config.document["session"]["runtime_root"]).expanduser()
+    lock = (runtime_root / "collection.lock").open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        raise SystemExit("another collection process is already active")
+    recording = config.document["recording"]
+    output = config.resolve(recording["output_root"]) / recording["dataset_name"]
+    print(
+        f"collection starting: {recording['episode_count']} episodes -> {output}\n"
+        f"task: {recording['task_description']}\n"
+        "right=commit/Home/next, left=discard/Home/retry, Quest A=pause/Home/resume, Ctrl-C=save/stop",
+        flush=True,
+    )
+    pedal = None
+    try:
+        pedal = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "flexiv_inspire_isaac.pedal_router",
+                "--ros-args",
+                "--params-file",
+                str(rendered["pedal.yaml"]),
+            ],
+            start_new_session=True,
+        )
+        controller = subprocess.Popen(
+            _episode_command(config, rendered), start_new_session=True
+        )
+        try:
+            return int(controller.wait())
+        except KeyboardInterrupt:
+            if controller.poll() is None:
+                controller.send_signal(signal.SIGINT)
+                try:
+                    controller.wait(timeout=35.0)
+                except subprocess.TimeoutExpired:
+                    controller.terminate()
+                    controller.wait(timeout=5.0)
+            return 130
+    finally:
+        if pedal is not None and pedal.poll() is None:
+            pedal.terminate()
+            try:
+                pedal.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                pedal.kill()
+                pedal.wait(timeout=5.0)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
+def _collection_preflight(config, rendered: dict[str, Path]) -> None:
+    root = config.document
+    runtime_root = Path(root["session"]["runtime_root"]).expanduser()
+    required_commands = ("ros2",)
+    missing_commands = [
+        command for command in required_commands if shutil.which(command) is None
+    ]
+    if missing_commands:
+        raise SystemExit(
+            "collection preflight failed; missing commands: "
+            + ", ".join(missing_commands)
+        )
+    if (
+        bool(root["recording"].get("auto_authorize_home", True))
+        or bool(root["recording"].get("auto_authorize_control", True))
+    ) and not sys.stdin.isatty():
+        raise SystemExit(
+            "collection preflight failed: automatic local authorization requires an interactive local TTY"
+        )
+    paths = {
+        "foot pedal": Path(root["pedal"]["device"]),
+        "RDK socket": runtime_root / "rdk.sock",
+        "F/T-zero event record": runtime_root / "ft_zero_events.jsonl",
+        "tool config": config.resolve(root["flexiv"]["tool_payload_config"]),
+        "rendered camera config": rendered["camera.yaml"],
+    }
+    manus = str(root["teleop"]["manus_calibration"]).strip()
+    if manus:
+        paths["MANUS calibration"] = config.resolve(manus)
+    missing = [label for label, path in paths.items() if not path.exists()]
+    if missing:
+        details = ", ".join(f"{label}={paths[label]}" for label in missing)
+        raise SystemExit(f"collection preflight failed; missing: {details}")
+    if not os.access(paths["foot pedal"], os.R_OK):
+        raise SystemExit(
+            f"collection preflight failed: foot pedal is not readable: {paths['foot pedal']}"
+        )
+    if not paths["RDK socket"].is_socket():
+        raise SystemExit(
+            f"collection preflight failed: RDK endpoint is not a Unix socket: {paths['RDK socket']}"
+        )
+
+
+def collect_main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv:
+        raise SystemExit("flexiv-inspire-collect takes no arguments; edit config/recording.yaml")
+    project_root = Path(__file__).resolve().parents[4]
+    config = load_system_config(project_root / "config" / "site.yaml")
+    runtime = _runtime_dir(config)
+    rendered = render_runtime_configs(config, runtime / config.sha256[:12])
+    return _run_collection(config, rendered)
 
 
 if __name__ == "__main__":

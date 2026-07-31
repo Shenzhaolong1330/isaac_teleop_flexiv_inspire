@@ -136,9 +136,30 @@ online arms and hands, and all safety checks. Any failure enters a latched hold.
 Follow the staged acceptance sequence in `docs/SAFETY_INVARIANTS.md`; do not
 skip directly to dual-arm motion.
 
+## One-command collection
+
+After the persistent hardware/control stack is connected, F/T-zeroed and
+`READY`, daily collection is configured only in `config/recording.yaml` and
+started without command-line parameters:
+
+```bash
+./scripts/collect.sh
+```
+
+Recording starts automatically. Right pedal commits, Homes and advances; left
+pedal discards, Homes and retries the same index; Quest A pauses both MCAP
+paths during Home and resumes the same episode. The process exits at the
+configured successful-episode count or on `Ctrl-C`. See
+[`docs/DATA_COLLECTION.md`](docs/DATA_COLLECTION.md) for the exact workflow and
+output layout.
+
+`config/site.yaml` is a small composed entry point over hardware, sensors,
+recording and runtime fragments. Generated runtime snapshots are not operator
+configuration and no `artifacts/site/` directory is required.
+
 ## Recording, visualization, and policy
 
-The formal recording entry point is `isaac-flexiv-episode`; it requires
+The low-level recording entry point is `isaac-flexiv-episode`; it requires
 a successful F/T-zero event matching the session and tool hash, then writes an
 atomic manifest, ROS MCAP, and native asynchronous DeviceIO MCAP. The exact
 command is in `docs/RUNBOOK.md`. `scripts/record_ros_mcap.sh` is explicitly a

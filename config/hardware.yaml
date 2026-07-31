@@ -1,0 +1,61 @@
+session:
+  id: flexiv-inspire-site
+  runtime_root: /run/user/1000/isaac_teleop
+  sessions_root: sessions
+
+sampling:
+  arm_observation_hz: 200.0
+  teleop_command_hz: 60.0
+  hand_state_hz: 50.0
+  tactile_hz: 30.0
+  camera_hz: 30.0
+  policy_observation_hz: 30.0
+  training_timeline_hz: 30.0
+  action_label: sent_command
+
+pedal:
+  device: /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
+  rerecord_key_code: 105
+  enable_key_code: 108
+  record_toggle_key_code: 106
+
+flexiv:
+  rdk_config: apps/flexiv_daemon/config/robots.yaml
+  tool_payload_config: apps/flexiv_daemon/config/tool_payload.yaml
+  frame_config: config/dual_arm_frames.yaml
+  safety:
+    joint_lower_limits_rad: [-2.7925667762756348, -2.2689666748046875, -2.967066764831543, -1.8674668073654175, -2.967066764831543, -1.3962668180465698, -2.967066764831543]
+    joint_upper_limits_rad: [2.7925667762756348, 2.2689666748046875, 2.967066764831543, 2.6877667903900146, 2.967066764831543, 4.537866592407227, 2.967066764831543]
+    max_joint_velocity_rad_s: 0.75
+    max_tcp_linear_speed_m_s: 0.35
+    max_tcp_angular_speed_rad_s: 1.0
+    max_external_force_n: 60.0
+    max_external_torque_nm: 8.0
+    max_joint_temperature_c: 75.0
+    hand_reference_tolerance: 1.0
+    max_translation_step_m: 0.01
+    max_rotation_step_rad: 0.10
+    max_linear_velocity_m_s: 0.05
+    max_angular_velocity_rad_s: 0.15
+    max_linear_acceleration_m_s2: 0.25
+    max_angular_acceleration_rad_s2: 0.50
+  cartesian_control:
+    mode: position
+    position_stiffness: [3000, 3000, 3000, 200, 200, 200]
+    impedance_stiffness: [1200, 1200, 1200, 80, 80, 80]
+    damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
+  home:
+    left_joints_rad: [0.0, 0.80, -1.80, -1.35, 0.8416, 0.30, -1.57]
+    right_joints_rad: [0.0, -0.80, 1.80, 1.35, 2.30, 0.30, 0.0]
+    max_velocity_rad_s: 0.50
+    max_acceleration_rad_s2: 1.0
+    tolerance_rad: 0.01
+    timeout_s: 20.0
+    quest_button: right_primary_click
+
+inspire:
+  config: ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml
+  left_host: 192.168.5.11
+  right_host: 192.168.5.12
+  port: 6000
+  hardware_write_enabled: false

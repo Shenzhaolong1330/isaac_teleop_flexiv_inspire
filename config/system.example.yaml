@@ -1,4 +1,4 @@
-# This is the only site-editable runtime configuration.  Copy to config/site.yaml.
+# Monolithic reference example. The live site.yaml composes focused fragments.
 schema_version: 1
 session:
   id: "flexiv-inspire-site"
@@ -21,7 +21,7 @@ pedal:
   # PCsensor keyboard mapping: left=105, down=108, right=106.
   rerecord_key_code: 105       # left: discard current, guarded Home, then start fresh
   enable_key_code: 108         # down arrow: hold-to-enable; release latches hold
-  record_toggle_key_code: 106  # right: stop recording only, never starts or moves
+  record_toggle_key_code: 106  # right: commit current, guarded Home, then next
 
 flexiv:
   rdk_config: apps/flexiv_daemon/config/robots.yaml
@@ -139,10 +139,17 @@ lerobot_export:
   channels: {}
 
 recording:
+  dataset_name: example_dataset
+  episode_count: 10
+  output_root: sessions
+  task_description: "Pick up the object and place it in the target area."
   camera_recording_mode: jpeg
   deviceio_mode: native
   # Immutable during an active episode.  Re-render/restart producers to change resolution/rate.
   snapshot_config: true
+  auto_start: true
+  auto_authorize_home: true
+  auto_authorize_control: true
 
 commands:
   # The unified launcher stays mock/shadow. Real hardware uses the staged

@@ -1,0 +1,23 @@
+# 日常数采只改这个文件；启动命令不接收参数。
+recording:
+  # 输出目录为 <output_root>/<dataset_name>/episode_000001_attempt_01_<id>/
+  dataset_name: pick_place_demo
+  episode_count: 20
+  output_root: sessions
+  # 写入每条 manifest，并默认作为 LeRobot/VLA 的 task prompt。
+  task_description: "Pick up the target object and place it in the designated area."
+  camera_recording_mode: jpeg
+  deviceio_mode: native
+  snapshot_config: true
+  auto_start: true
+  auto_authorize_home: true
+  auto_authorize_control: true
+
+lerobot_export:
+  schema_version: 1
+  timeline:
+    source: camera/head/jpeg
+    fps: 30.0
+  action:
+    view: sent_command
+  channels: {}

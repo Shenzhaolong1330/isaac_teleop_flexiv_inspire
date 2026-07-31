@@ -1,0 +1,5 @@
+commands:
+  # The all-service development launcher remains mock. Real-hardware services
+  # are commissioned once; flexiv-inspire-collect manages the dataset session.
+  rdk_daemon: [/home/hb/isaac_teleop_flexiv_inspire/envs/rdk-py310/bin/flexiv-rdk-daemon, --mock]
+  teleop_launch: [ros2, launch, flexiv_inspire_control, teleop_control.launch.py]

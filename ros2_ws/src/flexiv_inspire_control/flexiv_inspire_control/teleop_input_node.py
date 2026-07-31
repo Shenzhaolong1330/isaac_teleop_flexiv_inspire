@@ -15,7 +15,7 @@ import rclpy
 from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from std_msgs.msg import Bool, ByteMultiArray, Empty, UInt64
+from std_msgs.msg import Bool, ByteMultiArray, String, UInt64
 from tf2_msgs.msg import TFMessage
 import yaml
 
@@ -203,7 +203,7 @@ class TeleopInput(Node):
             "manus_calibration": "",
             "max_manus_age_s": 0.10,
             "home_button_key": "right_primary_click",
-            "home_topic": "/control/home_request",
+            "home_topic": "/episode/control",
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -270,7 +270,7 @@ class TeleopInput(Node):
             UInt64, "/command_sources/teleop/heartbeat", qos_profile_sensor_data
         )
         self._home_pub = self.create_publisher(
-            Empty, str(self.get_parameter("home_topic").value), 1
+            String, str(self.get_parameter("home_topic").value), 1
         )
         rate = float(self.get_parameter("control_rate_hz").value)
         self.create_timer(1.0 / rate, self._tick)
@@ -329,7 +329,9 @@ class TeleopInput(Node):
                 raise ValueError("Quest home button must be boolean")
             home_button_down = bool(raw_button)
             if home_button_down and not self._home_button_down:
-                self._home_pub.publish(Empty())
+                request = String()
+                request.data = "home"
+                self._home_pub.publish(request)
             self._home_button_down = home_button_down
             self._controller_received = time.monotonic_ns()
         except Exception as exc:

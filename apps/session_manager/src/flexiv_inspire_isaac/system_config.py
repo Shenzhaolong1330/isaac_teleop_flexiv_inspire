@@ -45,6 +45,41 @@ def canonical_hash(document: Mapping[str, Any]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _merge_document(target: dict[str, Any], incoming: Mapping[str, Any]) -> None:
+    for key, value in incoming.items():
+        if key not in target:
+            target[key] = value
+        elif isinstance(target[key], dict) and isinstance(value, Mapping):
+            _merge_document(target[key], value)
+        else:
+            raise SystemConfigError(f"duplicate composed config key: {key}")
+
+
+def _load_composed_document(source: Path) -> dict[str, Any]:
+    entry = _mapping(
+        yaml.safe_load(source.read_text(encoding="utf-8")), "system config"
+    )
+    includes = entry.pop("includes", [])
+    if not isinstance(includes, list) or not all(
+        isinstance(item, str) and item.strip() for item in includes
+    ):
+        raise SystemConfigError("includes must be a list of non-empty paths")
+    result: dict[str, Any] = {}
+    for raw in includes:
+        fragment_path = (source.parent / raw).resolve(strict=True)
+        fragment = _mapping(
+            yaml.safe_load(fragment_path.read_text(encoding="utf-8")),
+            f"config fragment {raw}",
+        )
+        if "includes" in fragment or "schema_version" in fragment:
+            raise SystemConfigError(
+                f"config fragment {raw} cannot declare includes/schema_version"
+            )
+        _merge_document(result, fragment)
+    _merge_document(result, entry)
+    return result
+
+
 @dataclass(frozen=True)
 class SystemConfig:
     path: Path
@@ -63,7 +98,7 @@ class SystemConfig:
 
 def load_system_config(path: str | Path) -> SystemConfig:
     source = Path(path).expanduser().resolve(strict=True)
-    root = _mapping(yaml.safe_load(source.read_text(encoding="utf-8")), "system config")
+    root = _load_composed_document(source)
     if int(root.get("schema_version", 0)) != 1:
         raise SystemConfigError("schema_version must be 1")
     session = _mapping(root.get("session"), "session")
@@ -254,6 +289,24 @@ def load_system_config(path: str | Path) -> SystemConfig:
         plane = _mapping(display.get(name), f"xr_video.display.{name}")
         for key in ("distance", "width"):
             _positive(plane.get(key), f"xr_video.display.{name}.{key}", upper=10.0)
+    recording = _mapping(root.get("recording"), "recording")
+    dataset_name = str(recording.get("dataset_name", "")).strip()
+    if not dataset_name or len(dataset_name) > 96 or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        for character in dataset_name
+    ):
+        raise SystemConfigError("recording.dataset_name is invalid")
+    if not str(recording.get("output_root", "")).strip():
+        raise SystemConfigError("recording.output_root is required")
+    count = int(recording.get("episode_count", 0))
+    if not 1 <= count <= 100_000:
+        raise SystemConfigError("recording.episode_count must be in [1,100000]")
+    if not str(recording.get("task_description", "")).strip():
+        raise SystemConfigError("recording.task_description is required")
+    if recording.get("camera_recording_mode") != "jpeg":
+        raise SystemConfigError("recording.camera_recording_mode must be jpeg")
+    if recording.get("deviceio_mode") != "native":
+        raise SystemConfigError("recording.deviceio_mode must be native")
     return SystemConfig(source, root, canonical_hash(root))
 
 
@@ -380,7 +433,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                 }
             }
         },
-        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/control/home_request"}}},
+        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/episode/control"}}},
         "pedal.yaml": {"/**": {"ros__parameters": {"foot_pedal": pedal["device"], "rerecord_key_code": pedal["rerecord_key_code"], "enable_key_code": pedal["enable_key_code"], "record_toggle_key_code": pedal["record_toggle_key_code"]}}},
         "lerobot_export.yaml": root["lerobot_export"],
     }

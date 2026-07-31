@@ -28,7 +28,9 @@ warning.
    hardware fault transitions to `HOLD_LATCHED`. Resuming requires an explicit
    local re-arm; reconnecting alone cannot resume motion.
 9. Configured Home runs only after an explicit Quest A, left-pedal re-record,
-   or local CLI request. A local one-shot token establishes a Home lease bound
+   right-pedal commit, or local CLI request. During managed collection both
+   MCAP paths are paused and acknowledged before Home motion. A local one-shot
+   token establishes a Home lease bound
    to the current bridge process, hardware session, and RDK generation; the
    lease is revoked on disconnect or F/T re-zero. Home also requires
    current-session F/T zero, local permission, collision-clear, and healthy

@@ -1,0 +1,47 @@
+cameras:
+  config: ros2_ws/src/flexiv_inspire_cameras/realsense_rgb.yaml
+  recording_encoding: jpeg
+  jpeg_quality: 90
+  depth_enabled: true
+  depth_width: 424
+  depth_height: 240
+  depth_fps: 30
+  pointcloud_enabled: true
+  pointcloud_stride: 2
+  streams:
+    head: {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: true}}
+    left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: false, pointcloud: false}}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: false, pointcloud: false}}
+
+xr_video:
+  enabled: true
+  auto_start_with_record: true
+  ffmpeg: /usr/bin/ffmpeg
+  encoder: auto
+  receiver_host: 127.0.0.1
+  bitrate_mbps: 4.0
+  keyframe_interval_frames: 15
+  payload_type: 96
+  packet_size: 1200
+  stream_timeout_s: 2.0
+  streams:
+    head: {enabled: true, port: 5000}
+    left_wrist: {enabled: true, port: 5002}
+    right_wrist: {enabled: true, port: 5003}
+  display:
+    mode: xr
+    cuda_device: 0
+    head: {distance: 1.5, width: 1.0, offset_x: 0.0, offset_y: 0.0}
+    left_wrist: {distance: 1.2, width: 0.4, offset_x: -1.0, offset_y: -0.4}
+    right_wrist: {distance: 1.2, width: 0.4, offset_x: 1.0, offset_y: -0.4}
+    lock_mode: lazy
+    look_away_angle: 45.0
+    reposition_distance: 0.5
+    reposition_delay: 0.5
+    transition_duration: 0.3
+
+teleop:
+  control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
+  teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
+  manus_calibration: ""
+  control_enabled: false

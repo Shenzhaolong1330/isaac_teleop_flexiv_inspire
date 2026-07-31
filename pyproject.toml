@@ -45,6 +45,7 @@ flexiv-inspire-pedal-router = "flexiv_inspire_isaac.pedal_router:main"
 flexiv-inspire-episode-controller = "flexiv_inspire_isaac.episode_control:main"
 flexiv-inspire-xr-raw-source = "flexiv_inspire_isaac.xr_raw_ros_source:main"
 flexiv-inspire = "flexiv_inspire_isaac.cli:main"
+flexiv-inspire-collect = "flexiv_inspire_isaac.cli:collect_main"
 
 [tool.setuptools]
 packages = [

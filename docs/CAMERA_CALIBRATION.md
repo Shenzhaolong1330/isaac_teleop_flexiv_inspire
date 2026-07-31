@@ -5,7 +5,7 @@ known side length. It **never publishes robot commands**. Keep the normal
 control bridge, local authorization, F/T safety state and pedal protections in
 place; move the arm only through the usual teleoperation workflow.
 
-Every camera has independent recording modes in `config/site.yaml`:
+Every camera has independent recording modes in `config/sensors.yaml`:
 
 ```yaml
 recording: {rgb: true, depth: true, pointcloud: false}

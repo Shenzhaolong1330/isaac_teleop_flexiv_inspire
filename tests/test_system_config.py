@@ -10,6 +10,10 @@ def _example() -> Path:
     return Path(__file__).parents[1] / "config" / "system.example.yaml"
 
 
+def _site() -> Path:
+    return Path(__file__).parents[1] / "config" / "site.yaml"
+
+
 def test_example_system_config_renders_all_runtime_children(tmp_path):
     config = load_system_config(_example())
     rendered = render_runtime_configs(config, tmp_path)
@@ -50,7 +54,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     episode = next(
         command
         for command in commands
-        if command[0] == "flexiv-inspire-episode-controller"
+        if "flexiv_inspire_isaac.episode_control" in command
     )
     assert any(
         item.endswith("/apps/flexiv_daemon/config/tool_payload.yaml")
@@ -58,6 +62,29 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     )
     assert any(item.endswith("/ft_zero_events.jsonl") for item in episode)
     assert "manus_calibration:=" in episode
+    assert (
+        f"dataset_name:={config.document['recording']['dataset_name']}" in episode
+    )
+    assert (
+        f"episode_count:={config.document['recording']['episode_count']}" in episode
+    )
+    assert any(
+        item.startswith('task_description:="')
+        and len(item) > len('task_description:=""')
+        for item in episode
+    )
+
+
+def test_site_entry_composes_small_hardware_sensor_recording_runtime_files():
+    config = load_system_config(_site())
+
+    assert config.document["recording"]["dataset_name"] == "pick_place_demo"
+    assert config.document["recording"]["episode_count"] == 20
+    assert config.document["flexiv"]["home"]["quest_button"] == (
+        "right_primary_click"
+    )
+    assert config.document["cameras"]["streams"]["head"]["serial"]
+    assert config.document["commands"]["rdk_daemon"][-1] == "--mock"
 
 
 def test_system_config_rejects_non_executed_action_label(tmp_path):
@@ -84,3 +111,33 @@ def test_system_config_rejects_invalid_joint_limits(tmp_path):
         assert "joint lower limits" in str(exc)
     else:
         raise AssertionError("invalid joint limits were accepted")
+
+
+def test_system_config_rejects_missing_recording_prompt(tmp_path):
+    data = yaml.safe_load(_example().read_text())
+    data["recording"]["task_description"] = ""
+    path = tmp_path / "bad-recording.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    try:
+        load_system_config(path)
+    except SystemConfigError as exc:
+        assert "task_description" in str(exc)
+    else:
+        raise AssertionError("empty VLA task description was accepted")
+
+
+def test_composed_config_rejects_duplicate_fragment_keys(tmp_path):
+    (tmp_path / "a.yaml").write_text("recording: {dataset_name: first}\n")
+    (tmp_path / "b.yaml").write_text("recording: {dataset_name: second}\n")
+    entry = tmp_path / "site.yaml"
+    entry.write_text(
+        "schema_version: 1\nincludes: [a.yaml, b.yaml]\n", encoding="utf-8"
+    )
+
+    try:
+        load_system_config(entry)
+    except SystemConfigError as exc:
+        assert "duplicate composed config key" in str(exc)
+    else:
+        raise AssertionError("duplicate composed keys were accepted")

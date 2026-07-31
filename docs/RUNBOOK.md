@@ -69,7 +69,8 @@ CUDA 12.8 只由 `activate_isaac.sh`/`activate_data.sh` 局部选择。不要改
 
 ## 2. 核对现场配置
 
-不需要创建固定的 `artifacts/site/`。`config/site.yaml` 是统一入口；
+不需要创建固定的 `artifacts/site/`。`config/site.yaml` 是组合入口，它依次
+加载 `hardware.yaml`、`sensors.yaml`、`recording.yaml` 和 `runtime.yaml`；
 RDK 工具审计、MANUS 标定等需要独立哈希的记录由它引用。`render` 会把
 进程级配置生成到本会话的 runtime 目录：
 
@@ -89,7 +90,7 @@ flexiv-inspire --config "$ROOT/config/site.yaml" render
   `inspire_rs` 读取；物理工具序列号与安装修订只是可选追溯信息，不阻塞
   操作。确认两只实际安装的手与上位机活动工具均为 `inspire_rs` 后设置
   `locally_verified: true`。
-- `config/site.yaml`：当前已填写两台控制器 `RobotInfo` 返回的 Rizon4s
+- `config/hardware.yaml`：当前已填写两台控制器 `RobotInfo` 返回的 Rizon4s
   默认七轴限位。生成的控制配置会携带这些值，控制时软件仍会逐帧检查。
 - `flexiv.home`：这是项目定义的“双臂复位/遥操作准备位姿”，不是控制器
   标定动作，也不是 Flexiv 内置 `PLAN-Home`。启动、重连和超时都不会自动
@@ -98,7 +99,7 @@ flexiv-inspire --config "$ROOT/config/site.yaml" render
   `NRT_CARTESIAN_MOTION_FORCE` 控制器的两套刚度预设。运行时会实际调用
   `SetCartesianImpedance(K_x, Z_x)`；`damping_ratio` 必须在
   `[0.3,0.8]`，刚度还会与每台真机的 `RobotInfo.K_x_nom` 比较。
-- `teleop.manus_calibration`：未完成标定时保持空值，只允许手臂
+- `config/sensors.yaml` 的 `teleop.manus_calibration`：未完成标定时保持空值，只允许手臂
   shadow/录制；手指命令保持 invalid。
 - 相机序列号、DFTP IP 和脚踏 by-id。不要把凭据或私钥放入仓库。
 
@@ -120,10 +121,10 @@ flexiv-rdk-daemon \
 
 ```bash
 export ROOT=/home/hb/isaac_teleop_flexiv_inspire
-export SESSION_ID="hardware-$(date -u +%Y%m%dT%H%M%SZ)"
-export RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/isaac_teleop"
-mkdir -p "$ROOT/artifacts/runtime" "$RUNTIME_DIR"
 source "$ROOT/scripts/env/activate_ros.sh"
+export SESSION_ID="$(python -c 'from flexiv_inspire_isaac.system_config import load_system_config; print(load_system_config("config/site.yaml").document["session"]["id"])')"
+export RUNTIME_DIR="$(python -c 'from flexiv_inspire_isaac.system_config import load_system_config; print(load_system_config("config/site.yaml").document["session"]["runtime_root"])')"
+mkdir -p "$ROOT/artifacts/runtime" "$RUNTIME_DIR"
 export RENDER_DIR="$(
   flexiv-inspire --config "$ROOT/config/site.yaml" render |
     python -c 'import json,pathlib,sys; print(pathlib.Path(json.load(sys.stdin)["snapshot"]).parent)'
@@ -144,7 +145,7 @@ printf '%s\n' \
   "export RDK_SOCKET='$RUNTIME_DIR/rdk.sock'" \
   "export DEVICEIO_SOCKET='$RUNTIME_DIR/deviceio.sock'" \
   "export ISAAC_TELEOP_DEVICEIO_SOCKET='$RUNTIME_DIR/deviceio.sock'" \
-  "export RDK_EVENTS='$ROOT/artifacts/runtime/${SESSION_ID}-ft-zero.jsonl'" \
+  "export RDK_EVENTS='$RUNTIME_DIR/ft_zero_events.jsonl'" \
   "export WRITE_PERMIT='$RUNTIME_DIR/${SESSION_ID}.write-permit'" \
   > "$ROOT/artifacts/runtime/current-session.env"
 ```
@@ -293,7 +294,7 @@ flexiv-inspire-manus-calibrate finalize \
   --output "$ROOT/artifacts/calibration/manus_inspire.yaml"
 ```
 
-检查生成文件后，把 `config/site.yaml` 的 `teleop.manus_calibration` 指向
+检查生成文件后，把 `config/sensors.yaml` 的 `teleop.manus_calibration` 指向
 `artifacts/calibration/manus_inspire.yaml`，重新 `validate`/`render`。
 采集工具拒绝覆盖已有文件，重做时先保留旧文件并换新文件名。
 
@@ -461,11 +462,10 @@ ros2 topic echo /robot/right_arm/joint_states
 清除该 hold，显式增加 `--clear-hold-latched`。直接发布
 `/control/home_request` 仍无法绕过专用 token 和所有现场门禁。
 
-三键脚踏的 episode 语义固定如下：右键只停止当前录制，不会切换为开始；
-左键把当前 capture 以 `rerecord-requested`、`completed: false` 收尾（原始
-数据保留供审计，但训练/回放不可用），再请求一次 guarded Home。只有收到
-该次请求对应的 `complete` 后才创建并启动新 episode；Home 拒绝、失败或
-超时都不会开始录制。Home 期间再次按右键会取消“完成后自动开录”。
+一键数采时，右键为“保存当前条 → Home → 下一条”，左键为“丢弃当前条 →
+Home → 重录同一编号”，Quest A 为“暂停当前条 → Home → 续录同一条”。三种
+操作都会先等待 ROS bag 和 DeviceIO 同时确认暂停，Home 数据不会写入
+episode。完整流程见 [DATA_COLLECTION.md](DATA_COLLECTION.md)。
 
 Home 首次真机验收应先把 `home_max_velocity_rad_s` 和
 `home_max_acceleration_rad_s2` 再降到当前值的 10%，分别检查左右目标方向
@@ -512,7 +512,7 @@ flexiv-inspire-teleop-input --ros-args \
 每个送往 RDK 的笛卡尔目标都携带当前 profile 的 `K_x` 和
 `damping_ratio`。daemon 在该 profile 首次使用时调用阻塞式
 `SetCartesianImpedance`，后续相同值不重复下发。切换
-`cartesian_control.mode` 必须修改 `config/site.yaml` 后重新
+`cartesian_control.mode` 必须修改 `config/hardware.yaml` 后重新
 `validate`/`render` 并重启控制桥；不要运行中临时发布未审计刚度。
 
 先保持 deadman 松开完成 rebase。严格按以下顺序逐级验收，每一级都记录
@@ -544,8 +544,21 @@ flexiv-inspire-authorize-control \
 
 ## 7. 正式异步录制与数据语义
 
-正式入口是 `isaac-flexiv-episode`，它会拒绝没有匹配 session、工具哈希和
-成功 `ft_zero_completed` 事件的录制：
+日常数采只修改 `config/recording.yaml`，然后在已经 `READY` 的硬件会话本机
+终端执行：
+
+```bash
+cd "$ROOT"
+./scripts/collect.sh
+```
+
+它会立即开始第一条，自动管理脚踏路由、episode 生命周期以及 Home/控制
+授权；达到配置的成功条数或按 `Ctrl-C` 后退出。无需再手工启动脚踏路由、
+episode controller 或逐次建立 Home 授权。启动前的 daemon/控制桥/传感器、
+F/T 清零和现场许可仍属于一次硬件会话准备，不能由数采命令伪造。
+
+`isaac-flexiv-episode` 保留为调试单条 recorder 的底层入口；它会拒绝没有
+匹配 session、工具哈希和成功 `ft_zero_completed` 事件的录制：
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"

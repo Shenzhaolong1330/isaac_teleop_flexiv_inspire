@@ -28,6 +28,14 @@ flexiv-inspire-camera-verify = "flexiv_inspire_isaac.cameras.verify:main"
 flexiv-inspire-xr-bridge = "flexiv_inspire_xr_bridge.ros_node:main"
 flexiv-inspire-dftp-node = "flexiv_inspire_isaac.dftp.ros_node:main"
 flexiv-inspire-dftp-read-only = "flexiv_inspire_isaac.dftp.read_only_check:main"
+flexiv-inspire-dftp-calibrate-force = "flexiv_inspire_isaac.dftp.force_calibration:main"
+flexiv-inspire-control-bridge = "flexiv_inspire_control.node:main"
+flexiv-inspire-authorize-control = "flexiv_inspire_control.authorize_control:main"
+flexiv-inspire-authorize-home = "flexiv_inspire_control.authorize_home:main"
+flexiv-inspire-home = "flexiv_inspire_control.authorize_home:request_main"
+flexiv-inspire-zero-ft-local = "flexiv_inspire_control.zero_ft_local:main"
+flexiv-inspire-teleop-input = "flexiv_inspire_control.teleop_input_node:main"
+flexiv-inspire-manus-calibrate = "flexiv_inspire_control.manus_calibration:main"
 flexiv-inspire-policy-server = "flexiv_inspire_isaac.policy_api.ros_adapter:main"
 flexiv-inspire-lerobot-export = "flexiv_inspire_isaac.data_pipeline.lerobot_cli:main"
 flexiv-inspire-data-smoke = "flexiv_inspire_isaac.data_pipeline.synthetic_smoke:main"
@@ -35,6 +43,7 @@ isaac-flexiv-episode = "flexiv_inspire_isaac.data_pipeline.episode_manager:main"
 flexiv-inspire-rerun = "flexiv_inspire_isaac.rerun_viz.cli:main"
 flexiv-inspire-pedal-router = "flexiv_inspire_isaac.pedal_router:main"
 flexiv-inspire-episode-controller = "flexiv_inspire_isaac.episode_control:main"
+flexiv-inspire-xr-raw-source = "flexiv_inspire_isaac.xr_raw_ros_source:main"
 flexiv-inspire = "flexiv_inspire_isaac.cli:main"
 
 [tool.setuptools]
@@ -47,6 +56,8 @@ packages = [
   "flexiv_inspire_isaac.policy_api.generated",
   "flexiv_inspire_isaac.rerun_viz",
   "flexiv_inspire_xr_bridge",
+  "flexiv_inspire_control",
+  "flexiv_rdk_daemon",
 ]
 
 [tool.setuptools.package-dir]
@@ -58,6 +69,8 @@ packages = [
 "flexiv_inspire_isaac.policy_api.generated" = "apps/policy_server/src/flexiv_inspire_isaac/policy_api/generated"
 "flexiv_inspire_isaac.rerun_viz" = "ros2_ws/src/flexiv_inspire_rerun"
 "flexiv_inspire_xr_bridge" = "ros2_ws/src/flexiv_inspire_xr_bridge/flexiv_inspire_xr_bridge"
+"flexiv_inspire_control" = "ros2_ws/src/flexiv_inspire_control/flexiv_inspire_control"
+"flexiv_rdk_daemon" = "apps/flexiv_daemon/src/flexiv_rdk_daemon"
 
 [tool.setuptools.package-data]
 "flexiv_inspire_isaac.cameras" = ["*.yaml", "launch/*.py"]

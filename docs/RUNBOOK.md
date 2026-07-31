@@ -20,9 +20,7 @@
 1. 核对控制器当前工具及 payload、默认七轴限位、相机序列号和 MANUS 标定；
 2. 阅读并亲自接受 NVIDIA CloudXR EULA；不得脚本代替接受；
 3. 连接 Quest，并确认 `adb devices -l` 能看到设备；
-4. 按上游许可要求获取官方 Sharpa Wave 左右手 URDF。缺少它们时
-   DexPilot/MANUS 手部链路不能验收；
-5. 确认物理脚踏的稳定设备路径和安全人员/碰撞许可流程。
+4. 确认物理脚踏的稳定设备路径和安全人员/碰撞许可流程。
 
 当前代码和 mock 测试不能替代上述现场验收。若任一条件不满足，只运行到
 shadow/只读阶段。
@@ -48,12 +46,16 @@ colcon --log-base "$ROOT/ros2_ws/log" build \
   --cmake-args -DPython3_EXECUTABLE="$ROOT/envs/ros-py312/bin/python3"
 
 source "$ROOT/ros2_ws/install/setup.bash"
-ros2 pkg executables flexiv_inspire_control
+python -c 'import flexiv_inspire_control.node, flexiv_inspire_isaac.dftp.ros_node'
 ```
 
 不要运行无 `--base-paths` 的裸 `colcon build`。该命令构建
 `ros2_ws/src` 下的全部八个 ROS 包；`envs/`、`third_party/IsaacTeleop/`
 和 `vendor/` 不会进入工作空间扫描。
+
+真机 Python 节点使用上述 `flexiv-inspire-*` 入口，它们固定在
+`envs/ros-py312`，可同时看到 ROS 绑定和项目内部库；不要用系统 Python
+直接执行 ROS 包脚本。
 
 若 MANUS 插件尚未安装，按 [MANUS_SETUP.md](MANUS_SETUP.md) 构建。安装后
 必须存在：
@@ -84,10 +86,18 @@ flexiv-inspire --config "$ROOT/config/site.yaml" render
   期望活动工具名。当前两臂均应为 `inspire_rs`。
 - `apps/flexiv_daemon/config/tool_payload.yaml`：这是控制器工具的本地审计
   快照，不负责选择或切换工具。质量、质心、惯量和 TCP 由 RDK 从当前
-  `inspire_rs` 读取；物理工具序列号与安装修订仍需现场确认。确认后才可
-  设置 `locally_verified: true`。
+  `inspire_rs` 读取；物理工具序列号与安装修订只是可选追溯信息，不阻塞
+  操作。确认两只实际安装的手与上位机活动工具均为 `inspire_rs` 后设置
+  `locally_verified: true`。
 - `config/site.yaml`：当前已填写两台控制器 `RobotInfo` 返回的 Rizon4s
   默认七轴限位。生成的控制配置会携带这些值，控制时软件仍会逐帧检查。
+- `flexiv.home`：这是项目定义的“双臂复位/遥操作准备位姿”，不是控制器
+  标定动作，也不是 Flexiv 内置 `PLAN-Home`。启动、重连和超时都不会自动
+  执行它；目标必须在上述七轴限位内，速度不得超过软件关节速度上限。
+- `flexiv.cartesian_control`：`position` 和 `impedance` 是同一
+  `NRT_CARTESIAN_MOTION_FORCE` 控制器的两套刚度预设。运行时会实际调用
+  `SetCartesianImpedance(K_x, Z_x)`；`damping_ratio` 必须在
+  `[0.3,0.8]`，刚度还会与每台真机的 `RobotInfo.K_x_nom` 比较。
 - `teleop.manus_calibration`：未完成标定时保持空值，只允许手臂
   shadow/录制；手指命令保持 invalid。
 - 相机序列号、DFTP IP 和脚踏 by-id。不要把凭据或私钥放入仓库。
@@ -212,30 +222,35 @@ flexiv-inspire-dftp-node --ros-args \
 确认配置仍是 `hardware_write_enabled: false`。此阶段只能读角度、位置、力、
 电流、温度、错误、状态和 1062 taxels。
 
+力传感器零点明显异常时，保持指定手完全张开、无接触、线缆无拉扯，
+再单独执行官方寄存器 1009 校准。命令会先检查张开角度、静止电流和
+错误码，只操作明确选择的一只手，并打印校准前后值：
+
+```bash
+flexiv-inspire-dftp-calibrate-force \
+  --side left \
+  --confirm INSPIRE-FORCE-CALIBRATION
+```
+
+这不是恢复出厂，也不会写目标角度；不要把它加入自动启动流程。
+
 ### 4.4 Quest、CloudXR 与 MANUS
 
-先检查外部前置条件：
+先检查 Quest：
 
 ```bash
 adb devices -l
-test -f \
-  "$ROOT/third_party/IsaacTeleop/examples/teleop_ros2/assets/urdf/sharpa_standalone/left_sharpa_wave.urdf"
-test -f \
-  "$ROOT/third_party/IsaacTeleop/examples/teleop_ros2/assets/urdf/sharpa_standalone/right_sharpa_wave.urdf"
 ```
 
-若 URDF 缺失，按上游
-`examples/teleop_ros2/scripts/fetch_sharpa_wave_urdfs.py` 的许可说明人工获取，
-不要用任意其他 URDF 冒充。随后在本地交互终端 D 启动官方 ROS 参考节点：
+本系统不使用 NVIDIA 示例的 Sharpa retargeter，也不需要 Sharpa URDF。
+`flexiv-inspire-xr-raw-source` 直接发布 Quest 控制器位姿和 MANUS/OpenXR
+每手 25 个原始关节；Inspire 六路映射由下一层现场标定完成。
+在本地交互终端 D 启动：
 
 ```bash
 source "$ROOT/scripts/env/activate_isaac.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-cd "$ROOT/third_party/IsaacTeleop/examples/teleop_ros2/python"
-python teleop_ros2_node.py --ros-args \
-  -p mode:=controller_teleop \
-  -p hand_retargeter:=dexpilot \
-  -p config_asset_root:="$ROOT/third_party/IsaacTeleop/examples/teleop_ros2" \
+flexiv-inspire-xr-raw-source --ros-args \
   -p cloudxr_accept_eula:=false \
   -p cloudxr_setup_oob:=true \
   -p cloudxr_usb_local:=true
@@ -260,6 +275,28 @@ set +a
 50-pose `/xr_teleop/hand`。MANUS SDK 连接成功不等于手套/Quest/坐标映射
 已经标定成功。
 
+保持遥操作为 shadow，用同一操作者和同一副手套分别采集自然完全张开和
+自然握拳，每个姿态保持约两秒：
+
+```bash
+mkdir -p "$ROOT/artifacts/calibration"
+flexiv-inspire-manus-calibrate capture \
+  --pose open \
+  --output "$ROOT/artifacts/calibration/manus_open.yaml"
+flexiv-inspire-manus-calibrate capture \
+  --pose closed \
+  --output "$ROOT/artifacts/calibration/manus_closed.yaml"
+flexiv-inspire-manus-calibrate finalize \
+  --open "$ROOT/artifacts/calibration/manus_open.yaml" \
+  --closed "$ROOT/artifacts/calibration/manus_closed.yaml" \
+  --template "$ROOT/ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml" \
+  --output "$ROOT/artifacts/calibration/manus_inspire.yaml"
+```
+
+检查生成文件后，把 `config/site.yaml` 的 `teleop.manus_calibration` 指向
+`artifacts/calibration/manus_inspire.yaml`，重新 `validate`/`render`。
+采集工具拒绝覆盖已有文件，重做时先保留旧文件并换新文件名。
+
 ### 4.5 控制桥和遥操作映射保持 Shadow
 
 控制桥终端 F（整个硬件会话持续运行，不要为切换 shadow 重启它）：
@@ -267,7 +304,7 @@ set +a
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-ros2 run flexiv_inspire_control control_bridge --ros-args \
+flexiv-inspire-control-bridge --ros-args \
   --params-file "$CONTROL_CONFIG" \
   -p session_id:="$SESSION_ID" \
   -p rdk_socket:="$RDK_SOCKET" \
@@ -279,7 +316,7 @@ ros2 run flexiv_inspire_control control_bridge --ros-args \
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-ros2 run flexiv_inspire_control teleop_input --ros-args \
+flexiv-inspire-teleop-input --ros-args \
   --params-file "$TELEOP_CONFIG" \
   -p session_id:="$SESSION_ID" \
   -p command_enabled:=false
@@ -350,7 +387,7 @@ flexiv-rdk-daemon \
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-ros2 run flexiv_inspire_control zero_ft_local \
+flexiv-inspire-zero-ft-local \
   --rdk-socket "$RDK_SOCKET" \
   --tool-payload-config "$TOOL_CONFIG"
 ```
@@ -359,7 +396,7 @@ ros2 run flexiv_inspire_control zero_ft_local \
 机器人及线缆静止后，才重新执行：
 
 ```bash
-ros2 run flexiv_inspire_control zero_ft_local \
+flexiv-inspire-zero-ft-local \
   --rdk-socket "$RDK_SOCKET" \
   --tool-payload-config "$TOOL_CONFIG" \
   --confirm-ft-unloaded FLEXIV-FT-UNLOADED
@@ -392,6 +429,51 @@ ros2 topic pub --once /safety/collision_clear std_msgs/msg/Bool \
 物理脚踏必须由配置的 `/dev/input/by-id/...` 设备产生；不要用 ROS 话题或
 软件脚本模拟脚踏。
 
+### 6.1 执行配置的双臂 Home/Reset
+
+Home 只允许从 `READY` 执行，且遥操作、策略和回放均未占用控制权。它使用
+`NRT_JOINT_POSITION + SendJointPosition` 移动到 `flexiv.home` 的左右
+七轴目标；到位后切回笛卡尔模式并保持实测 TCP。保持现场许可和碰撞许可
+为 true，然后在本机交互 TTY 执行（Home 不要求 down-arrow 脚踏）：
+
+```bash
+flexiv-inspire-home \
+  --session-id "$SESSION_ID" \
+  --confirm FLEXIV-HOME-MOVE \
+  --socket "$RDK_SOCKET"
+```
+
+该命令生成 30 秒有效的一次性 bootstrap token，并向控制桥发出一次 Home
+请求。首次执行被 daemon 接受后，会建立绑定当前控制桥进程、session 和
+RDK connection generation 的 Home lease；同一硬件会话内可以直接用 Quest
+右手 A 键重复触发。也可以只运行 `flexiv-inspire-authorize-home`，随后在
+30 秒内按一次 A 键建立 lease。桥/daemon 断线、桥重启或重新 F/T zero 后
+必须重新做本机授权。监视：
+
+```bash
+ros2 topic echo /control/home_status
+ros2 topic echo /robot/left_arm/joint_states
+ros2 topic echo /robot/right_arm/joint_states
+```
+
+桥/daemon 断线、安全检查失败、150 ms keepalive 超时或配置改变，都会停止
+关节运动、切回实测位姿保持并锁存 daemon hold。排除原因后重新授权；若要
+清除该 hold，显式增加 `--clear-hold-latched`。直接发布
+`/control/home_request` 仍无法绕过专用 token 和所有现场门禁。
+
+三键脚踏的 episode 语义固定如下：右键只停止当前录制，不会切换为开始；
+左键把当前 capture 以 `rerecord-requested`、`completed: false` 收尾（原始
+数据保留供审计，但训练/回放不可用），再请求一次 guarded Home。只有收到
+该次请求对应的 `complete` 后才创建并启动新 episode；Home 拒绝、失败或
+超时都不会开始录制。Home 期间再次按右键会取消“完成后自动开录”。
+
+Home 首次真机验收应先把 `home_max_velocity_rad_s` 和
+`home_max_acceleration_rad_s2` 再降到当前值的 10%，分别检查左右目标方向
+和双臂空间是否干涉，确认后再逐级提高。本仓库测试只验证命令链和看门狗，
+不会证明这组位姿在现场无碰撞。
+
+### 6.2 遥操作与笛卡尔阻抗
+
 若要控制灵巧手，先停止只读 DFTP 节点，再以本会话的显式写门禁重启：
 
 ```bash
@@ -410,7 +492,7 @@ flexiv-inspire-dftp-node --ros-args \
 在本地交互 TTY 授权 teleop：
 
 ```bash
-ros2 run flexiv_inspire_control authorize_control \
+flexiv-inspire-authorize-control \
   --session-id "$SESSION_ID" \
   --source teleop \
   --confirm FLEXIV-CONTROL-ARM \
@@ -420,12 +502,18 @@ ros2 run flexiv_inspire_control authorize_control \
 以命令模式重新启动遥操作映射：
 
 ```bash
-ros2 run flexiv_inspire_control teleop_input --ros-args \
+flexiv-inspire-teleop-input --ros-args \
   --params-file "$TELEOP_CONFIG" \
   -p manus_calibration:="$MANUS_CONFIG" \
   -p session_id:="$SESSION_ID" \
   -p command_enabled:=true
 ```
+
+每个送往 RDK 的笛卡尔目标都携带当前 profile 的 `K_x` 和
+`damping_ratio`。daemon 在该 profile 首次使用时调用阻塞式
+`SetCartesianImpedance`，后续相同值不重复下发。切换
+`cartesian_control.mode` 必须修改 `config/site.yaml` 后重新
+`validate`/`render` 并重启控制桥；不要运行中临时发布未审计刚度。
 
 先保持 deadman 松开完成 rebase。严格按以下顺序逐级验收，每一级都记录
 requested/safe/sent、wrench 和现场结果，失败立即松脚踏并停止：
@@ -446,7 +534,7 @@ requested/safe/sent、wrench 和现场结果，失败立即松脚踏并停止：
 重新授权时才可使用：
 
 ```bash
-ros2 run flexiv_inspire_control authorize_control \
+flexiv-inspire-authorize-control \
   --session-id "$SESSION_ID" \
   --source teleop \
   --confirm FLEXIV-CONTROL-ARM \
@@ -538,7 +626,7 @@ flexiv-inspire-policy-server \
 真机前停止 teleop 控制、松开 deadman/脚踏、清除 hold，再由本地 TTY：
 
 ```bash
-ros2 run flexiv_inspire_control authorize_control \
+flexiv-inspire-authorize-control \
   --session-id "$SESSION_ID" \
   --source policy \
   --confirm FLEXIV-CONTROL-ARM \

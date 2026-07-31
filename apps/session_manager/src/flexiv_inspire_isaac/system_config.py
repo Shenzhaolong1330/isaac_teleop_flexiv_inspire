@@ -83,7 +83,7 @@ def load_system_config(path: str | Path) -> SystemConfig:
     if len(set(codes)) != 3 or any(code <= 0 for code in codes):
         raise SystemConfigError("pedal key codes must be three distinct positive Linux input codes")
     flexiv = _mapping(root.get("flexiv"), "flexiv")
-    for key in ("rdk_config", "tool_payload_config"):
+    for key in ("rdk_config", "tool_payload_config", "frame_config"):
         if not str(flexiv.get(key, "")).strip():
             raise SystemConfigError(f"flexiv.{key} is required")
     safety = _mapping(flexiv.get("safety"), "flexiv.safety")
@@ -118,12 +118,30 @@ def load_system_config(path: str | Path) -> SystemConfig:
     )
     for key in safety_limit_names:
         _positive(safety.get(key), f"flexiv.safety.{key}")
-    cartesian = _mapping(flexiv.get("cartesian_control"), "flexiv.cartesian_control")
+    cartesian = _mapping(
+        flexiv.get("cartesian_control"), "flexiv.cartesian_control"
+    )
     if cartesian.get("mode") not in {"position", "impedance"}:
-        raise SystemConfigError("flexiv.cartesian_control.mode must be position or impedance")
-    for key in ("position_stiffness", "impedance_stiffness", "damping"):
-        if any(item < 0.0 for item in _vector(cartesian.get(key), f"flexiv.cartesian_control.{key}", 6)):
-            raise SystemConfigError(f"flexiv.cartesian_control.{key} must be non-negative")
+        raise SystemConfigError(
+            "flexiv.cartesian_control.mode must be position or impedance"
+        )
+    for key in ("position_stiffness", "impedance_stiffness"):
+        values = _vector(
+            cartesian.get(key), f"flexiv.cartesian_control.{key}", 6
+        )
+        if any(item < 0.0 for item in values):
+            raise SystemConfigError(
+                f"flexiv.cartesian_control.{key} must be non-negative"
+            )
+    damping_ratio = _vector(
+        cartesian.get("damping_ratio"),
+        "flexiv.cartesian_control.damping_ratio",
+        6,
+    )
+    if any(item < 0.3 or item > 0.8 for item in damping_ratio):
+        raise SystemConfigError(
+            "flexiv.cartesian_control.damping_ratio must be in [0.3,0.8]"
+        )
     home = _mapping(flexiv.get("home"), "flexiv.home")
     for side in ("left", "right"):
         positions = _vector(
@@ -140,8 +158,30 @@ def load_system_config(path: str | Path) -> SystemConfig:
             raise SystemConfigError(
                 f"flexiv.home.{side}_joints_rad is outside configured safety limits"
             )
-    for key in ("max_velocity_rad_s", "max_acceleration_rad_s2", "tolerance_rad", "timeout_s"):
-        _positive(home.get(key), f"flexiv.home.{key}")
+    home_velocity = _positive(
+        home.get("max_velocity_rad_s"),
+        "flexiv.home.max_velocity_rad_s",
+        upper=0.75,
+    )
+    if home_velocity > float(safety["max_joint_velocity_rad_s"]):
+        raise SystemConfigError(
+            "flexiv.home.max_velocity_rad_s exceeds the configured joint velocity limit"
+        )
+    _positive(
+        home.get("max_acceleration_rad_s2"),
+        "flexiv.home.max_acceleration_rad_s2",
+        upper=2.0,
+    )
+    _positive(
+        home.get("tolerance_rad"),
+        "flexiv.home.tolerance_rad",
+        upper=0.1,
+    )
+    timeout = _positive(
+        home.get("timeout_s"), "flexiv.home.timeout_s", upper=60.0
+    )
+    if timeout < 1.0:
+        raise SystemConfigError("flexiv.home.timeout_s must be at least 1 second")
     if not str(home.get("quest_button", "")).strip():
         raise SystemConfigError("flexiv.home.quest_button is required")
     export = _mapping(root.get("lerobot_export"), "lerobot_export")
@@ -158,8 +198,16 @@ def load_system_config(path: str | Path) -> SystemConfig:
     if not all(isinstance(key, str) and isinstance(value, str) for key, value in channels.items()):
         raise SystemConfigError("lerobot_export.channels must contain string mappings")
     cameras = _mapping(root.get("cameras"), "cameras")
-    if bool(cameras.get("depth_enabled", False)):
-        raise SystemConfigError("depth must remain disabled in this RGB-only first release")
+    depth_enabled = bool(cameras.get("depth_enabled", False))
+    if depth_enabled:
+        for key, lower, upper in (("depth_width", 160, 1920), ("depth_height", 120, 1080), ("depth_fps", 1, 90)):
+            value = int(cameras.get(key, 0))
+            if not lower <= value <= upper:
+                raise SystemConfigError(f"cameras.{key} is outside supported bounds")
+    elif bool(cameras.get("pointcloud_enabled", False)):
+        raise SystemConfigError("cameras.pointcloud_enabled requires cameras.depth_enabled")
+    if not 1 <= int(cameras.get("pointcloud_stride", 1)) <= 32:
+        raise SystemConfigError("cameras.pointcloud_stride must be in [1,32]")
     if not 1 <= int(cameras.get("jpeg_quality", 0)) <= 100:
         raise SystemConfigError("cameras.jpeg_quality must be in [1,100]")
     streams = _mapping(cameras.get("streams"), "cameras.streams")
@@ -167,6 +215,11 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError("cameras.streams must contain exactly head, left_wrist, right_wrist")
     for name, stream_value in streams.items():
         stream = _mapping(stream_value, f"cameras.streams.{name}")
+        recording = _mapping(stream.get("recording", {}), f"cameras.streams.{name}.recording")
+        if not bool(recording.get("rgb", True)):
+            raise SystemConfigError(f"cameras.streams.{name}.recording.rgb must be true")
+        if bool(recording.get("pointcloud", False)) and not bool(recording.get("depth", depth_enabled)):
+            raise SystemConfigError(f"cameras.streams.{name}.recording.pointcloud requires depth")
         if not str(stream.get("serial", "")).strip():
             raise SystemConfigError(f"cameras.streams.{name}.serial is required")
         if not 160 <= int(stream.get("width", 0)) <= 1920 or not 120 <= int(stream.get("height", 0)) <= 1080:
@@ -215,9 +268,10 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
     xr = root["xr_video"]
     session = root["session"]
     result: dict[str, Path] = {}
-    camera = {"schema_version": 1, "librealsense_version": "2.57.7", "firmware_policy": "preserve", "recording": {"encoding": cameras["recording_encoding"], "jpeg_quality": cameras["jpeg_quality"], "calibration_encoding": "raw_rgb", "depth_enabled": False}, "cameras": {}}
+    camera = {"schema_version": 1, "librealsense_version": "2.57.7", "firmware_policy": "preserve", "recording": {"encoding": cameras["recording_encoding"], "jpeg_quality": cameras["jpeg_quality"], "depth_enabled": bool(cameras["depth_enabled"])}, "cameras": {}}
     for name, stream in cameras["streams"].items():
-        camera["cameras"][name] = {**stream, "jpeg_quality": cameras["jpeg_quality"], "depth_enabled": False, "fps": int(stream["fps"])}
+        recording = stream.get("recording", {})
+        camera["cameras"][name] = {**stream, "jpeg_quality": cameras["jpeg_quality"], "depth_enabled": bool(recording.get("depth", cameras["depth_enabled"])) or bool(recording.get("pointcloud", cameras.get("pointcloud_enabled", False))), "depth_width": int(cameras.get("depth_width", stream["width"])), "depth_height": int(cameras.get("depth_height", stream["height"])), "depth_fps": int(cameras.get("depth_fps", stream["fps"])), "pointcloud_enabled": bool(recording.get("pointcloud", cameras.get("pointcloud_enabled", False))), "pointcloud_stride": int(recording.get("pointcloud_stride", cameras.get("pointcloud_stride", 2))), "fps": int(stream["fps"])}
     xr_params = {
         "enabled": bool(xr["enabled"]),
         "ffmpeg": xr["ffmpeg"],
@@ -266,6 +320,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
             "/**": {
                 "ros__parameters": {
                     "session_id": session["id"],
+                    "frame_config": str(config.resolve(flexiv["frame_config"])),
                     "foot_pedal": pedal["device"],
                     "observation_rate_hz": sampling["arm_observation_hz"],
                     "joint_lower_limits_rad": safety["joint_lower_limits_rad"],
@@ -307,7 +362,9 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     "cartesian_impedance_stiffness": flexiv[
                         "cartesian_control"
                     ]["impedance_stiffness"],
-                    "cartesian_damping": flexiv["cartesian_control"]["damping"],
+                    "cartesian_damping_ratio": flexiv[
+                        "cartesian_control"
+                    ]["damping_ratio"],
                     "home_left_joints_rad": flexiv["home"]["left_joints_rad"],
                     "home_right_joints_rad": flexiv["home"][
                         "right_joints_rad"

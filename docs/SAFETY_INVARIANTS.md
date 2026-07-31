@@ -27,6 +27,16 @@ warning.
 8. A watchdog, communication loss, lease loss, pedal release, source change, or
    hardware fault transitions to `HOLD_LATCHED`. Resuming requires an explicit
    local re-arm; reconnecting alone cannot resume motion.
-9. Device and host receive timestamps, sequence numbers, validity, and age are
+9. Configured Home runs only after an explicit Quest A, left-pedal re-record,
+   or local CLI request. A local one-shot token establishes a Home lease bound
+   to the current bridge process, hardware session, and RDK generation; the
+   lease is revoked on disconnect or F/T re-zero. Home also requires
+   current-session F/T zero, local permission, collision-clear, and healthy
+   observations, but not the teleoperation pedal. Its joint command is stopped
+   if the 150 ms keepalive expires.
+10. Cartesian stiffness is explicit on every validated command profile,
+   bounded by live `RobotInfo.K_x_nom`, and applied through RDK before motion.
+   Damping is a dimensionless ratio in `[0.3,0.8]`.
+11. Device and host receive timestamps, sequence numbers, validity, and age are
    retained. Missing data is invalid, never a zero-valued observation.
-10. The legacy workspace is neither sourced, imported, linked, nor executed.
+12. The legacy workspace is neither sourced, imported, linked, nor executed.

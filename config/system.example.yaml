@@ -19,13 +19,14 @@ sampling:
 pedal:
   device: /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
   # PCsensor keyboard mapping: left=105, down=108, right=106.
-  rerecord_key_code: 105       # left arrow: atomically invalidate and start a new episode
+  rerecord_key_code: 105       # left: discard current, guarded Home, then start fresh
   enable_key_code: 108         # down arrow: hold-to-enable; release latches hold
-  record_toggle_key_code: 106  # right arrow: toggle recording, never robot motion
+  record_toggle_key_code: 106  # right: stop recording only, never starts or moves
 
 flexiv:
   rdk_config: apps/flexiv_daemon/config/robots.yaml
   tool_payload_config: apps/flexiv_daemon/config/tool_payload.yaml
+  frame_config: config/dual_arm_frames.yaml
   safety:
     # Rizon4s manufacturer defaults. Re-read RobotInfo from both controllers
     # during site commissioning and reject the hardware session on mismatch.
@@ -47,22 +48,24 @@ flexiv:
     max_linear_acceleration_m_s2: 0.25
     max_angular_acceleration_rad_s2: 0.50
   cartesian_control:
-    # Both choices use RDK NRT_CARTESIAN_MOTION_FORCE.  "position" uses high
-    # configured stiffness; "impedance" sends the explicit stiffness/damping below.
+    # Both profiles use RDK NRT_CARTESIAN_MOTION_FORCE and are applied through
+    # SetCartesianImpedance before the first Cartesian target.
     mode: position              # position | impedance
     position_stiffness: [3000, 3000, 3000, 200, 200, 200]
     impedance_stiffness: [1200, 1200, 1200, 80, 80, 80]
-    damping: [60, 60, 60, 8, 8, 8]
+    damping_ratio: [0.7, 0.7, 0.7, 0.7, 0.7, 0.7]
   home:
-    # Migrated values only from legacy dual_arm_teleop Flexiv config.  Automatic
-    # connect/home behavior is deliberately not imported.
+    # Operator-defined reset/teleop-ready pose, not Flexiv's calibration Home.
+    # It runs only from an explicit Quest A / left-pedal / local CLI request.
+    # Local session authorization + collision-clear are mandatory; the
+    # down-arrow motion pedal is deliberately not a Home gate.
     left_joints_rad: [0.0, 0.80, -1.80, -1.35, 0.8416, 0.30, -1.57]
     right_joints_rad: [0.0, -0.80, 1.80, 1.35, 2.30, 0.30, 0.0]
-    max_velocity_rad_s: 1.0
-    max_acceleration_rad_s2: 2.0
+    max_velocity_rad_s: 0.50
+    max_acceleration_rad_s2: 1.0
     tolerance_rad: 0.01
     timeout_s: 20.0
-    quest_button: right_primary_click # Quest right A key, rising edge
+    quest_button: right_primary_click
 
 inspire:
   config: ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml
@@ -75,11 +78,17 @@ cameras:
   config: ros2_ws/src/flexiv_inspire_cameras/realsense_rgb.yaml
   recording_encoding: jpeg
   jpeg_quality: 90
-  depth_enabled: false
+  depth_enabled: true
+  depth_width: 424
+  depth_height: 240
+  depth_fps: 30
+  pointcloud_enabled: true
+  # Keeps RGB + z16 depth + XYZ in one DeviceIO record under 2 MiB.
+  pointcloud_stride: 2
   streams:
-    head:        {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8}
-    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8}
-    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8}
+    head:        {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: true}}
+    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: false}}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: false}}
 
 
 # Quest video return is a display branch of the same CameraFrame messages that

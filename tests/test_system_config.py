@@ -17,13 +17,31 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert set(rendered) == {"camera.yaml", "xr_bridge.yaml", "isaac_camera_receiver.yaml", "dftp.yaml", "control_bridge.yaml", "teleop.yaml", "pedal.yaml", "lerobot_export.yaml", "snapshot"}
     camera = yaml.safe_load(rendered["camera.yaml"].read_text())
     assert camera["cameras"]["head"]["width"] == 424
-    assert camera["recording"]["depth_enabled"] is False
+    assert camera["recording"]["depth_enabled"] is True
+    assert camera["cameras"]["head"]["pointcloud_enabled"] is True
+    assert camera["cameras"]["head"]["pointcloud_stride"] == 2
+    assert camera["cameras"]["left_wrist"]["pointcloud_enabled"] is False
     control = yaml.safe_load(rendered["control_bridge.yaml"].read_text())
     parameters = control["/**"]["ros__parameters"]
     assert len(parameters["joint_lower_limits_rad"]) == 7
     assert len(parameters["joint_upper_limits_rad"]) == 7
     assert parameters["joint_lower_limits_rad"][0] < 0.0
     assert parameters["joint_upper_limits_rad"][5] > 4.5
+    assert parameters["cartesian_control_mode"] == "position"
+    assert parameters["cartesian_impedance_stiffness"] == [
+        1200,
+        1200,
+        1200,
+        80,
+        80,
+        80,
+    ]
+    assert parameters["cartesian_damping_ratio"] == [0.7] * 6
+    assert len(parameters["home_left_joints_rad"]) == 7
+    assert parameters["home_max_velocity_rad_s"] <= parameters[
+        "max_joint_velocity_rad_s"
+    ]
+    assert parameters["frame_config"].endswith("/config/dual_arm_frames.yaml")
     commands = _commands(config, rendered, include_xr_receiver=False)
     rdk = commands[0]
     assert rdk[rdk.index("--config") + 1] == str(

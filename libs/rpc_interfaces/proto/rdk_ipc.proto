@@ -186,6 +186,7 @@ message HomeCommand {
   bool physical_pedal = 12;
   bool collision_clear = 13;
   string local_authorization_token = 14;
+  bool clear_routine_hold = 15;
 }
 
 message HomeResult {

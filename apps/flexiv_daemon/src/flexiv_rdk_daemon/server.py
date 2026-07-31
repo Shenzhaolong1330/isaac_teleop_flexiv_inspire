@@ -810,10 +810,29 @@ class RDKRequestDispatcher:
             raise
         with self._lock:
             just_started = False
-            if self._hold_latched:
-                return self._home_result(
-                    False, False, f"hold_latched:{self._hold_reason}"
+            generation = self._backend.connection_generation
+            lease_active = (
+                session_id == self._home_authorized_session
+                and owner_pid == self._home_authorized_owner_pid
+                and generation == self._home_authorized_generation
+            )
+            if not self._home_active and not lease_active:
+                self._home_authorizations.consume(
+                    str(payload.get("local_authorization_token", "")),
+                    session_id=session_id,
                 )
+            if self._hold_latched:
+                if (
+                    not self._home_active
+                    and bool(payload.get("clear_routine_hold", False))
+                    and self._hold_reason == "episode_home_transition"
+                ):
+                    self._hold_latched = False
+                    self._hold_reason = ""
+                else:
+                    return self._home_result(
+                        False, False, f"hold_latched:{self._hold_reason}"
+                    )
             if self._active and not self._home_active:
                 return self._home_result(False, False, "command_source_active")
             if self._home_active:
@@ -842,17 +861,6 @@ class RDKRequestDispatcher:
                         False, False, "non_monotonic_home_sequence"
                     )
             else:
-                generation = self._backend.connection_generation
-                lease_active = (
-                    session_id == self._home_authorized_session
-                    and owner_pid == self._home_authorized_owner_pid
-                    and generation == self._home_authorized_generation
-                )
-                if not lease_active:
-                    self._home_authorizations.consume(
-                        str(payload.get("local_authorization_token", "")),
-                        session_id=session_id,
-                    )
                 sample = self._backend.observe_both()
                 for side in ("left", "right"):
                     arm = getattr(sample, side)
@@ -1023,6 +1031,26 @@ class RDKRequestDispatcher:
 
     def _hold(self, sequence: int, reason: str) -> tuple[str, dict[str, Any]]:
         with self._lock:
+            routine_reasons = {
+                "physical_pedal_released",
+                "source_deadman_released",
+                "source_heartbeat_stale",
+                "command_stale",
+                "stop_requested",
+                "local_stop",
+                "command_ttl_expired",
+                "episode_home_transition",
+            }
+            if (
+                reason == "episode_home_transition"
+                and self._hold_latched
+                and self._hold_reason not in routine_reasons
+            ):
+                return self._ack(
+                    sequence,
+                    False,
+                    f"non_routine_hold_preserved:{self._hold_reason}",
+                )
             # Explicit retries always re-issue both measurement holds.
             errors = self._latch_hold_locked(reason, force_hardware_hold=True)
             if errors:

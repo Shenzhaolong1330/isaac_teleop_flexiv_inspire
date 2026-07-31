@@ -251,6 +251,45 @@ def test_home_watchdog_stops_joint_motion_without_keepalive() -> None:
     assert ("right", "cartesian_mode") in backend.events
 
 
+def test_home_clears_only_episode_transition_hold() -> None:
+    value, _ = dispatcher()
+    _, active = value(
+        "cartesian_command", 1, command("teleop", 1), (781, 0, 0)
+    )
+    assert active["accepted"]
+    _, held = value(
+        "hold", 2, {"reason": "episode_home_transition"}, (781, 0, 0)
+    )
+    assert held["accepted"] and value.hold_latched
+    request = home_command(1)
+    request["clear_routine_hold"] = True
+
+    _, response = value("home_command", 3, request, (781, 0, 0))
+
+    assert response["accepted"] and response["completed"]
+    assert not value.hold_latched
+
+
+def test_episode_transition_never_overwrites_or_clears_severe_hold() -> None:
+    value, _ = dispatcher()
+    _, severe = value(
+        "hold", 1, {"reason": "hardware_fault"}, (782, 0, 0)
+    )
+    assert severe["accepted"]
+    _, transition = value(
+        "hold", 2, {"reason": "episode_home_transition"}, (782, 0, 0)
+    )
+    assert not transition["accepted"]
+    assert "hardware_fault" in transition["reason"]
+    request = home_command(1)
+    request["clear_routine_hold"] = True
+
+    _, response = value("home_command", 3, request, (782, 0, 0))
+
+    assert not response["accepted"]
+    assert response["reason"] == "hold_latched:hardware_fault"
+
+
 def test_cartesian_command_applies_impedance_before_motion() -> None:
     value, backend = dispatcher()
     _, response = value(

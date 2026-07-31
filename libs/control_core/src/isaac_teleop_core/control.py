@@ -224,6 +224,31 @@ class ControlArbiter:
                 self._clear_commands()
                 self._state = ControlState.READY
 
+    def prepare_home(self) -> None:
+        """Drop command ownership and enter READY for an explicit Home.
+
+        The hardware bridge must synchronously hold the robot before calling
+        this method. Continuing source packets are then rejected because no
+        source remains armed.
+        """
+
+        with self._lock:
+            if self._ft_zero_generation is None:
+                raise TransitionError("Home preparation requires current F/T zero")
+            if self._state in {
+                ControlState.MAINTENANCE,
+                ControlState.DISABLED,
+                ControlState.FAULT,
+            }:
+                raise TransitionError(
+                    f"cannot prepare Home from {self._state.value}"
+                )
+            self._active_source = None
+            self._hold_reason = HoldReason.NONE
+            self._deadman_release_seen = False
+            self._clear_commands()
+            self._state = ControlState.READY
+
     def submit(
         self,
         command: BimanualCommand,

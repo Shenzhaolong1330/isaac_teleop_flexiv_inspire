@@ -131,3 +131,22 @@ def test_policy_heartbeat_timeout_is_max_200ms_or_three_periods() -> None:
     snapshot = arbiter.tick(now_monotonic_ns=BASE + 301_000_000)
     assert snapshot.state is ControlState.HOLD_LATCHED
     assert snapshot.hold_reason is HoldReason.HEARTBEAT_STALE
+
+
+def test_prepare_home_drops_active_source_and_returns_ready() -> None:
+    arbiter = ready_arbiter()
+    arbiter.submit(action(CommandSource.TELEOP, 1), now_monotonic_ns=BASE)
+
+    arbiter.prepare_home()
+
+    assert arbiter.snapshot.state is ControlState.READY
+    assert arbiter.snapshot.active_source is None
+    assert arbiter.snapshot.last_safe is None
+
+
+def test_prepare_home_rejects_maintenance_without_current_ft_zero() -> None:
+    arbiter = ControlArbiter()
+    arbiter.begin_hardware_session("session")
+
+    with pytest.raises(TransitionError, match="current F/T zero"):
+        arbiter.prepare_home()

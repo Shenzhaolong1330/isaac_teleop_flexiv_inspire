@@ -987,7 +987,7 @@ class ControlBridge(Node):
             session_id = str(payload.get("session_id", "")).strip()
             if session_id != self._session_id:
                 raise ValueError("Home request session mismatch")
-            if source != "episode_rerecord":
+            if source not in {"episode_rerecord", "episode_controller"}:
                 raise ValueError("unsupported contextual Home source")
             if not request_id or len(request_id) > 128:
                 raise ValueError("Home request_id must contain 1..128 characters")
@@ -1010,11 +1010,17 @@ class ControlBridge(Node):
         now = time.monotonic_ns()
         self._update_gates(now)
         try:
+            prepare_control = False
             with self._state_lock:
                 if self._home_inflight:
                     raise RuntimeError("Home is already active")
-                if self._arbiter.snapshot.state is not ControlState.READY:
-                    raise RuntimeError("Home requires control state READY")
+                state = self._arbiter.snapshot.state
+                if state in {
+                    ControlState.MAINTENANCE,
+                    ControlState.DISABLED,
+                    ControlState.FAULT,
+                }:
+                    raise RuntimeError(f"Home cannot start from {state.value}")
                 if (
                     not self._home_authorization_lease_active
                     and (
@@ -1028,10 +1034,14 @@ class ControlBridge(Node):
                 reason = self._home_gate_failure(now)
                 if reason:
                     raise RuntimeError(reason)
+                prepare_control = state is not ControlState.READY
+            if prepare_control:
+                self._prepare_control_for_home()
+            with self._state_lock:
                 self._home_inflight = True
             thread = threading.Thread(
                 target=self._run_home,
-                args=(request_id,),
+                args=(request_id, prepare_control),
                 name="guarded-dual-arm-home",
                 daemon=True,
             )
@@ -1040,6 +1050,20 @@ class ControlBridge(Node):
         except Exception as exc:
             self.get_logger().error(f"Home request rejected: {exc}")
             self._publish_home_status("rejected", str(exc), request_id=request_id)
+
+    def _prepare_control_for_home(self) -> None:
+        with self._chunk_lock:
+            self._chunk_generation += 1
+        kind, response = self._ipc_maintenance.request(
+            "hold",
+            {"reason": "episode_home_transition", "latch": True},
+            timeout_s=5.0,
+        )
+        if kind != "command_ack" or not response.get("accepted", False):
+            raise RuntimeError(response.get("reason", kind))
+        self._arbiter.prepare_home()
+        with self._state_lock:
+            self._hold_sent_for_latch = False
 
     def _home_gate_failure(self, now: int) -> str:
         if not self._local_permission:
@@ -1064,7 +1088,7 @@ class ControlBridge(Node):
             return "hand_observation_stale"
         return ""
 
-    def _run_home(self, request_id: str) -> None:
+    def _run_home(self, request_id: str, clear_routine_hold: bool = False) -> None:
         started = False
         failure = ""
         try:
@@ -1106,6 +1130,7 @@ class ControlBridge(Node):
                     "safety_validated": True,
                     "local_permission": self._local_permission,
                     "collision_clear": self._collision_clear,
+                    "clear_routine_hold": clear_routine_hold and first,
                     "local_authorization_token": (
                         token
                         if first and not self._home_authorization_lease_active

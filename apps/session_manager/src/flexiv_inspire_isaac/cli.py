@@ -77,7 +77,8 @@ def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -
          "-p", f"camera_config:={rendered['camera.yaml']}",
          "-p", f"manus_calibration:={config.resolve(root['teleop']['manus_calibration']) if str(root['teleop']['manus_calibration']).strip() else ''}",
          "-p", f"deviceio_socket:={runtime_root / 'deviceio.sock'}",
-         "-p", f"camera_recording_mode:={root['recording']['camera_recording_mode']}"],
+         "-p", f"camera_recording_mode:={root['recording']['camera_recording_mode']}",
+         "-p", f"home_result_timeout_s:={float(root['flexiv']['home']['timeout_s']) + 10.0}"],
     ]
     if bool(root["xr_video"]["enabled"]):
         commands.append(["flexiv-inspire-xr-bridge", "--ros-args", "--params-file", str(rendered["xr_bridge.yaml"])])

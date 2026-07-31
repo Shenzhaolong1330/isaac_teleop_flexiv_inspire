@@ -44,7 +44,7 @@ class PedalRouter(Node):
         if event.key_code == int(self.get_parameter("rerecord_key_code").value):
             command = "rerecord"
         elif event.key_code == int(self.get_parameter("record_toggle_key_code").value):
-            command = "toggle"
+            command = "stop"
         else:
             return
         message = String()

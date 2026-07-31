@@ -45,12 +45,11 @@ check_text_file() {
 }
 
 for runtime_path in \
-  "${ROOT}/configs" \
+  "${ROOT}/config" \
   "${ROOT}/scripts" \
-  "${ROOT}/src" \
-  "${ROOT}/core" \
-  "${ROOT}/interfaces" \
-  "${ROOT}/rdk_daemon" \
+  "${ROOT}/apps" \
+  "${ROOT}/libs" \
+  "${ROOT}/ros2_ws/src" \
   "${ROOT}/dftp" \
   "${ROOT}/teleop" \
   "${ROOT}/policy_api" \
@@ -61,14 +60,14 @@ for runtime_path in \
 done
 
 while IFS= read -r -d '' link; do
-  resolved="$(readlink -f -- "${link}")"
+  resolved="$(readlink -f -- "${link}" || true)"
   if [[ "${resolved}" == "${FORBIDDEN_ROOT}"* ]]; then
     printf 'ERROR: symlink %s resolves into legacy workspace: %s\n' \
       "${link}" "${resolved}" >&2
     FAILED=1
   fi
 done < <(find "${ROOT}" \
-  \( -path "${ROOT}/.git" -o -path "${ROOT}/upstream" -o -path "${ROOT}/envs" \) \
+  \( -path "${ROOT}/.git" -o -path "${ROOT}/third_party" -o -path "${ROOT}/envs" \) \
   -prune -o -type l -print0)
 
 for env_path in "${ROOT}"/envs/*; do

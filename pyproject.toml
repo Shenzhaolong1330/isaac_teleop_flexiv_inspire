@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flexiv-inspire-isaac"
-version = "0.2.0"
+version = "0.3.0"
 description = "Independent Isaac Teleop, acquisition, visualization, and policy adapters for Flexiv and Inspire"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -18,17 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = [
-  "mcap>=1.2,<2",
-  "mcap-ros2-support>=0.5,<1",
-  "rerun-sdk>=0.24,<0.34",
-]
+data = ["mcap>=1.2,<2", "mcap-ros2-support>=0.5,<1", "rerun-sdk>=0.24,<0.34"]
 test = ["pytest>=8.4,<9"]
 
 [project.scripts]
 flexiv-inspire-camera-node = "flexiv_inspire_isaac.cameras.ros_node:main"
 flexiv-inspire-camera-smoke = "flexiv_inspire_isaac.cameras.smoke:main"
 flexiv-inspire-camera-verify = "flexiv_inspire_isaac.cameras.verify:main"
+flexiv-inspire-xr-bridge = "flexiv_inspire_xr_bridge.ros_node:main"
 flexiv-inspire-dftp-node = "flexiv_inspire_isaac.dftp.ros_node:main"
 flexiv-inspire-dftp-read-only = "flexiv_inspire_isaac.dftp.read_only_check:main"
 flexiv-inspire-policy-server = "flexiv_inspire_isaac.policy_api.ros_adapter:main"
@@ -41,10 +38,26 @@ flexiv-inspire-episode-controller = "flexiv_inspire_isaac.episode_control:main"
 flexiv-inspire = "flexiv_inspire_isaac.cli:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+packages = [
+  "flexiv_inspire_isaac",
+  "flexiv_inspire_isaac.cameras",
+  "flexiv_inspire_isaac.data_pipeline",
+  "flexiv_inspire_isaac.dftp",
+  "flexiv_inspire_isaac.policy_api",
+  "flexiv_inspire_isaac.policy_api.generated",
+  "flexiv_inspire_isaac.rerun_viz",
+  "flexiv_inspire_xr_bridge",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools.package-dir]
+"flexiv_inspire_isaac" = "apps/session_manager/src/flexiv_inspire_isaac"
+"flexiv_inspire_isaac.cameras" = "ros2_ws/src/flexiv_inspire_cameras"
+"flexiv_inspire_isaac.data_pipeline" = "libs/data_core/src/flexiv_inspire_isaac/data_pipeline"
+"flexiv_inspire_isaac.dftp" = "ros2_ws/src/flexiv_inspire_dftp"
+"flexiv_inspire_isaac.policy_api" = "apps/policy_server/src/flexiv_inspire_isaac/policy_api"
+"flexiv_inspire_isaac.policy_api.generated" = "apps/policy_server/src/flexiv_inspire_isaac/policy_api/generated"
+"flexiv_inspire_isaac.rerun_viz" = "ros2_ws/src/flexiv_inspire_rerun"
+"flexiv_inspire_xr_bridge" = "ros2_ws/src/flexiv_inspire_xr_bridge/flexiv_inspire_xr_bridge"
 
 [tool.setuptools.package-data]
 "flexiv_inspire_isaac.cameras" = ["*.yaml", "launch/*.py"]
@@ -52,6 +65,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# ROS 2's launch-testing plugins turn a module-level importorskip into a skip of
-# the entire tests/core directory. This repository has no pytest launch tests.
 addopts = "-q -p no:launch_testing -p no:launch_ros"

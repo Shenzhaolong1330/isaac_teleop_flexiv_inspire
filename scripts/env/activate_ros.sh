@@ -10,14 +10,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 teleop_activate_env ros-py312 no
 
 teleop_source_ros_jazzy
-if [[ -f "${TELEOP_ROOT}/install/setup.bash" ]]; then
+if [[ -f "${TELEOP_ROOT}/ros2_ws/install/setup.bash" ]]; then
   restore_nounset=no
   if [[ "$-" == *u* ]]; then
     restore_nounset=yes
     set +u
   fi
   # shellcheck disable=SC1091
-  source "${TELEOP_ROOT}/install/setup.bash"
+  source "${TELEOP_ROOT}/ros2_ws/install/setup.bash"
   if [[ "${restore_nounset}" == "yes" ]]; then
     set -u
   fi

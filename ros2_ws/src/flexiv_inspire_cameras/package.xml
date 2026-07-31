@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<package format="3"><name>flexiv_inspire_cameras</name><version>0.3.0</version><description>flexiv_inspire_cameras</description>
+<maintainer email="hb@example.com">hb</maintainer><license>Apache-2.0</license><buildtool_depend>ament_python</buildtool_depend>
+<exec_depend>rclpy</exec_depend><exec_depend>flexiv_inspire_interfaces</exec_depend><exec_depend>sensor_msgs</exec_depend>
+<export><build_type>ament_python</build_type></export></package>

@@ -1,4 +1,4 @@
-# This is the only site-editable runtime configuration.  Copy to config/site.yaml.
+# Site runtime configuration. Edit this file, then restart the affected command.
 schema_version: 1
 session:
   id: "flexiv-inspire-site"
@@ -117,5 +117,5 @@ recording:
 
 commands:
   # Kept explicit so the launcher never guesses an environment or starts hardware writes.
-  rdk_daemon: ["flexiv-rdk-daemon", "--mock"]
+  rdk_daemon: ["/home/hb/isaac_teleop_flexiv_inspire/envs/rdk-py310/bin/flexiv-rdk-daemon", "--mock"]
   teleop_launch: ["ros2", "launch", "flexiv_inspire_control", "teleop_control.launch.py"]

@@ -19,11 +19,11 @@ PY310_VERSION=3.10.19
   exit 1
 }
 
-mkdir -p "${ROOT}/envs" "${ROOT}/upstream" "${ROOT}/vendor" "${ROOT}/requirements"
+mkdir -p "${ROOT}/envs" "${ROOT}/third_party" "${ROOT}/vendor" "${ROOT}/requirements"
 # These large non-workspace trees contain third-party setup.py/CMake projects.
 # Keep accidental bare `colcon build` from recursively treating them as ROS
 # packages; the supported build still uses exact --base-paths.
-touch   "${ROOT}/envs/COLCON_IGNORE"   "${ROOT}/upstream/COLCON_IGNORE"   "${ROOT}/vendor/COLCON_IGNORE"
+touch   "${ROOT}/envs/COLCON_IGNORE"   "${ROOT}/third_party/COLCON_IGNORE"   "${ROOT}/vendor/COLCON_IGNORE"
 "${UV}" python install "${PY310_VERSION}"
 PY310="$("${UV}" python find "${PY310_VERSION}")"
 
@@ -76,7 +76,7 @@ configure_ros_vendor_bindings() {
   isaac_site_packages="$("${isaac_python}" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
   printf '%s\n' "${vendor_path}" > "${ros_site_packages}/local-ros-vendor-bindings.pth"
   printf '%s\n' "${system_path}" > "${ros_site_packages}/system-ros-python.pth"
-  printf '%s\n' "${ROOT}/rdk_daemon/src" > "${ros_site_packages}/local-rdk-ipc.pth"
+  printf '%s\n' "${ROOT}/apps/flexiv_daemon/src" > "${ros_site_packages}/local-rdk-ipc.pth"
   printf '%s\n' "${system_path}" > "${isaac_site_packages}/system-ros-python.pth"
 }
 
@@ -106,9 +106,9 @@ lock_and_sync isaac-py312
 lock_and_sync data-py312
 configure_ros_vendor_bindings
 
-install_local_projects rdk-py310 core rdk_daemon
-install_local_projects ros-py312 core .
-install_local_projects isaac-py312 core .
-install_local_projects data-py312 core .
+install_local_projects rdk-py310 libs/control_core apps/flexiv_daemon
+install_local_projects ros-py312 libs/control_core .
+install_local_projects isaac-py312 libs/control_core .
+install_local_projects data-py312 libs/control_core .
 
 printf 'Created and synchronized four isolated environments under %s/envs\n' "${ROOT}"

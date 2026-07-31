@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>flexiv_inspire_xr_bridge</name><version>0.3.0</version>
+  <description>Latest-only RealSense ROS JPEG to Isaac Teleop H264 RTP bridge.</description>
+  <maintainer email="hb@example.com">hb</maintainer><license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>std_msgs</exec_depend>
+  <exec_depend>flexiv_inspire_interfaces</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

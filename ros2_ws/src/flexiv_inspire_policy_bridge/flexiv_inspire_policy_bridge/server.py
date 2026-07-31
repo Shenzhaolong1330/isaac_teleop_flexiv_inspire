@@ -1,0 +1,1 @@
+from flexiv_inspire_isaac.policy_api.ros_adapter import main

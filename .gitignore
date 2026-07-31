@@ -12,6 +12,7 @@ htmlcov/
 .venv/
 envs/
 upstream/
+third_party/IsaacTeleop/
 vendor/
 
 # ROS/colcon and native builds

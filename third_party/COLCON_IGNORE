@@ -1,0 +1,1 @@
+Keep vendored upstream projects out of the local ROS 2 build graph.

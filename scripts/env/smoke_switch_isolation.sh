@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-for ignored_tree in envs upstream vendor; do
+for ignored_tree in envs third_party vendor; do
   [[ -f "${ROOT}/${ignored_tree}/COLCON_IGNORE" ]] || {
     printf 'ERROR: %s/COLCON_IGNORE is missing\n' "${ignored_tree}" >&2
     exit 1

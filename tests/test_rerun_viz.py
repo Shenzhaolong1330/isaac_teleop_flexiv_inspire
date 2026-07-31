@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import threading
 import time
 
@@ -143,3 +144,94 @@ def test_visualizer_disconnects_even_when_flush_fails() -> None:
         visualizer.close()
     assert visualizer.stream.disconnected is True
     assert visualizer._closed is True
+
+
+def test_offline_deviceio_logs_images_depth_points_and_curves() -> None:
+    class Stream:
+        def __init__(self):
+            self.paths = []
+
+        def log(self, path, _value):
+            self.paths.append(path)
+
+    class RR:
+        EncodedImage = staticmethod(lambda **kwargs: ("encoded", kwargs))
+        Image = staticmethod(lambda value: ("image", value))
+        DepthImage = staticmethod(lambda value, **kwargs: ("depth", value, kwargs))
+        Points3D = staticmethod(lambda value: ("points", value))
+        Quaternion = staticmethod(lambda **kwargs: ("quaternion", kwargs))
+        Transform3D = staticmethod(lambda **kwargs: ("transform", kwargs))
+
+    visualizer = object.__new__(RerunVisualizer)
+    visualizer.stream = Stream()
+    visualizer.rr = RR()
+    visualizer._set_time = lambda *args, **kwargs: None
+    visualizer._scalar = lambda path, value: visualizer.stream.paths.append(path)
+    visualizer._vector = (
+        lambda path, values, labels: visualizer.stream.paths.append(path)
+    )
+    visualizer._text_if_changed = lambda *args, **kwargs: None
+    visualizer.log_deviceio(
+        topic="/camera/head/color/image_raw/compressed",
+        payload={
+            "camera_name": "head",
+            "jpeg_b64": base64.b64encode(b"jpeg").decode(),
+            "width": 1,
+            "height": 1,
+            "depth_width": 1,
+            "depth_height": 1,
+            "depth_scale_m": 0.001,
+            "depth_z16_b64": base64.b64encode(
+                np.asarray([1000], dtype="<u2").tobytes()
+            ).decode(),
+            "pointcloud_xyz_f32_b64": base64.b64encode(
+                np.asarray([[1.0, 2.0, 3.0]], dtype="<f4").tobytes()
+            ).decode(),
+            "temperature_c": 42.0,
+        },
+        playback_time_ns=1,
+        original_time_ns=1,
+        sequence=1,
+        valid=True,
+        timing_valid=True,
+    )
+    assert "camera/head/color" in visualizer.stream.paths
+    assert "camera/head/depth_m" in visualizer.stream.paths
+    assert "camera/head/pointcloud" in visualizer.stream.paths
+    assert "camera/head/color/image_raw/compressed/temperature_c" in visualizer.stream.paths
+
+
+def test_offline_deviceio_writes_a_real_rerun_recording(tmp_path) -> None:
+    import pytest
+
+    pytest.importorskip("rerun")
+    output = tmp_path / "offline.rrd"
+    visualizer = RerunVisualizer(save_path=output)
+    try:
+        visualizer.log_deviceio(
+            topic="/camera/head/color/image_raw",
+            payload={
+                "camera_name": "head",
+                "width": 1,
+                "height": 1,
+                "raw_rgb_b64": base64.b64encode(b"\x01\x02\x03").decode(),
+                "depth_width": 1,
+                "depth_height": 1,
+                "depth_scale_m": 0.001,
+                "depth_z16_b64": base64.b64encode(
+                    np.asarray([1000], dtype="<u2").tobytes()
+                ).decode(),
+                "pointcloud_xyz_f32_b64": base64.b64encode(
+                    np.asarray([[1.0, 2.0, 3.0]], dtype="<f4").tobytes()
+                ).decode(),
+            },
+            playback_time_ns=1_000_000_000,
+            original_time_ns=1_000_000_000,
+            sequence=1,
+            valid=True,
+            timing_valid=True,
+        )
+    finally:
+        visualizer.close()
+    assert output.is_file()
+    assert output.stat().st_size > 0

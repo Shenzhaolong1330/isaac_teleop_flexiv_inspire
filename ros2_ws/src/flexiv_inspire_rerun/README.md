@@ -64,3 +64,11 @@ rerun rrd stats /tmp/flexiv_inspire_rerun_smoke.rrd
 The synthetic recording includes three JPEG RGB streams, both arms and hands,
 all 1062 taxels per hand across 17 surfaces, and requested/safe/sent action
 differences.
+
+## Offline episode playback
+
+The repository-level `./scripts/visualize.sh` reads `config/playback.yaml` and
+loads the selected episode's complete `deviceio.mcap` into Rerun. This path
+does not initialize ROS and has no publishers or hardware connections. It adds
+recorded numeric curves, RGB/depth images and point clouds to the Rerun
+timeline; see `docs/PLAYBACK.md` for dataset selection and speed controls.

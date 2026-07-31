@@ -35,12 +35,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="generate deterministic data without importing ROS or touching hardware",
     )
     parser.add_argument("--frames", type=int, default=12, help="synthetic frame count")
+    parser.add_argument(
+        "--offline-config",
+        metavar="YAML",
+        help="play one DeviceIO episode from the shared playback YAML; never uses ROS",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments, ros_args = parser.parse_known_args(argv)
+    if arguments.offline_config:
+        if arguments.synthetic or arguments.save or arguments.connect or arguments.spawn:
+            parser.error("--offline-config selects its sink from YAML")
+        from .offline import run_offline
+
+        return run_offline(arguments.offline_config)
     if arguments.synthetic:
         if arguments.connect or arguments.spawn:
             parser.error("--synthetic requires --save and never starts a viewer")

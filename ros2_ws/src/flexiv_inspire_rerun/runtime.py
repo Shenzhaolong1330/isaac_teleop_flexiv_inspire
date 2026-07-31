@@ -8,6 +8,7 @@ commands and has no robot, Modbus, camera, or ROS side effects.
 from __future__ import annotations
 
 from collections import OrderedDict
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 import math
@@ -718,3 +719,167 @@ class RerunVisualizer:
         )
         hold_reason = str(payload.get("hold_reason", ""))
         self._text_if_changed("control/state/hold_reason", hold_reason, level="WARN")
+
+    def _log_numeric_tree(self, path: str, value: Any, *, depth: int = 0) -> None:
+        """Log bounded numeric leaves from a native DeviceIO payload."""
+
+        if depth > 5:
+            return
+        if isinstance(value, bool):
+            self._scalar(path, value)
+            return
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            if math.isfinite(float(value)):
+                self._scalar(path, value)
+            return
+        if isinstance(value, str):
+            if len(value) <= 512:
+                self._text_if_changed(path, value)
+            return
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                self._log_numeric_tree(
+                    f"{path}/{str(key).strip('/').replace(' ', '_')}",
+                    child,
+                    depth=depth + 1,
+                )
+            return
+        if isinstance(value, Sequence) and not isinstance(
+            value, (bytes, bytearray, memoryview)
+        ):
+            if not value or len(value) > 512:
+                return
+            if all(isinstance(item, (bool, int, float)) for item in value):
+                array = np.asarray(value, dtype=np.float64)
+                if np.all(np.isfinite(array)):
+                    self._vector(
+                        path,
+                        array,
+                        [f"value_{index}" for index in range(array.size)],
+                    )
+
+    @staticmethod
+    def _duration_payload_ns(value: Any) -> int:
+        if isinstance(value, Mapping):
+            return int(value.get("sec", 0)) * 1_000_000_000 + int(
+                value.get("nanosec", 0)
+            )
+        return int(value or 0)
+
+    def log_deviceio(
+        self,
+        *,
+        topic: str,
+        payload: Any,
+        playback_time_ns: int,
+        original_time_ns: int,
+        sequence: int,
+        valid: bool,
+        timing_valid: bool,
+        invalid_reason: str = "",
+    ) -> None:
+        """Log one recorded native envelope without creating ROS publishers."""
+
+        normalized = topic.strip("/")
+        root = normalized or "unknown"
+        self._set_time(playback_time_ns, sequence=sequence)
+        self._scalar(f"{root}/record/valid", valid)
+        self._scalar(f"{root}/record/timing_valid", timing_valid)
+        self._scalar(f"{root}/record/original_time_seconds", original_time_ns * 1e-9)
+        self._text_if_changed(
+            f"{root}/record/invalid_reason", invalid_reason, level="WARN"
+        )
+        if not isinstance(payload, Mapping):
+            return
+
+        if normalized.startswith("camera/"):
+            camera = str(payload.get("camera_name", normalized.split("/")[1]))
+            jpeg_b64 = payload.get("jpeg_b64")
+            if isinstance(jpeg_b64, str) and jpeg_b64:
+                self.stream.log(
+                    f"camera/{camera}/color",
+                    self.rr.EncodedImage(
+                        contents=base64.b64decode(jpeg_b64), media_type="image/jpeg"
+                    ),
+                )
+            raw_b64 = payload.get("raw_rgb_b64")
+            if isinstance(raw_b64, str) and raw_b64:
+                width, height = int(payload["width"]), int(payload["height"])
+                rgb = np.frombuffer(base64.b64decode(raw_b64), dtype=np.uint8)
+                if rgb.size != width * height * 3:
+                    raise ValueError(f"{camera}: raw RGB byte count mismatch")
+                self.stream.log(
+                    f"camera/{camera}/color", self.rr.Image(rgb.reshape(height, width, 3))
+                )
+            depth_b64 = payload.get("depth_z16_b64")
+            if isinstance(depth_b64, str) and depth_b64:
+                width = int(payload["depth_width"])
+                height = int(payload["depth_height"])
+                depth = np.frombuffer(base64.b64decode(depth_b64), dtype="<u2")
+                if depth.size != width * height:
+                    raise ValueError(f"{camera}: depth sample count mismatch")
+                depth_m = depth.reshape(height, width).astype(np.float32) * float(
+                    payload["depth_scale_m"]
+                )
+                self.stream.log(
+                    f"camera/{camera}/depth_m",
+                    self.rr.DepthImage(depth_m, meter=1.0),
+                )
+            points_b64 = payload.get("pointcloud_xyz_f32_b64")
+            if isinstance(points_b64, str) and points_b64:
+                points = np.frombuffer(
+                    base64.b64decode(points_b64), dtype="<f4"
+                )
+                if points.size % 3:
+                    raise ValueError(f"{camera}: point cloud XYZ count mismatch")
+                points = points.reshape(-1, 3)
+                points = points[np.all(np.isfinite(points), axis=1)]
+                self.stream.log(
+                    f"camera/{camera}/pointcloud", self.rr.Points3D(points)
+                )
+
+        if normalized.endswith("_arm/state"):
+            pose = payload.get("tcp_pose_rdk_xyz_wxyz")
+            if isinstance(pose, Sequence) and len(pose) == 7:
+                pose = np.asarray(pose, dtype=np.float64)
+                self.stream.log(
+                    f"{root}/tcp",
+                    self.rr.Transform3D(
+                        translation=pose[:3],
+                        quaternion=self.rr.Quaternion(
+                            xyzw=[pose[4], pose[5], pose[6], pose[3]]
+                        ),
+                    ),
+                )
+
+        if normalized.endswith("tactile_raw"):
+            surfaces = payload.get("surfaces")
+            if isinstance(surfaces, Sequence) and surfaces:
+                self.stream.log(
+                    f"{root}/atlas_raw_u16", self.rr.Image(tactile_atlas(surfaces))
+                )
+
+        command_stage = {
+            "control/requested_command": "requested",
+            "control/safe_command": "safe",
+            "control/sent_command": "sent",
+        }.get(normalized)
+        if command_stage is not None:
+            command = dict(payload)
+            command["stamp_ns"] = playback_time_ns
+            command["ttl_ns"] = self._duration_payload_ns(command.get("ttl"))
+            try:
+                self.log_command(command_stage, command)
+            except ValueError as exc:
+                self._text_if_changed(
+                    f"{root}/decode_error", str(exc), level="WARN"
+                )
+
+        # Curves for arm/hand/control diagnostics and all remaining bounded
+        # scalar/vector fields. Large image/tactile blobs are handled above.
+        filtered = {
+            key: value
+            for key, value in payload.items()
+            if not str(key).endswith("_b64") and key not in {"surfaces", "trajectory"}
+        }
+        self._log_numeric_tree(root, filtered)

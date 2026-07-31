@@ -1,25 +1,31 @@
-# Local safety record, not a command to change controller settings.
-# Replace the placeholders from the controller/tool installation record, then
-# set locally_verified=true only after both physical assemblies are audited.
+# Local audit snapshot, not a command to select or change a controller tool.
+# Numeric values below were read through Flexiv RDK Tool.params() from the
+# active `inspire_rs` profiles on 2026-07-31. The daemon compares this snapshot
+# with the controller before F/T zero. Set locally_verified=true only after the
+# physical assemblies, identifiers, and mounting revisions are audited. RDK
+# does not expose the physical tool serial or mounting revision, so those two
+# fields cannot be filled automatically.
 schema_version: 1
 arms:
   left:
     tool:
-      name: inspire_dftp2_left_unverified
+      name: inspire_rs
       serial: ""
       mounting_revision: UNVERIFIED
     payload:
-      mass_kg: 0.0
-      center_of_mass_m: [0.0, 0.0, 0.0]
-      inertia_kg_m2: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      mass_kg: 1.1629999876022339
+      center_of_mass_m: [-0.00432500010356307, 0.007581999991089106, 0.08359500020742416]
+      inertia_kg_m2: [0.003923799842596054, 0.003709790064021945, 0.0007389839738607407, 0.00035261400626040995, 0.0009500819724053144, -0.0012811700580641627]
+      tcp_location_xyz_wxyz: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
     locally_verified: false
   right:
     tool:
-      name: inspire_dftp2_right_unverified
+      name: inspire_rs
       serial: ""
       mounting_revision: UNVERIFIED
     payload:
-      mass_kg: 0.0
-      center_of_mass_m: [0.0, 0.0, 0.0]
-      inertia_kg_m2: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      mass_kg: 1.159999966621399
+      center_of_mass_m: [0.005419000051915646, -0.008953000418841839, 0.08010599762201309]
+      inertia_kg_m2: [0.004247370176017284, 0.005704740062355995, 0.0017096500378102064, -0.0004417200107127428, -0.0013098899507895112, -0.00045958199189044535]
+      tcp_location_xyz_wxyz: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
     locally_verified: false

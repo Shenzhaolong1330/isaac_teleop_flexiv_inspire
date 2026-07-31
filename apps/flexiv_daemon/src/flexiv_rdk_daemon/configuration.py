@@ -38,6 +38,7 @@ class ConfiguredRobot:
     side: str
     serial: str
     expected_model: str
+    expected_active_tool: str
     require_ft_sensor: bool
     expected_software_prefix: str
     required_license: str
@@ -88,6 +89,9 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
         expected_model = str(item.get("expected_model", "")).strip()
         if not expected_model:
             raise ConfigurationError(f"{side}.expected_model is required")
+        expected_active_tool = str(item.get("expected_active_tool", "")).strip()
+        if not expected_active_tool:
+            raise ConfigurationError(f"{side}.expected_active_tool is required")
         expected_software_prefix = str(
             item.get("expected_software_prefix", "")
         ).strip()
@@ -103,6 +107,7 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
                 side=side,
                 serial=serial,
                 expected_model=expected_model,
+                expected_active_tool=expected_active_tool,
                 require_ft_sensor=bool(item.get("require_ft_sensor", True)),
                 expected_software_prefix=expected_software_prefix,
                 required_license=required_license,
@@ -185,9 +190,17 @@ def read_tool_payload_identity(path: str | Path) -> ToolPayloadIdentity:
         if not str(tool.get("name", "")).strip():
             raise ConfigurationError(f"arms.{side}.tool.name is required")
         _finite_nonnegative(payload.get("mass_kg"), f"arms.{side}.payload.mass_kg")
-        for field in ("center_of_mass_m", "inertia_kg_m2"):
+        for field in (
+            "center_of_mass_m",
+            "inertia_kg_m2",
+            "tcp_location_xyz_wxyz",
+        ):
             values = payload.get(field)
-            expected = 3 if field == "center_of_mass_m" else 6
+            expected = {
+                "center_of_mass_m": 3,
+                "inertia_kg_m2": 6,
+                "tcp_location_xyz_wxyz": 7,
+            }[field]
             if not isinstance(values, list) or len(values) != expected:
                 raise ConfigurationError(
                     f"arms.{side}.payload.{field} must have {expected} values"
@@ -201,6 +214,15 @@ def read_tool_payload_identity(path: str | Path) -> ToolPayloadIdentity:
         if not bool(arm.get("locally_verified", False)):
             raise ConfigurationError(
                 f"arms.{side}.locally_verified must be true after local audit"
+            )
+        if not str(tool.get("serial", "")).strip():
+            raise ConfigurationError(
+                f"arms.{side}.tool.serial is required after local audit"
+            )
+        mounting_revision = str(tool.get("mounting_revision", "")).strip()
+        if not mounting_revision or mounting_revision.upper() == "UNVERIFIED":
+            raise ConfigurationError(
+                f"arms.{side}.tool.mounting_revision is required after local audit"
             )
 
     canonical = json.dumps(

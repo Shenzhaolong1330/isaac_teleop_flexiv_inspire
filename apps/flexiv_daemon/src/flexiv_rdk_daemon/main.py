@@ -129,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
                 item.side,
                 item.serial,
                 expected_model=item.expected_model,
+                expected_active_tool=item.expected_active_tool,
                 require_ft_sensor=item.require_ft_sensor,
                 expected_software_prefix=item.expected_software_prefix,
                 required_license=item.required_license,
@@ -161,6 +162,13 @@ def main(argv: list[str] | None = None) -> int:
         hands.update(np.zeros(6), np.zeros(6))
     interlock = DaemonInterlock()
     events = JsonlEventRecorder(event_path)
+
+    def verified_tool_payload_identity():
+        identity = read_tool_payload_identity(config.tool_payload_path)
+        if args.hardware:
+            backend.verify_active_tool_payload(identity.canonical_json)
+        return identity
+
     ft_zero = FTZeroManager(
         backend,
         write_guard=guard,
@@ -170,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         config=_ft_config(config.ft_zero),
         hand_monitor_snapshot=hands.monitor_snapshot,
         tool_payload_identity=(
-            (lambda: read_tool_payload_identity(config.tool_payload_path))
+            verified_tool_payload_identity
             if args.hardware
             else None
         ),

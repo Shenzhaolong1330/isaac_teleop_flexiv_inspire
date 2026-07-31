@@ -2,12 +2,14 @@ schema_version: 1
 left:
   serial: Rizon4s-063326
   expected_model: Rizon4s
+  expected_active_tool: inspire_rs
   require_ft_sensor: true
   expected_software_prefix: v3.11
   required_license: RDK-Professional
 right:
   serial: Rizon4s-063806
   expected_model: Rizon4s
+  expected_active_tool: inspire_rs
   require_ft_sensor: true
   expected_software_prefix: v3.11
   required_license: RDK-Professional

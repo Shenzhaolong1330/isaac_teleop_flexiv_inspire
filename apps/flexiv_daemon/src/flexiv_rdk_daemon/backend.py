@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+import json
+import math
 import threading
 import time
 from typing import Any, Protocol
@@ -50,6 +52,7 @@ class RobotSpec:
     side: str
     serial: str
     expected_model: str = "Rizon4s"
+    expected_active_tool: str = ""
     require_ft_sensor: bool = True
     expected_software_prefix: str = "v3.11"
     required_license: str = "RDK-Professional"
@@ -64,6 +67,14 @@ class RobotMetadata:
     software_version: str
     has_ft_sensor: bool
     licenses: tuple[str, ...]
+    q_min: tuple[float, ...]
+    q_max: tuple[float, ...]
+    dq_max: tuple[float, ...]
+    active_tool_name: str
+    active_tool_mass_kg: float
+    active_tool_center_of_mass_m: tuple[float, ...]
+    active_tool_inertia_kg_m2: tuple[float, ...]
+    active_tool_tcp_location_xyz_wxyz: tuple[float, ...]
 
 
 class FlexivRDKBackend:
@@ -119,7 +130,9 @@ class FlexivRDKBackend:
                 spec = self._specs[side]
                 robot = flexivrdk.Robot(spec.serial)
                 robots[side] = robot
-                metadata[side] = self._compatibility_preflight(side, spec, robot)
+                metadata[side] = self._compatibility_preflight(
+                    side, spec, robot, flexivrdk
+                )
         except Exception:
             robots.clear()
             raise
@@ -165,14 +178,22 @@ class FlexivRDKBackend:
                 return value
         raise RuntimeError(f"RobotInfo is missing required field aliases {aliases}")
 
+    @staticmethod
+    def _finite_tuple(value: Any, size: int, name: str) -> tuple[float, ...]:
+        array = np.asarray(value, dtype=np.float64).reshape(-1)
+        if array.shape != (size,) or not np.all(np.isfinite(array)):
+            raise RuntimeError(f"{name} must be a finite {size}-vector")
+        return tuple(float(item) for item in array)
+
     @classmethod
     def _compatibility_preflight(
         cls,
         side: str,
         spec: RobotSpec,
         robot: Any,
+        rdk: Any,
     ) -> RobotMetadata:
-        """Read-only RobotInfo validation; never enables or changes a robot."""
+        """Read-only RobotInfo/Tool validation; never changes controller state."""
 
         info = cls._invoke(robot, "info", "get_robot_info")
         reported_serial = str(
@@ -203,6 +224,35 @@ class FlexivRDKBackend:
                 licenses = tuple(str(item) for item in license_value)
             except TypeError:
                 licenses = (str(license_value),)
+        q_min = cls._finite_tuple(
+            cls._info_field(info, ("q_min",)), 7, f"{side} RobotInfo.q_min"
+        )
+        q_max = cls._finite_tuple(
+            cls._info_field(info, ("q_max",)), 7, f"{side} RobotInfo.q_max"
+        )
+        dq_max = cls._finite_tuple(
+            cls._info_field(info, ("dq_max",)), 7, f"{side} RobotInfo.dq_max"
+        )
+        if any(lower >= upper for lower, upper in zip(q_min, q_max)):
+            raise RuntimeError(f"{side} RobotInfo joint limits are invalid")
+
+        tool_api = rdk.Tool(robot)
+        active_tool_name = str(tool_api.name()).strip()
+        if not active_tool_name:
+            raise RuntimeError(f"{side} controller reports an empty active tool name")
+        tool_params = tool_api.params()
+        active_tool_mass_kg = float(tool_params.mass)
+        if not math.isfinite(active_tool_mass_kg) or active_tool_mass_kg < 0.0:
+            raise RuntimeError(f"{side} active tool mass is invalid")
+        active_tool_center_of_mass_m = cls._finite_tuple(
+            tool_params.CoM, 3, f"{side} active tool CoM"
+        )
+        active_tool_inertia_kg_m2 = cls._finite_tuple(
+            tool_params.inertia, 6, f"{side} active tool inertia"
+        )
+        active_tool_tcp_location_xyz_wxyz = cls._finite_tuple(
+            tool_params.tcp_location, 7, f"{side} active tool TCP"
+        )
 
         if reported_serial != spec.serial:
             raise RuntimeError(
@@ -226,6 +276,15 @@ class FlexivRDKBackend:
                 f"{side} required license {spec.required_license!r} is absent; "
                 f"reported licenses={licenses!r}"
             )
+        if (
+            spec.expected_active_tool
+            and active_tool_name != spec.expected_active_tool
+        ):
+            raise RuntimeError(
+                f"{side} active tool mismatch: expected "
+                f"{spec.expected_active_tool!r}, controller reported "
+                f"{active_tool_name!r}"
+            )
         return RobotMetadata(
             side=side,
             configured_serial=spec.serial,
@@ -234,7 +293,96 @@ class FlexivRDKBackend:
             software_version=software_version,
             has_ft_sensor=has_ft_sensor,
             licenses=licenses,
+            q_min=q_min,
+            q_max=q_max,
+            dq_max=dq_max,
+            active_tool_name=active_tool_name,
+            active_tool_mass_kg=active_tool_mass_kg,
+            active_tool_center_of_mass_m=active_tool_center_of_mass_m,
+            active_tool_inertia_kg_m2=active_tool_inertia_kg_m2,
+            active_tool_tcp_location_xyz_wxyz=active_tool_tcp_location_xyz_wxyz,
         )
+
+    def verify_active_tool_payload(
+        self,
+        canonical_tool_payload_json: str,
+        *,
+        absolute_tolerance: float = 1.0e-6,
+    ) -> None:
+        """Compare the local audit snapshot with both active controller tools."""
+
+        document = json.loads(canonical_tool_payload_json)
+        arms = document.get("arms")
+        if not isinstance(arms, dict):
+            raise RuntimeError("local tool/payload audit snapshot has no arms mapping")
+        if self._rdk is None:
+            raise RuntimeError("RDK backend is not connected")
+        for side in ("left", "right"):
+            expected_arm = arms.get(side)
+            if not isinstance(expected_arm, dict):
+                raise RuntimeError(f"local tool/payload snapshot has no {side} arm")
+            expected_tool = expected_arm.get("tool")
+            expected_payload = expected_arm.get("payload")
+            if not isinstance(expected_tool, dict) or not isinstance(
+                expected_payload, dict
+            ):
+                raise RuntimeError(
+                    f"local {side} tool/payload snapshot is malformed"
+                )
+            with self._arm_locks[side]:
+                tool_api = self._rdk.Tool(self._robot(side))
+                active_name = str(tool_api.name()).strip()
+                params = tool_api.params()
+            expected_name = str(expected_tool.get("name", "")).strip()
+            if active_name != expected_name:
+                raise RuntimeError(
+                    f"{side} active tool changed: local audit expects "
+                    f"{expected_name!r}, controller reports {active_name!r}"
+                )
+            comparisons = (
+                (
+                    "mass_kg",
+                    np.asarray([expected_payload.get("mass_kg")], dtype=np.float64),
+                    np.asarray([params.mass], dtype=np.float64),
+                ),
+                (
+                    "center_of_mass_m",
+                    np.asarray(
+                        expected_payload.get("center_of_mass_m"), dtype=np.float64
+                    ),
+                    np.asarray(params.CoM, dtype=np.float64),
+                ),
+                (
+                    "inertia_kg_m2",
+                    np.asarray(
+                        expected_payload.get("inertia_kg_m2"), dtype=np.float64
+                    ),
+                    np.asarray(params.inertia, dtype=np.float64),
+                ),
+                (
+                    "tcp_location_xyz_wxyz",
+                    np.asarray(
+                        expected_payload.get("tcp_location_xyz_wxyz"),
+                        dtype=np.float64,
+                    ),
+                    np.asarray(params.tcp_location, dtype=np.float64),
+                ),
+            )
+            for name, expected, actual in comparisons:
+                if (
+                    expected.shape != actual.shape
+                    or not np.all(np.isfinite(expected))
+                    or not np.all(np.isfinite(actual))
+                    or not np.allclose(
+                        expected,
+                        actual,
+                        rtol=0.0,
+                        atol=absolute_tolerance,
+                    )
+                ):
+                    raise RuntimeError(
+                        f"{side} active tool {name} differs from local audit snapshot"
+                    )
 
     @staticmethod
     def _state_vector(states: Any, name: str, size: int) -> np.ndarray:

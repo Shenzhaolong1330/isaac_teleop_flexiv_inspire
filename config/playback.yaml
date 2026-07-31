@@ -1,0 +1,30 @@
+# Offline visualization and guarded hardware replay use this one file.
+schema_version: 1
+site_config: config/site.yaml
+
+dataset:
+  # Dataset directory created by config/recording.yaml.
+  root: sessions/pick_place_demo
+  # latest | numeric episode_index | exact episode directory name.
+  episode: latest
+  require_completed: true
+
+visualize:
+  sink: spawn                 # spawn | save
+  save_path: artifacts/playback/playback.rrd
+  viewer_port: 9876
+  speed: 1.0
+  realtime: false            # false loads immediately; Rerun timeline still preserves timing
+
+replay:
+  # Hardware execution is impossible until both fields below are deliberately set.
+  enabled: false
+  # Exact opt-in value: FLEXIV-REPLAY-EXECUTE
+  operator_confirmation: ""
+  speed: 1.0                 # hardware replay cannot exceed recorded speed
+  ttl_s: 0.2
+  max_inter_command_gap_s: 0.1
+  max_schedule_lateness_s: 0.02
+  start_delay_s: 2.0
+  home_before_start: true
+  include_hands: true

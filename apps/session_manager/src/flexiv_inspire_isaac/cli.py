@@ -54,7 +54,15 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
     session = root["session"]
     recording = root["recording"]
     runtime_root = Path(session["runtime_root"]).expanduser()
-    return [
+    camera_extrinsics = {
+        name: (
+            str(config.resolve(str(stream.get("extrinsics", ""))))
+            if str(stream.get("extrinsics", "")).strip()
+            else ""
+        )
+        for name, stream in root["cameras"]["streams"].items()
+    }
+    command = [
         sys.executable,
         "-m",
         "flexiv_inspire_isaac.episode_control",
@@ -69,7 +77,6 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         "-p", f"tool_config:={config.resolve(root['flexiv']['tool_payload_config'])}",
         "-p", f"ft_zero_record:={runtime_root / 'ft_zero_events.jsonl'}",
         "-p", f"camera_config:={rendered['camera.yaml']}",
-        "-p", f"manus_calibration:={config.resolve(root['teleop']['manus_calibration']) if str(root['teleop']['manus_calibration']).strip() else ''}",
         "-p", f"deviceio_socket:={runtime_root / 'deviceio.sock'}",
         "-p", f"runtime_dir:={runtime_root}",
         "-p", f"rdk_socket:={runtime_root / 'rdk.sock'}",
@@ -80,6 +87,23 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         "-p", f"auto_authorize_control:={str(bool(recording.get('auto_authorize_control', True))).lower()}",
         "-p", f"home_result_timeout_s:={float(root['flexiv']['home']['timeout_s']) + 10.0}",
     ]
+    # ROS 2 rejects an empty override such as ``-p name:=``.  These files are
+    # optional: the controller has empty defaults and only records calibration
+    # provenance when the user has actually configured one.
+    optional_paths = {
+        "camera_head_extrinsics": camera_extrinsics["head"],
+        "camera_left_wrist_extrinsics": camera_extrinsics["left_wrist"],
+        "camera_right_wrist_extrinsics": camera_extrinsics["right_wrist"],
+        "manus_calibration": (
+            str(config.resolve(root["teleop"]["manus_calibration"]))
+            if str(root["teleop"]["manus_calibration"]).strip()
+            else ""
+        ),
+    }
+    for name, path in optional_paths.items():
+        if path:
+            command.extend(("-p", f"{name}:={path}"))
+    return command
 
 
 def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -> list[list[str]]:

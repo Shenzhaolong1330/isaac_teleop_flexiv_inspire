@@ -61,7 +61,8 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
         for item in episode
     )
     assert any(item.endswith("/ft_zero_events.jsonl") for item in episode)
-    assert "manus_calibration:=" in episode
+    assert not any(item.startswith("manus_calibration:=") for item in episode)
+    assert not any(item.startswith("camera_head_extrinsics:=") for item in episode)
     assert (
         f"dataset_name:={config.document['recording']['dataset_name']}" in episode
     )

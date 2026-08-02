@@ -6,9 +6,34 @@ It owns its Python environments, ROS 2 packages, RDK daemon, hand driver,
 interfaces, and data pipeline. No external robot workspace is sourced,
 imported, linked, or launched.
 
-The hardware path is fail-closed. A normal start connects read-only and publishes
-observations; it does not enable an arm, zero force/torque sensors, open a hand,
-return home, or send a motion target.
+## Daily commands
+
+日常使用只需要 ROS 环境和顶层命令，不需要分别启动 daemon 或导出 socket、
+permit、工具配置等变量：
+
+```bash
+cd /home/hb/isaac_teleop_flexiv_inspire
+source scripts/env/activate_ros.sh
+
+robot reset   # F/T 清零 -> 双臂 Home -> 双手张开/闭合/张开
+robot record  # 前台启动数采；完成设定条数或 Ctrl-C 后自动结束
+robot stop    # 仅用于异常退出后清理残留的托管进程
+```
+
+`robot reset` 可重复执行：`MAINTENANCE` 会进行 F/T 清零；若当前会话已经是
+`READY` 且清零仍有效，则复用该结果，直接 Home 并执行双手开合。
+
+`robot record` 启动后，双臂仅在 Quest 跟踪有效且持续踩住中间运动脚踏时响应；
+松开脚踏立即停止增量控制。Inspire 手指通过同一安全命令链随 MANUS 控制。
+命令会持续占用当前终端；`Ctrl-C` 先保存并关闭当前 episode，再停止本次
+录制启动的支持服务，不需要随后再执行 `robot stop`。
+
+旧命令 `flexiv-inspire` 和 `flexiv-inspire-reset` 继续保留兼容。
+
+The hardware path is fail-closed. The DFTP executable defaults to read-only; this
+installed site's hardware configuration explicitly enables its command path.
+Starting services alone does not zero force/torque sensors, return home, or send
+a motion target; those actions require the corresponding Reset/control flow.
 
 ## Data and control path
 
@@ -143,7 +168,7 @@ After the persistent hardware/control stack is connected, F/T-zeroed and
 started without command-line parameters:
 
 ```bash
-./scripts/collect.sh
+robot record
 ```
 
 Recording starts automatically. Right pedal commits, Homes and advances; left

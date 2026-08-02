@@ -5,7 +5,10 @@
     controller_topic: /xr_teleop/controller_data
     tf_topic: /tf
     external_deadman_topic: /teleop/deadman
-    deadman_source: quest_squeeze_both
+    # The single pedal router publishes the middle pedal on /teleop/deadman.
+    deadman_source: external_bool
+    foot_pedal: "name:input-remapper keyboard"
+    enable_key_code: 57
     squeeze_threshold: 0.65
     world_frame: world
     left_wrist_frame: left_wrist

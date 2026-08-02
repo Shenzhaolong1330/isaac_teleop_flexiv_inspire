@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -11,6 +12,15 @@ import tempfile
 from typing import Any, Mapping
 
 import yaml
+
+
+def local_minute_timestamp(now: datetime | None = None) -> str:
+    """Return a filesystem-safe local timestamp containing date/hour/minute."""
+
+    # A supplied value is already the caller's chosen local clock, which keeps
+    # tests and imported historical timestamps independent of the process TZ.
+    local = datetime.now().astimezone() if now is None else now
+    return local.strftime("%Y%m%d_%H%M")
 
 
 def sha256_file(path: str | Path) -> str:
@@ -64,6 +74,7 @@ class EpisodeManifest:
     dataset_name: str = ""
     episode_index: int = 0
     attempt: int = 1
+    collection_timestamp_local: str = ""
     task_description: str = ""
     pause_count: int = 0
     paused_duration_ns: int = 0

@@ -92,6 +92,15 @@ def test_execute_after_at_ttl_boundary_is_rejected():
         )
 
 
+def test_negative_execute_after_is_rejected_at_hand_boundary():
+    message = Message()
+    message.trajectory[0].execute_after = duration(-1)
+    with pytest.raises(SafeCommandRejected, match="execute_after"):
+        validate_safe_command_message(
+            message, snapshot(), now_monotonic_ns=20, now_ros_ns=1_050_000_000
+        )
+
+
 def test_expired_and_multichunk_commands_are_rejected():
     message = Message()
     with pytest.raises(SafeCommandRejected, match="expired"):

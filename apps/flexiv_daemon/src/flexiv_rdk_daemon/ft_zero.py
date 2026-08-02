@@ -53,7 +53,7 @@ class FTZeroConfig:
     max_pre_external_mean_torque_nm: float = 0.3
     max_pre_external_peak_force_n: float = 5.0
     max_pre_external_peak_torque_nm: float = 0.5
-    max_hand_delta: float = 1.0
+    max_hand_delta: float = 5.0
 
     def __post_init__(self) -> None:
         numeric = (

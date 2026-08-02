@@ -33,6 +33,9 @@ from isaacteleop.teleop_session_manager import (
     TeleopSession,
     TeleopSessionConfig,
 )
+from isaac_teleop_core.octet_sequence import encode_octet_sequence
+
+from .openxr_errors import is_retryable_openxr_session_error
 
 
 def _pose(position, orientation=(0.0, 0.0, 0.0, 1.0)) -> Pose:
@@ -66,6 +69,14 @@ def _controller_value(group, index: int, default):
     if array.ndim:
         return [float(item) for item in array]
     return float(value)
+
+
+def _controller_click(group, index: int) -> bool:
+    """Normalize OpenXR's scalar click action to a transport boolean."""
+    value = float(_controller_value(group, index, 0.0))
+    if not np.isfinite(value) or value < 0.0 or value > 1.0:
+        raise ValueError("controller click value must be finite and in [0,1]")
+    return value >= 0.5
 
 
 class XrRawRosSource(Node):
@@ -174,17 +185,19 @@ class XrRawRosSource(Node):
             "right_squeeze_value": _controller_value(
                 right, ControllerInputIndex.SQUEEZE_VALUE, 0.0
             ),
-            "left_primary_click": _controller_value(
-                left, ControllerInputIndex.PRIMARY_CLICK, 0.0
+            "left_primary_click": _controller_click(
+                left, ControllerInputIndex.PRIMARY_CLICK
             ),
-            "right_primary_click": _controller_value(
-                right, ControllerInputIndex.PRIMARY_CLICK, 0.0
+            "right_primary_click": _controller_click(
+                right, ControllerInputIndex.PRIMARY_CLICK
             ),
             "left_is_active": not left.is_none,
             "right_is_active": not right.is_none,
         }
         controller_message = ByteMultiArray()
-        controller_message.data = list(msgpack.packb(payload, use_bin_type=True))
+        controller_message.data = encode_octet_sequence(
+            msgpack.packb(payload, use_bin_type=True)
+        )
         self._controller_pub.publish(controller_message)
 
     def _publish_hands(self, result: dict, now) -> None:
@@ -228,10 +241,10 @@ class XrRawRosSource(Node):
                         self._publish_hands(result, now)
                         time.sleep(self._sleep_s)
             except RuntimeError as exc:
-                if "Failed to get OpenXR system" not in str(exc):
+                if not is_retryable_openxr_session_error(exc):
                     raise
                 self.get_logger().warning(
-                    f"no XR client connected ({exc}); retrying in 2 seconds"
+                    f"OpenXR session not ready ({exc}); retrying in 2 seconds"
                 )
                 time.sleep(2.0)
         return 0

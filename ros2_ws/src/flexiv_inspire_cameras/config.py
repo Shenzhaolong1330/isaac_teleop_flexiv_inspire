@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Mapping
 
@@ -32,6 +33,9 @@ class CameraConfig:
     pointcloud_enabled: bool = False
     pointcloud_stride: int = 2
     record_depth: bool = True
+    extrinsics_path: str = ""
+    extrinsics_sha256: str = ""
+    extrinsics_mode: str = ""
 
     def __post_init__(self) -> None:
         if not MIN_WIDTH <= self.width <= MAX_WIDTH:
@@ -80,6 +84,31 @@ def load_camera_configs(path: str | Path) -> Mapping[str, CameraConfig]:
         # A point cloud needs depth acquisition even when raw depth recording
         # was intentionally disabled for that camera.
         config["depth_enabled"] = record_depth or pointcloud
+        raw_extrinsics = str(config.pop("extrinsics", "")).strip()
+        if raw_extrinsics:
+            extrinsics_path = Path(raw_extrinsics).expanduser().resolve()
+            extrinsics_document = yaml.safe_load(
+                extrinsics_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(extrinsics_document, Mapping) or int(
+                extrinsics_document.get("schema_version", 0)
+            ) != 1:
+                raise ValueError(f"camera {name} extrinsics must use schema_version 1")
+            if str(extrinsics_document.get("camera", name)) != name:
+                raise ValueError(f"camera {name} extrinsics identify another camera")
+            mode = str(extrinsics_document.get("mode", ""))
+            required_transform = (
+                "tcp_T_camera" if mode == "eye_in_hand" else "world_T_camera"
+            )
+            if mode not in {"eye_in_hand", "eye_to_hand"} or required_transform not in extrinsics_document:
+                raise ValueError(f"camera {name} extrinsics are incomplete")
+            config.update(
+                extrinsics_path=str(extrinsics_path),
+                extrinsics_sha256=hashlib.sha256(
+                    extrinsics_path.read_bytes()
+                ).hexdigest(),
+                extrinsics_mode=mode,
+            )
         cameras[name] = CameraConfig(name=name, **config)
     if set(cameras) != {"head", "left_wrist", "right_wrist"}:
         raise ValueError("exactly head, left_wrist and right_wrist cameras are required")

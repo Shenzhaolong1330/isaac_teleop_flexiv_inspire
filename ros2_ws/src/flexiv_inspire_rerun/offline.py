@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 import sys
 import time
 
@@ -60,10 +61,14 @@ def run_offline(config_path: str | Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     selected = sys.argv[1:] if argv is None else argv
-    if selected:
-        raise SystemExit(
-            "flexiv-inspire-visualize takes no arguments; edit config/playback.yaml"
-        )
+    parser = argparse.ArgumentParser(
+        prog="flexiv-inspire-visualize",
+        description=(
+            "Visualize the episode selected by config/playback.yaml; "
+            "this command never writes to hardware."
+        ),
+    )
+    parser.parse_args(selected)
     project_root = Path(__file__).resolve().parents[3]
     try:
         return run_offline(project_root / "config" / "playback.yaml")

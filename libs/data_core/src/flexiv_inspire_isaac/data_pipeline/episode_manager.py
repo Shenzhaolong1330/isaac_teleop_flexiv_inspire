@@ -10,6 +10,7 @@ import importlib.metadata
 import platform
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -19,7 +20,13 @@ import time
 import uuid
 from typing import Any
 
-from .manifest import EpisodeManifest, StreamStats, canonical_yaml_sha256, sha256_file
+from .manifest import (
+    EpisodeManifest,
+    StreamStats,
+    canonical_yaml_sha256,
+    local_minute_timestamp,
+    sha256_file,
+)
 from .native_deviceio import NativeDeviceIOIngress
 from .recorder import AsyncMcapRecorder, McapJsonSink, RecordEnvelope
 from isaac_teleop_core.deviceio import default_deviceio_socket
@@ -369,6 +376,7 @@ class EpisodeSession:
         attempt: int = 1,
         task_description: str = "",
         episode_directory_name: str = "",
+        collection_timestamp_local: str = "",
         recording_gate: threading.Event | None = None,
     ) -> None:
         if camera_recording_mode != "jpeg":
@@ -385,9 +393,17 @@ class EpisodeSession:
         }
         versions = _runtime_versions()
         self.episode_uuid = str(uuid.uuid4())
+        collection_timestamp_local = (
+            collection_timestamp_local or local_minute_timestamp()
+        )
+        if not re.fullmatch(r"\d{8}_\d{4}", collection_timestamp_local):
+            raise ValueError(
+                "collection_timestamp_local must use YYYYMMDD_HHMM"
+            )
         dataset_root = root / dataset_name if dataset_name else root
         self.directory = dataset_root / (
-            episode_directory_name or self.episode_uuid
+            episode_directory_name
+            or f"episode_{collection_timestamp_local}"
         )
         self.directory.mkdir(parents=True, exist_ok=False)
         self.manifest_path = self.directory / "manifest.json"
@@ -410,6 +426,7 @@ class EpisodeSession:
             dataset_name=dataset_name,
             episode_index=episode_index,
             attempt=attempt,
+            collection_timestamp_local=collection_timestamp_local,
             task_description=task_description,
         )
         self.manifest.write_atomic(self.manifest_path)
@@ -568,6 +585,27 @@ class EpisodeSession:
                     stats.last_source_time_ns - stats.first_source_time_ns
                 )
 
+    def _required_stream_errors(self) -> list[str]:
+        required = (
+            "camera/head/color/image_raw/compressed",
+            "camera/left_wrist/color/image_raw/compressed",
+            "camera/right_wrist/color/image_raw/compressed",
+            "robot/left_arm/state",
+            "robot/right_arm/state",
+            "robot/left_hand/state",
+            "robot/right_hand/state",
+            "robot/left_hand/tactile_raw",
+            "robot/right_hand/tactile_raw",
+            "control/sent_command",
+        )
+        errors = []
+        for name in required:
+            stats = self.manifest.streams.get(name)
+            valid_samples = 0 if stats is None else stats.samples - stats.invalid
+            if valid_samples <= 0:
+                errors.append(name)
+        return errors
+
     def abort(self, *, reason: str) -> None:
         errors: list[str] = []
         self._finish_pause_interval()
@@ -618,6 +656,12 @@ class EpisodeSession:
         except Exception as exc:
             errors.append(f"deviceio: {exc}")
         self._update_stream_stats()
+        missing_streams = self._required_stream_errors()
+        if missing_streams and not reason.startswith("fault:"):
+            errors.append(
+                "required streams have no valid samples: "
+                + ",".join(missing_streams)
+            )
         # Preserve the raw capture for audit but never label a re-record as a
         # completed demonstration eligible for training or replay.
         terminal_fault = reason.startswith("fault:") or reason == "rerecord-requested"
@@ -762,6 +806,7 @@ def _parse_args(argv=None):
     parser.add_argument("--attempt", type=int, default=1)
     parser.add_argument("--task-description", default="")
     parser.add_argument("--episode-directory-name", default="")
+    parser.add_argument("--collection-timestamp-local", default="")
     parser.add_argument("--control-state-file", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -836,6 +881,7 @@ def main(argv=None) -> int:
             attempt=options.attempt,
             task_description=options.task_description,
             episode_directory_name=options.episode_directory_name,
+            collection_timestamp_local=options.collection_timestamp_local,
             recording_gate=recording_gate,
         )
         if options.deviceio_mode == "native":

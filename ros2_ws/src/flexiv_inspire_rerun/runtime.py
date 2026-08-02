@@ -20,6 +20,7 @@ import numpy as np
 
 ROT6D_FIRST_TWO_COLUMNS = "R00,R10,R20,R01,R11,R21"
 ROT6D_IDENTITY = np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+TACTILE_ATLAS_SHAPE = (48, 58)
 
 
 def quaternion_xyzw_to_matrix(quaternion: Sequence[float]) -> np.ndarray:
@@ -73,12 +74,19 @@ def rotation6d_to_matrix(values: Sequence[float]) -> np.ndarray:
     return rotation
 
 
-def tactile_atlas(surfaces: Sequence[Mapping[str, Any]]) -> np.ndarray:
-    """Arrange the 17 DFTP surfaces into one raw uint16 atlas.
+def tactile_atlas(
+    surfaces: Sequence[Mapping[str, Any]], *, side: str = "left"
+) -> np.ndarray:
+    """Arrange the 17 DFTP surfaces as an anatomical palm-view atlas.
 
     Missing or malformed surfaces are rejected rather than silently filled.  No
     normalization is performed: the value in Rerun is the Modbus uint16 taxel.
+    The left atlas is drawn as a palm facing the viewer (little finger on the
+    left, thumb on the right); the right atlas is its horizontal mirror.
     """
+
+    if side not in {"left", "right"}:
+        raise ValueError("tactile side must be left or right")
 
     by_name = {str(surface["name"]): surface for surface in surfaces}
     required = [
@@ -93,7 +101,7 @@ def tactile_atlas(surfaces: Sequence[Mapping[str, Any]]) -> np.ndarray:
     if missing:
         raise ValueError(f"missing tactile surfaces: {','.join(missing)}")
 
-    canvas = np.zeros((48, 48), dtype=np.uint16)
+    canvas = np.zeros(TACTILE_ATLAS_SHAPE, dtype=np.uint16)
 
     def image_for(name: str, *, palm: bool = False) -> np.ndarray:
         surface = by_name[name]
@@ -106,22 +114,31 @@ def tactile_atlas(surfaces: Sequence[Mapping[str, Any]]) -> np.ndarray:
             )
         return taxels.reshape(rows, columns, order="F" if palm else "C")
 
-    for x, finger in zip((0, 10, 20, 30), ("little", "ring", "middle", "index")):
-        y = 0
-        for suffix in ("end", "tip", "pad"):
-            image = image_for(f"{finger}_{suffix}")
-            canvas[y : y + image.shape[0], x : x + image.shape[1]] = image
-            y += image.shape[0] + 1
+    # Four upright finger columns: distal end, fingertip and finger pad.
+    for x, finger in zip(
+        (2, 13, 24, 35), ("little", "ring", "middle", "index")
+    ):
+        end = image_for(f"{finger}_end")
+        tip = image_for(f"{finger}_tip")
+        pad = image_for(f"{finger}_pad")
+        canvas[1 : 1 + end.shape[0], x + 2 : x + 2 + end.shape[1]] = end
+        canvas[5 : 5 + tip.shape[0], x : x + tip.shape[1]] = tip
+        canvas[18 : 18 + pad.shape[0], x : x + pad.shape[1]] = pad
 
-    y = 0
-    for suffix in ("end", "tip", "middle", "pad"):
+    # Thumb surfaces follow a diagonal from the outer tip towards the palm.
+    thumb_layout = {
+        "end": (8, 52),
+        "tip": (12, 47),
+        "middle": (25, 45),
+        "pad": (29, 40),
+    }
+    for suffix, (y, x) in thumb_layout.items():
         image = image_for(f"thumb_{suffix}")
-        canvas[y : y + image.shape[0], 40 : 40 + image.shape[1]] = image
-        y += image.shape[0] + 1
+        canvas[y : y + image.shape[0], x : x + image.shape[1]] = image
 
     palm_image = image_for("palm", palm=True)
-    canvas[34 : 34 + palm_image.shape[0], 16 : 16 + palm_image.shape[1]] = palm_image
-    return canvas
+    canvas[36 : 36 + palm_image.shape[0], 17 : 17 + palm_image.shape[1]] = palm_image
+    return canvas if side == "left" else np.fliplr(canvas).copy()
 
 
 def command_action_vector(command: Mapping[str, Any]) -> np.ndarray:
@@ -293,10 +310,39 @@ class RerunVisualizer:
             self.stream.connect_grpc(connect_url)
         else:
             self.stream.spawn(port=int(viewer_port), connect=True, hide_welcome_screen=True)
+        self._send_default_blueprint()
         self._series_configured: set[str] = set()
         self._last_text: dict[str, str] = {}
         self._closed = False
         self._log_static_metadata()
+
+    def _send_default_blueprint(self) -> None:
+        """Make the two anatomical tactile atlases the default paired panel."""
+
+        import rerun.blueprint as rrb
+
+        tactile = rrb.Horizontal(
+            rrb.Spatial2DView(
+                origin="/robot/left_hand/tactile",
+                contents="/robot/left_hand/tactile/atlas_raw_u16",
+                name="Left hand tactile (palm view)",
+            ),
+            rrb.Spatial2DView(
+                origin="/robot/right_hand/tactile",
+                contents="/robot/right_hand/tactile/atlas_raw_u16",
+                name="Right hand tactile (palm view)",
+            ),
+            column_shares=[1.0, 1.0],
+            name="Bimanual tactile",
+        )
+        self.stream.send_blueprint(
+            # The default tactile dashboard contains exactly two plots: one
+            # composite anatomical image per hand. Individual surface entities
+            # remain recorded for diagnostics but are not expanded into views.
+            rrb.Blueprint(tactile, auto_views=False),
+            make_active=True,
+            make_default=True,
+        )
 
     def _log_static_metadata(self) -> None:
         self.stream.log(
@@ -581,7 +627,7 @@ class RerunVisualizer:
         )
         root = f"robot/{side}_hand/tactile"
         surfaces = payload["surfaces"]
-        atlas = tactile_atlas(surfaces)
+        atlas = tactile_atlas(surfaces, side=side)
         self.stream.log(f"{root}/atlas_raw_u16", self.rr.Image(atlas))
         flattened: list[int] = []
         for surface in surfaces:
@@ -855,8 +901,16 @@ class RerunVisualizer:
         if normalized.endswith("tactile_raw"):
             surfaces = payload.get("surfaces")
             if isinstance(surfaces, Sequence) and surfaces:
+                side = str(payload.get("side", "")).strip().lower()
+                if side not in {"left", "right"}:
+                    side = (
+                        "left"
+                        if "left_hand" in normalized
+                        else "right" if "right_hand" in normalized else ""
+                    )
                 self.stream.log(
-                    f"{root}/atlas_raw_u16", self.rr.Image(tactile_atlas(surfaces))
+                    f"{root}/atlas_raw_u16",
+                    self.rr.Image(tactile_atlas(surfaces, side=side)),
                 )
 
         command_stage = {

@@ -60,6 +60,47 @@ def test_four_persistent_connections_from_same_pid_have_independent_sequences(
         thread.join(timeout=1.0)
 
 
+def test_disconnect_notification_waits_for_last_connection_from_process(
+    tmp_path: Path,
+) -> None:
+    class TrackingHandler:
+        def __init__(self) -> None:
+            self.disconnected = []
+
+        def __call__(self, kind, sequence, payload, credentials):
+            return "command_ack", {"accepted": True}
+
+        def peer_disconnected(self, credentials) -> None:
+            self.disconnected.append(credentials)
+
+    path = tmp_path / "rdk.sock"
+    codec = StructEnvelopeCodec()
+    handler = TrackingHandler()
+    server = SeqpacketServer(path, handler, codec=codec)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    wait_for(path)
+    clients = [socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) for _ in range(2)]
+    try:
+        for index, client in enumerate(clients):
+            client.settimeout(0.5)
+            client.connect(str(path))
+            request(path, codec, client, 1, f"client-{index}")
+        clients[0].close()
+        time.sleep(0.05)
+        assert handler.disconnected == []
+        clients[1].close()
+        deadline = time.monotonic() + 0.5
+        while not handler.disconnected and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(handler.disconnected) == 1
+    finally:
+        for client in clients:
+            client.close()
+        server.close()
+        thread.join(timeout=1.0)
+
+
 def test_second_server_refuses_to_unlink_active_socket(tmp_path: Path) -> None:
     path = tmp_path / "rdk.sock"
     codec = StructEnvelopeCodec()

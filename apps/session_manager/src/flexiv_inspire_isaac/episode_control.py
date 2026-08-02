@@ -21,8 +21,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
+from flexiv_inspire_interfaces.msg import ControlState
 
 from flexiv_inspire_control.ipc_client import RDKIPCClient
+from flexiv_inspire_isaac.data_pipeline.manifest import local_minute_timestamp
 
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
@@ -40,6 +42,9 @@ class EpisodeController(Node):
             "tool_config": "",
             "ft_zero_record": "",
             "camera_config": "",
+            "camera_head_extrinsics": "",
+            "camera_left_wrist_extrinsics": "",
+            "camera_right_wrist_extrinsics": "",
             "manus_calibration": "",
             "deviceio_socket": "",
             "runtime_dir": "",
@@ -67,6 +72,7 @@ class EpisodeController(Node):
         self._pending_home_deadline_ns = 0
         self._pending_home_action: str | None = None
         self._awaiting_home_authorization = False
+        self._routine_control_rearm_pending = False
         self._startup_done = False
         self._finished = False
 
@@ -84,6 +90,9 @@ class EpisodeController(Node):
         self.create_subscription(String, "/episode/control", self._on_control, qos)
         self.create_subscription(
             String, "/control/home_status", self._on_home_status, qos
+        )
+        self.create_subscription(
+            ControlState, "/control/state", self._on_control_state, qos
         )
         self.create_timer(0.25, self._tick)
         self._publish("STARTING")
@@ -120,9 +129,10 @@ class EpisodeController(Node):
 
     def _command(self) -> list[str]:
         self._sequence += 1
+        collection_timestamp = local_minute_timestamp()
         episode_name = (
             f"episode_{self._episode_index:06d}_attempt_{self._attempt:02d}_"
-            f"{uuid.uuid4().hex[:8]}"
+            f"{collection_timestamp}"
         )
         root = Path(self._required("sessions_root")).expanduser().resolve()
         dataset = str(self.get_parameter("dataset_name").value).strip()
@@ -141,6 +151,8 @@ class EpisodeController(Node):
             str(self._attempt),
             "--episode-directory-name",
             episode_name,
+            "--collection-timestamp-local",
+            collection_timestamp,
             "--task-description",
             str(self.get_parameter("task_description").value),
             "--session-id",
@@ -163,6 +175,12 @@ class EpisodeController(Node):
         manus = str(self.get_parameter("manus_calibration").value).strip()
         if manus:
             command.extend(("--calibration", f"manus={manus}"))
+        for camera in ("head", "left_wrist", "right_wrist"):
+            path = str(
+                self.get_parameter(f"camera_{camera}_extrinsics").value
+            ).strip()
+            if path:
+                command.extend(("--calibration", f"camera_{camera}={path}"))
         return command
 
     def _publish(self, value: str) -> None:
@@ -171,22 +189,19 @@ class EpisodeController(Node):
         self._status.publish(message)
 
     def _publish_progress(self, state: str) -> None:
-        self._publish(
-            json.dumps(
-                {
-                    "state": state,
-                    "dataset_name": str(
-                        self.get_parameter("dataset_name").value
-                    ),
-                    "episode_index": self._episode_index,
-                    "attempt": self._attempt,
-                    "completed_episodes": self._completed_episodes,
-                    "target_episodes": int(
-                        self.get_parameter("episode_count").value
-                    ),
-                },
-                separators=(",", ":"),
-            )
+        progress = {
+            "state": state,
+            "dataset_name": str(self.get_parameter("dataset_name").value),
+            "episode_index": self._episode_index,
+            "attempt": self._attempt,
+            "completed_episodes": self._completed_episodes,
+            "target_episodes": int(self.get_parameter("episode_count").value),
+        }
+        self._publish(json.dumps(progress, separators=(",", ":")))
+        self.get_logger().info(
+            f"{state}: episode={self._episode_index} "
+            f"attempt={self._attempt} completed={self._completed_episodes}/"
+            f"{progress['target_episodes']}"
         )
 
     def _read_recorder_state(self) -> dict[str, object]:
@@ -282,7 +297,7 @@ class EpisodeController(Node):
             raise RuntimeError(response.get("reason", response_kind))
         return response
 
-    def _authorize_control(self) -> None:
+    def _authorize_control(self, *, clear_hold_latched: bool = False) -> None:
         if not bool(self.get_parameter("auto_authorize_control").value):
             return
         source = str(self.get_parameter("control_source").value)
@@ -292,7 +307,7 @@ class EpisodeController(Node):
                 "session_id": self._required("session_id"),
                 "source": source,
                 "operator_confirmation": "FLEXIV-CONTROL-ARM",
-                "clear_hold_latched": False,
+                "clear_hold_latched": clear_hold_latched,
             },
         )
         outgoing = String()
@@ -307,6 +322,33 @@ class EpisodeController(Node):
         )
         for _ in range(3):
             self._arm_authorization.publish(outgoing)
+
+    def _on_control_state(self, message: ControlState) -> None:
+        """Make the physical pedal behave like a reusable teleop clutch.
+
+        Releasing the pedal still executes the normal measured hardware hold.
+        Once that routine hold is visible and the pedal is up, obtain a fresh
+        one-time authorization and re-arm teleop.  Fault, tracking, collision,
+        limit and malformed-command holds remain latched for manual handling.
+        """
+
+        if message.state_name != "HOLD_LATCHED":
+            self._routine_control_rearm_pending = False
+            return
+        if (
+            self._routine_control_rearm_pending
+            or self._pending_home_action is not None
+            or bool(message.physical_pedal)
+            or message.hold_reason
+            not in {"physical_pedal_released", "source_deadman_released"}
+        ):
+            return
+        self._routine_control_rearm_pending = True
+        try:
+            self._authorize_control(clear_hold_latched=True)
+        except Exception as exc:
+            self._routine_control_rearm_pending = False
+            self.get_logger().error(f"pedal clutch re-arm failed: {exc}")
 
     def _authorize_home(self) -> None:
         if not bool(self.get_parameter("auto_authorize_home").value):
@@ -480,3 +522,7 @@ def main(args=None) -> None:
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

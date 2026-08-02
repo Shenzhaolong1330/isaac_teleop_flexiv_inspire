@@ -46,8 +46,14 @@ metadata/timelines.
 `CompressedImage` topics. It never joins images to `AcquisitionInfo` by nearest
 timestamp; those legacy images are explicitly marked timing-unpaired and invalid.
 
-Tactile panels contain each of the 17 surfaces and a 48x48 atlas. Values remain
-raw `uint16`; there is deliberately no division by 4096.
+Tactile panels contain each of the 17 surfaces and an anatomical palm-view
+atlas. Finger end/tip/pad surfaces run from top to bottom, the palm is below
+the four fingers, and the thumb runs along the outside edge. The right-hand
+atlas mirrors the left. The default Rerun blueprint contains exactly two
+equal-width plots: one composite atlas for the left hand and one for the right.
+Individual surface entities remain available for diagnostics but are not
+expanded into separate default views. Values remain raw `uint16`; there is
+deliberately no division by 4096.
 
 ## Hardware-free smoke
 

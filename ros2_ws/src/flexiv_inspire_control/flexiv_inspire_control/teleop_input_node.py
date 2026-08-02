@@ -24,7 +24,9 @@ from flexiv_inspire_interfaces.msg import (
     BimanualCommandPoint,
 )
 from isaac_teleop_core.command import ROTATION_ORDER
+from isaac_teleop_core.octet_sequence import decode_octet_sequence
 
+from .foot_pedal import FootPedalMonitor, KEY_SPACE
 from .manus_pose import (
     FEATURE_NAMES,
     pose_message_values,
@@ -48,7 +50,7 @@ def _frame(value: str) -> str:
 
 
 def _bytes(message: ByteMultiArray) -> bytes:
-    return bytes(int(item) & 0xFF for item in message.data)
+    return decode_octet_sequence(message.data)
 
 
 def _validated_squeezes(value: object) -> dict[str, float]:
@@ -64,6 +66,17 @@ def _validated_squeezes(value: object) -> dict[str, float]:
     ):
         raise ValueError("Quest squeeze values must be finite and in [0,1]")
     return result
+
+
+def _validated_button(value: object) -> bool:
+    """Accept boolean clicks and legacy normalized numeric click actions."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if np.isfinite(numeric) and numeric in (0.0, 1.0):
+            return bool(numeric)
+    raise ValueError("Quest home button must be boolean or 0/1")
 
 
 @dataclass(frozen=True)
@@ -186,7 +199,9 @@ class TeleopInput(Node):
             "controller_topic": "/xr_teleop/controller_data",
             "tf_topic": "/tf",
             "external_deadman_topic": "/teleop/deadman",
-            "deadman_source": "quest_squeeze_both",
+            "deadman_source": "external_bool",
+            "foot_pedal": "name:input-remapper keyboard",
+            "enable_key_code": KEY_SPACE,
             "squeeze_threshold": 0.65,
             "world_frame": "world",
             "left_wrist_frame": "left_wrist",
@@ -232,6 +247,7 @@ class TeleopInput(Node):
         self._hands_received = {"left": 0, "right": 0}
         self._command_sequence = 0
         self._home_button_down = False
+        self._pedal_pressed = False
 
         self.create_subscription(
             PoseArray,
@@ -272,6 +288,14 @@ class TeleopInput(Node):
         self._home_pub = self.create_publisher(
             String, str(self.get_parameter("home_topic").value), 1
         )
+        self._pedal: FootPedalMonitor | None = None
+        if str(self.get_parameter("deadman_source").value) == "pedal":
+            self._pedal = FootPedalMonitor(
+                Path(str(self.get_parameter("foot_pedal").value)),
+                self._on_pedal_state,
+                enable_key_code=int(self.get_parameter("enable_key_code").value),
+            )
+            self._pedal.start()
         rate = float(self.get_parameter("control_rate_hz").value)
         self.create_timer(1.0 / rate, self._tick)
         self.get_logger().warning(
@@ -325,9 +349,7 @@ class TeleopInput(Node):
             raw_button = value.get(
                 str(self.get_parameter("home_button_key").value), False
             )
-            if not isinstance(raw_button, (bool, int)):
-                raise ValueError("Quest home button must be boolean")
-            home_button_down = bool(raw_button)
+            home_button_down = _validated_button(raw_button)
             if home_button_down and not self._home_button_down:
                 request = String()
                 request.data = "home"
@@ -338,7 +360,9 @@ class TeleopInput(Node):
             self._squeeze = {"left": 0.0, "right": 0.0}
             self._controller_received = 0
             self._home_button_down = False
-            self.get_logger().error(f"invalid controller_data: {exc}")
+            self.get_logger().error(
+                f"invalid controller_data: {exc}", throttle_duration_sec=1.0
+            )
 
     def _on_tf(self, message: TFMessage) -> None:
         now = time.monotonic_ns()
@@ -357,6 +381,9 @@ class TeleopInput(Node):
     def _on_external_deadman(self, message: Bool) -> None:
         self._external_deadman = bool(message.data)
         self._external_deadman_received = time.monotonic_ns()
+
+    def _on_pedal_state(self, pressed: bool) -> None:
+        self._pedal_pressed = bool(pressed)
 
     def _on_hand_pose(self, message: PoseArray) -> None:
         now = time.monotonic_ns()
@@ -378,11 +405,14 @@ class TeleopInput(Node):
             self._hands = {"left": None, "right": None}
             self._hands_received = {"left": 0, "right": 0}
             self.get_logger().error(
-                f"invalid /xr_teleop/hand PoseArray; hand command disabled: {exc}"
+                f"invalid /xr_teleop/hand PoseArray; hand command disabled: {exc}",
+                throttle_duration_sec=1.0,
             )
 
     def _deadman(self, now: int) -> bool:
         source = str(self.get_parameter("deadman_source").value)
+        if source == "pedal":
+            return self._pedal_pressed
         max_age = 150_000_000
         if source == "external_bool":
             return (
@@ -464,12 +494,24 @@ class TeleopInput(Node):
         heartbeat.data = now
         self._heartbeat_pub.publish(heartbeat)
 
+    def destroy_node(self) -> bool:
+        if self._pedal is not None:
+            self._pedal.close()
+        return super().destroy_node()
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = TeleopInput()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -2,17 +2,19 @@
 
 The driver is read-only unless all three local launch parameters are supplied:
 ``hardware_write_enabled=true``, a non-empty ``local_session_id``, and the
-literal local confirmation ``DFTP-LOCAL-CONTROL-AUTHORIZED``. Even then it only
+literal local confirmation ``DFTP-LOCAL-CONTROL-AUTHORIZED``. Normal motion only
 subscribes to ``/control/sent_command`` (the safety supervisor's output), and
 requires a fresh ``ACTIVE`` control state, matching session, deadman, validity
 mask, monotonic sequence, and TTL before filling a worker's latest-only mailbox.
-It never subscribes directly to teleop, policy, or replay.
+A separate local Reset service can run open-close-open only in ``READY``. The
+driver never subscribes directly to teleop, policy, or replay.
 """
 
 from __future__ import annotations
 
 from collections import deque
 import math
+import threading
 import time
 from typing import Any
 
@@ -46,6 +48,38 @@ HAND_FIELD_TIMINGS = {
     "error": "error",
     "status": "status",
 }
+
+
+def hand_reset_targets(
+    open_angle: int = 1000, closed_angle: int = 0
+) -> tuple[tuple[int, ...], ...]:
+    """Return the legacy Inspire connection-check motion: open-close-open."""
+
+    opened = int(open_angle)
+    closed = int(closed_angle)
+    if not 0 <= opened <= 1000 or not 0 <= closed <= 1000:
+        raise ValueError("hand reset angles must be in 0..1000")
+    if opened == closed:
+        raise ValueError("hand reset open and closed angles must differ")
+    return ((opened,) * 6, (closed,) * 6, (opened,) * 6)
+
+
+def hand_target_reached(
+    measured: tuple[int, ...] | None,
+    target: tuple[int, ...],
+    tolerance: int,
+) -> bool:
+    """Return whether all six measured actuator angles reached a target."""
+
+    if measured is None or len(measured) != 6 or len(target) != 6:
+        return False
+    if tolerance < 0:
+        raise ValueError("hand target tolerance must be non-negative")
+    return all(
+        abs(int(actual) - int(expected)) <= tolerance
+        for actual, expected in zip(measured, target)
+    )
+
 
 def command_source_matches(active_source: str, command_source: str) -> bool:
     return active_source in VALID_COMMAND_SOURCES and command_source == active_source
@@ -117,6 +151,7 @@ def main(args=None) -> int:
     from sensor_msgs.msg import JointState
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from rosidl_runtime_py.convert import message_to_ordereddict
+    from std_srvs.srv import Trigger
     from flexiv_inspire_interfaces.msg import (
         BimanualCommand,
         ControlState,
@@ -152,6 +187,13 @@ def main(args=None) -> int:
             )
             self.declare_parameter("control_state_timeout_ms", 200.0)
             self.declare_parameter("hand_state_timeout_ms", 200.0)
+            self.declare_parameter("hand_reset_enabled", False)
+            self.declare_parameter("hand_reset_open_angle", 1000)
+            self.declare_parameter("hand_reset_closed_angle", 0)
+            self.declare_parameter("hand_reset_pause_s", 0.35)
+            self.declare_parameter("hand_reset_command_timeout_s", 3.0)
+            self.declare_parameter("hand_reset_open_tolerance", 30)
+            self.declare_parameter("hand_reset_open_timeout_s", 8.0)
 
             self._write_enabled = bool(
                 self.get_parameter("hardware_write_enabled").value
@@ -183,11 +225,51 @@ def main(args=None) -> int:
             self._hand_state_timeout_ns = int(
                 float(self.get_parameter("hand_state_timeout_ms").value) * 1e6
             )
+            self._hand_reset_enabled = bool(
+                self.get_parameter("hand_reset_enabled").value
+            )
+            self._hand_reset_targets = hand_reset_targets(
+                int(self.get_parameter("hand_reset_open_angle").value),
+                int(self.get_parameter("hand_reset_closed_angle").value),
+            )
+            self._hand_reset_pause_s = float(
+                self.get_parameter("hand_reset_pause_s").value
+            )
+            self._hand_reset_command_timeout_s = float(
+                self.get_parameter("hand_reset_command_timeout_s").value
+            )
+            self._hand_reset_open_tolerance = int(
+                self.get_parameter("hand_reset_open_tolerance").value
+            )
+            self._hand_reset_open_timeout_s = float(
+                self.get_parameter("hand_reset_open_timeout_s").value
+            )
+            if not 0.05 <= self._hand_reset_pause_s <= 2.0:
+                raise ValueError("hand_reset_pause_s must be in [0.05,2.0]")
+            if not 1.0 <= self._hand_reset_command_timeout_s <= 10.0:
+                raise ValueError(
+                    "hand_reset_command_timeout_s must be in [1.0,10.0]"
+                )
+            if not 0 <= self._hand_reset_open_tolerance <= 200:
+                raise ValueError("hand_reset_open_tolerance must be in [0,200]")
+            if not 1.0 <= self._hand_reset_open_timeout_s <= 30.0:
+                raise ValueError("hand_reset_open_timeout_s must be in [1.0,30.0]")
             self._last_hand_state_ns = {"left": 0, "right": 0}
             self._last_hand_sequence = {"left": 0, "right": 0}
-            self._last_command_sequence = -1
+            self._latest_hand_angles: dict[str, tuple[int, ...] | None] = {
+                "left": None,
+                "right": None,
+            }
+            # Source sequences belong to the control bridge. Worker sequences
+            # also include local Reset/hold commands, so the counters must not
+            # be coupled or Reset can suppress the first teleop frames.
+            self._last_source_command_sequence = -1
+            self._worker_command_sequence = -1
+            self._sequence_lock = threading.Lock()
+            self._hand_reset_lock = threading.Lock()
             self._fault_latched = False
             self._fault_reason_by_side = {"left": "", "right": ""}
+            self._control_state_name = ""
             self._offline_queue = {
                 "left": deque(maxlen=1),
                 "right": deque(maxlen=1),
@@ -200,23 +282,26 @@ def main(args=None) -> int:
                 "left": deque(maxlen=1),
                 "right": deque(maxlen=1),
             }
-            self._publishers = {}
+            # ``rclpy.node.Node`` owns ``self._publishers`` and expects it to
+            # remain a list.  Keep the application's topic lookup separate so
+            # create_publisher() can register publishers with the base class.
+            self._topic_publishers = {}
             self._workers = {}
             self._deviceio = AsyncDeviceIOEmitter("dftp")
 
             for side in ("left", "right"):
-                self._publishers[(side, "joint")] = self.create_publisher(
+                self._topic_publishers[(side, "joint")] = self.create_publisher(
                     JointState, f"/robot/{side}_hand/joint_states", self._sensor_qos
                 )
-                self._publishers[(side, "dynamic")] = self.create_publisher(
+                self._topic_publishers[(side, "dynamic")] = self.create_publisher(
                     DynamicJointState,
                     f"/robot/{side}_hand/dynamic_joint_states",
                     self._sensor_qos,
                 )
-                self._publishers[(side, "state")] = self.create_publisher(
+                self._topic_publishers[(side, "state")] = self.create_publisher(
                     HandStateMsg, f"/robot/{side}_hand/state", self._sensor_qos
                 )
-                self._publishers[(side, "tactile")] = self.create_publisher(
+                self._topic_publishers[(side, "tactile")] = self.create_publisher(
                     TactileFrameMsg, f"/robot/{side}_hand/tactile_raw", self._sensor_qos
                 )
 
@@ -259,6 +344,9 @@ def main(args=None) -> int:
                 "/control/sent_command",
                 self._on_safe_command,
                 self._control_qos,
+            )
+            self.create_service(
+                Trigger, "/maintenance/cycle_hands", self._on_cycle_hands
             )
             self.create_timer(0.002, self._drain)
             for worker in self._workers.values():
@@ -303,6 +391,7 @@ def main(args=None) -> int:
         def _on_state(self, side: str, state: HandState) -> None:
             self._last_hand_state_ns[side] = time.monotonic_ns()
             self._last_hand_sequence[side] = state.acquisition.sequence
+            self._latest_hand_angles[side] = state.actuator_angle
             self._state_queue[side].append(state)
 
         def _on_fault(self, side: str, reason: str) -> None:
@@ -329,6 +418,7 @@ def main(args=None) -> int:
                 active = False
             was_active = self._control_active
             self._control_active = active and not self._fault_latched
+            self._control_state_name = state_name
             self._control_session = session_id
             self._control_source = control_source if active else ""
             self._control_state_received_ns = now
@@ -355,7 +445,7 @@ def main(args=None) -> int:
                 or message.session_id != self._control_session
                 or not command_source_matches(self._control_source, message.source)
                 or not message.deadman
-                or message.sequence <= self._last_command_sequence
+                or message.sequence <= self._last_source_command_sequence
             ):
                 return
             ttl_ns = _time_ns(message.ttl)
@@ -375,6 +465,7 @@ def main(args=None) -> int:
             remaining_ns = ttl_ns - max(0, age_ns)
             valid_mask = int(message.valid_mask)
             submitted = False
+            worker_sequence: int | None = None
             for side, bit_name, fallback_bit in (
                 ("left", "LEFT_HAND_VALID", 4),
                 ("right", "RIGHT_HAND_VALID", 8),
@@ -394,8 +485,10 @@ def main(args=None) -> int:
                     for value in getattr(point, f"{side}_hand_targets")
                 )
                 try:
+                    if worker_sequence is None:
+                        worker_sequence = self._next_worker_sequence()
                     hand_command = HandCommand(
-                        sequence=int(message.sequence),
+                        sequence=worker_sequence,
                         angles=targets,
                         force_limits=self._workers[side].safe_force_limits,
                         deadline_ns=now_mono + remaining_ns,
@@ -407,15 +500,194 @@ def main(args=None) -> int:
                     return
                 submitted = self._workers[side].submit(hand_command) or submitted
             if submitted:
-                self._last_command_sequence = int(message.sequence)
+                self._last_source_command_sequence = int(message.sequence)
+
+        def _next_worker_sequence(self) -> int:
+            with self._sequence_lock:
+                self._worker_command_sequence += 1
+                return self._worker_command_sequence
+
+        def _on_cycle_hands(self, _request, response):
+            """Run the installed-hardware Reset gesture after arm Home."""
+
+            if not self._hand_reset_enabled:
+                response.success = False
+                response.message = "hand reset is disabled by configuration"
+                return response
+            if not self._write_enabled:
+                response.success = False
+                response.message = "DFTP driver is read-only"
+                return response
+            if self._fault_latched:
+                response.success = False
+                response.message = "DFTP fault is latched"
+                return response
+            if self._control_state_name != "READY":
+                response.success = False
+                response.message = (
+                    "hand reset requires control state READY; got "
+                    + (self._control_state_name or "no state")
+                )
+                return response
+            if self._control_session != self._configured_session:
+                response.success = False
+                response.message = "control session does not match DFTP session"
+                return response
+            now = time.monotonic_ns()
+            stale = [
+                side
+                for side in ("left", "right")
+                if now - self._last_hand_state_ns[side]
+                > self._hand_state_timeout_ns
+            ]
+            if stale:
+                response.success = False
+                response.message = "hand state is stale: " + ",".join(stale)
+                return response
+            if not self._hand_reset_lock.acquire(blocking=False):
+                response.success = False
+                response.message = "hand reset is already running"
+                return response
+            try:
+                # The first two targets retain the proven legacy gesture.  The
+                # final open target is handled separately and verified against
+                # ANGLE_ACTUAL; queue acceptance alone is not motion success.
+                labels = ("open", "closed")
+                for label, target in zip(labels, self._hand_reset_targets[:2]):
+                    sequence = self._next_worker_sequence()
+                    deadline_ns = time.monotonic_ns() + int(
+                        self._hand_reset_command_timeout_s * 1e9
+                    )
+                    accepted = {}
+                    for side, worker in self._workers.items():
+                        accepted[side] = worker.submit(
+                            HandCommand(
+                                sequence=sequence,
+                                angles=target,
+                                force_limits=worker.safe_force_limits,
+                                deadline_ns=deadline_ns,
+                                source=f"local-reset:{label}",
+                            )
+                        )
+                    if not all(accepted.values()):
+                        self._request_both_holds("hand-reset-submit-failed")
+                        response.success = False
+                        response.message = (
+                            "failed to submit reset target: " + label
+                        )
+                        return response
+                    time.sleep(self._hand_reset_pause_s)
+
+                open_target = self._hand_reset_targets[-1]
+                verification_deadline = (
+                    time.monotonic() + self._hand_reset_open_timeout_s
+                )
+                retry_period_s = min(0.5, self._hand_reset_pause_s)
+                # Always enqueue the final open before examining measurements.
+                # Otherwise an observation left over from the first open phase
+                # can make the service return while the close command is still
+                # the newest command in a worker.
+                baseline_sequences = dict(self._last_hand_sequence)
+                sequence = self._next_worker_sequence()
+                command_deadline_ns = time.monotonic_ns() + int(
+                    self._hand_reset_command_timeout_s * 1e9
+                )
+                accepted = {
+                    side: worker.submit(
+                        HandCommand(
+                            sequence=sequence,
+                            angles=open_target,
+                            force_limits=worker.safe_force_limits,
+                            deadline_ns=command_deadline_ns,
+                            source="local-reset:open-final",
+                        )
+                    )
+                    for side, worker in self._workers.items()
+                }
+                if not all(accepted.values()):
+                    response.success = False
+                    response.message = "failed to submit final open target"
+                    return response
+                next_submit = time.monotonic() + retry_period_s
+                while True:
+                    now_s = time.monotonic()
+                    reached = {
+                        side: (
+                            self._last_hand_sequence[side]
+                            > baseline_sequences[side]
+                            and hand_target_reached(
+                                self._latest_hand_angles[side],
+                                open_target,
+                                self._hand_reset_open_tolerance,
+                            )
+                        )
+                        for side in ("left", "right")
+                    }
+                    if all(reached.values()):
+                        response.success = True
+                        response.message = (
+                            "both Inspire hands completed open-close-open and "
+                            "measured open: "
+                            + ", ".join(
+                                f"{side}={list(self._latest_hand_angles[side] or ())}"
+                                for side in ("left", "right")
+                            )
+                        )
+                        return response
+                    if self._fault_latched:
+                        response.success = False
+                        response.message = (
+                            "DFTP fault while reopening hands: "
+                            + "; ".join(
+                                filter(None, self._fault_reason_by_side.values())
+                            )
+                        )
+                        return response
+                    if now_s >= verification_deadline:
+                        response.success = False
+                        response.message = (
+                            "hands did not reach open target before timeout: "
+                            + ", ".join(
+                                f"{side}={list(self._latest_hand_angles[side] or ())}"
+                                for side in ("left", "right")
+                            )
+                        )
+                        return response
+                    if now_s >= next_submit:
+                        sequence = self._next_worker_sequence()
+                        command_deadline_ns = time.monotonic_ns() + int(
+                            self._hand_reset_command_timeout_s * 1e9
+                        )
+                        accepted = {
+                            side: worker.submit(
+                                HandCommand(
+                                    sequence=sequence,
+                                    angles=open_target,
+                                    force_limits=worker.safe_force_limits,
+                                    deadline_ns=command_deadline_ns,
+                                    source="local-reset:open-final",
+                                )
+                            )
+                            for side, worker in self._workers.items()
+                        }
+                        if not all(accepted.values()):
+                            response.success = False
+                            response.message = "failed to submit final open target"
+                            return response
+                        next_submit = now_s + retry_period_s
+                    time.sleep(0.05)
+            except (RuntimeError, ValueError) as exc:
+                self._request_both_holds("hand-reset-error")
+                response.success = False
+                response.message = str(exc)
+                return response
+            finally:
+                self._hand_reset_lock.release()
 
         def _request_both_holds(self, reason: str) -> None:
-            sequence = self._last_command_sequence + 1
-            accepted = False
+            sequence = self._next_worker_sequence()
             for worker in self._workers.values():
-                accepted = worker.request_hold(sequence, reason) or accepted
-            if accepted:
-                self._last_command_sequence = sequence
+                worker.request_hold(sequence, reason)
 
         def _drain(self) -> None:
             now = time.monotonic_ns()
@@ -484,7 +756,7 @@ def main(args=None) -> int:
             message.fault = True
             message.fault_reason = reason
             self._native_emit(f"/robot/{side}_hand/state", message)
-            self._publishers[(side, "state")].publish(message)
+            self._topic_publishers[(side, "state")].publish(message)
 
         def _publish_state(self, state: HandState) -> None:
             names = [f"{state.side}_{name}" for name in ACTUATOR_NAMES]
@@ -492,7 +764,7 @@ def main(args=None) -> int:
             self._header(joint, state.side)
             joint.name = names
             joint.position = list(angle_registers_to_radians(state.actuator_angle))
-            self._publishers[(state.side, "joint")].publish(joint)
+            self._topic_publishers[(state.side, "joint")].publish(joint)
 
             dynamic = DynamicJointState()
             self._header(dynamic, state.side)
@@ -518,7 +790,7 @@ def main(args=None) -> int:
                     float(state.status_code[index]),
                 ]
                 dynamic.interface_values.append(interfaces)
-            self._publishers[(state.side, "dynamic")].publish(dynamic)
+            self._topic_publishers[(state.side, "dynamic")].publish(dynamic)
 
             custom = HandStateMsg()
             self._header(custom, state.side)
@@ -574,7 +846,7 @@ def main(args=None) -> int:
             custom.fault = bool(hardware_reason or driver_reason)
             custom.fault_reason = ";".join(filter(None, (hardware_reason, driver_reason)))
             self._native_emit(f"/robot/{state.side}_hand/state", custom)
-            self._publishers[(state.side, "state")].publish(custom)
+            self._topic_publishers[(state.side, "state")].publish(custom)
 
         def _publish_tactile(self, frame: TactileFrame) -> None:
             message = TactileFrameMsg()
@@ -617,15 +889,18 @@ def main(args=None) -> int:
                 )
                 message.surfaces.append(item)
             self._native_emit(f"/robot/{frame.side}_hand/tactile_raw", message)
-            self._publishers[(frame.side, "tactile")].publish(message)
+            self._topic_publishers[(frame.side, "tactile")].publish(message)
 
     rclpy.init(args=args)
     node = DualDftpNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

@@ -7,6 +7,7 @@ is sent through the normal replay-source control bridge gates.
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import sys
@@ -532,8 +533,14 @@ def run_replay(config_path: str | Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     selected = sys.argv[1:] if argv is None else argv
-    if selected:
-        raise SystemExit("flexiv-inspire-replay takes no arguments; edit config/playback.yaml")
+    parser = argparse.ArgumentParser(
+        prog="flexiv-inspire-replay",
+        description=(
+            "Guarded hardware replay selected by config/playback.yaml. "
+            "Replay remains disabled unless that file explicitly authorizes it."
+        ),
+    )
+    parser.parse_args(selected)
     try:
         return run_replay(_default_config())
     except KeyboardInterrupt:

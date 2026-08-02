@@ -25,6 +25,6 @@ if [[ -f "${TELEOP_ROOT}/ros2_ws/install/setup.bash" ]]; then
 fi
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export ROS_DOMAIN_ID=42
-export ROS_LOCALHOST_ONLY=1
+unset ROS_LOCALHOST_ONLY
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 export CYCLONEDDS_URI="file://${TELEOP_ROOT}/scripts/env/cyclonedds-local.xml"

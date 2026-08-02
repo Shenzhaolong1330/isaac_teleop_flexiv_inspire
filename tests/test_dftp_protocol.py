@@ -54,6 +54,60 @@ def test_hand_state_requires_six_values():
         )
 
 
+def test_temperature_sentinel_does_not_disconnect_valid_actuator_state():
+    state = HandState(
+        side="left",
+        actuator_position=(1,) * 6,
+        actuator_angle=(1,) * 6,
+        actual_force_g=(1,) * 6,
+        current_ma=(1,) * 6,
+        temperature_c=(255,) * 6,
+        error_code=(0,) * 6,
+        status_code=(0,) * 6,
+        acquisition=Acquisition(1, 2, 3),
+        field_times_ns={},
+    )
+
+    assert state.acquisition.valid is True
+    assert state.temperature_c == (255,) * 6
+
+
+def test_raw_actuator_position_outside_normalized_range_is_observational():
+    state = HandState(
+        side="right",
+        actuator_position=(-12, 1001, 32767, -32768, 500, 0),
+        actuator_angle=(500,) * 6,
+        actual_force_g=(0,) * 6,
+        current_ma=(0,) * 6,
+        temperature_c=(20,) * 6,
+        error_code=(0,) * 6,
+        status_code=(2,) * 6,
+        acquisition=Acquisition(1, 2, 3),
+        field_times_ns={},
+    )
+
+    assert state.acquisition.valid is True
+    assert state.actuator_position[:2] == (-12, 1001)
+
+
+def test_actuator_angle_outside_command_range_remains_invalid():
+    state = HandState(
+        side="left",
+        actuator_position=(0,) * 6,
+        actuator_angle=(0, 1, 500, 999, 1000, 1001),
+        actual_force_g=(0,) * 6,
+        current_ma=(0,) * 6,
+        temperature_c=(20,) * 6,
+        error_code=(0,) * 6,
+        status_code=(2,) * 6,
+        acquisition=Acquisition(1, 2, 3),
+        field_times_ns={},
+    )
+
+    assert state.acquisition.valid is False
+    assert state.acquisition.invalid_reason == "actuator_angle-outside-0..1000"
+
+
 def test_force_calibration_uses_single_register_echo_protocol():
     class Client(CommandCapableModbusTcpClient):
         def _request(self, function, payload, expected_bytes):

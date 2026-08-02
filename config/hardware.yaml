@@ -14,9 +14,10 @@ sampling:
   action_label: sent_command
 
 pedal:
-  device: /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
+  # Input Remapper owns the raw PCsensor device and exposes left/space/right.
+  device: "name:input-remapper keyboard"
   rerecord_key_code: 105
-  enable_key_code: 108
+  enable_key_code: 57
   record_toggle_key_code: 106
 
 flexiv:
@@ -35,10 +36,12 @@ flexiv:
     hand_reference_tolerance: 1.0
     max_translation_step_m: 0.01
     max_rotation_step_rad: 0.10
-    max_linear_velocity_m_s: 0.05
-    max_angular_velocity_rad_s: 0.15
-    max_linear_acceleration_m_s2: 0.25
-    max_angular_acceleration_rad_s2: 0.50
+    # Responsive teleoperation profile, still below the independent TCP safety
+    # caps above (0.35 m/s and 1.0 rad/s).
+    max_linear_velocity_m_s: 0.20
+    max_angular_velocity_rad_s: 0.60
+    max_linear_acceleration_m_s2: 1.0
+    max_angular_acceleration_rad_s2: 2.0
   cartesian_control:
     mode: position
     position_stiffness: [3000, 3000, 3000, 200, 200, 200]
@@ -58,4 +61,16 @@ inspire:
   left_host: 192.168.5.11
   right_host: 192.168.5.12
   port: 6000
-  hardware_write_enabled: false
+  # Site installation is command-capable: teleop and the local Reset service
+  # both write through this single DFTP driver.
+  hardware_write_enabled: true
+  reset:
+    # Matches the proven connection check in the legacy dual_arm_teleop stack.
+    enabled: true
+    open_angle: 1000
+    closed_angle: 0
+    pause_s: 0.35
+    command_timeout_s: 8.0
+    # Reset succeeds only after all six measured angles on both hands are open.
+    open_tolerance: 30
+    open_timeout_s: 10.0

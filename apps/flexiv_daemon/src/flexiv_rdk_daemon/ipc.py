@@ -104,8 +104,16 @@ class StructEnvelopeCodec:
 
 def _safe_prepare_socket_path(path: Path, codec: EnvelopeCodec) -> None:
     parent = path.parent
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    parent.chmod(0o700)
+    # Do not chmod a caller-selected existing directory (for example /tmp).
+    # Only a runtime directory created by this process belongs to us.  The
+    # socket itself is always restricted to 0600 below.
+    try:
+        parent.mkdir(parents=True, mode=0o700)
+    except FileExistsError:
+        if not parent.is_dir():
+            raise RuntimeError(f"IPC parent is not a directory: {parent}")
+    else:
+        parent.chmod(0o700)
     try:
         current = path.lstat()
     except FileNotFoundError:
@@ -190,6 +198,7 @@ class SeqpacketServer:
         self._sequence_lock = threading.Lock()
         self._peer_lock = threading.Lock()
         self._peers: set[socket.socket] = set()
+        self._peer_counts: dict[tuple[int, int, int], int] = {}
         self._threads: set[threading.Thread] = set()
 
     def open(self) -> None:
@@ -240,6 +249,9 @@ class SeqpacketServer:
                 continue
             with self._peer_lock:
                 self._peers.add(connection)
+                self._peer_counts[credentials] = (
+                    self._peer_counts.get(credentials, 0) + 1
+                )
             thread = threading.Thread(
                 target=self._peer_worker,
                 args=(connection, credentials),
@@ -259,11 +271,21 @@ class SeqpacketServer:
             with connection:
                 self._serve_connection(connection, credentials)
         finally:
+            notify_disconnected = False
             with self._peer_lock:
                 self._peers.discard(connection)
                 self._threads.discard(threading.current_thread())
+                remaining = self._peer_counts.get(credentials, 1) - 1
+                if remaining <= 0:
+                    self._peer_counts.pop(credentials, None)
+                    notify_disconnected = True
+                else:
+                    self._peer_counts[credentials] = remaining
             disconnected = getattr(self._handler, "peer_disconnected", None)
-            if callable(disconnected):
+            # A bridge deliberately owns several persistent connections with
+            # the same credentials. Revoking its process-scoped lease when an
+            # unrelated channel reconnects creates a split-brain lease state.
+            if notify_disconnected and callable(disconnected):
                 disconnected(credentials)
 
     def _serve_connection(

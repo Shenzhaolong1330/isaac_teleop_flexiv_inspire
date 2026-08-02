@@ -212,6 +212,38 @@ def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
     assert not value.hold_latched
 
 
+def test_home_reuses_fresh_bridge_observation_instead_of_polling_rdk_again() -> None:
+    backend = MockBackend()
+    interlock = DaemonInterlock()
+    interlock.ready_generation = 1
+    hands = HandObservationCache()
+    hands.update(np.zeros(6), np.zeros(6))
+    observation_count = 0
+
+    def observe_both():
+        nonlocal observation_count
+        observation_count += 1
+        return backend.observe_both()
+
+    value = RDKRequestDispatcher(
+        backend,
+        FakeFT(),
+        hands,
+        interlock,
+        observe_provider=observe_both,
+        home_authorizations=HomeTokenAuthority(),
+    )
+    value("observe", 1, {}, (777, 0, 0))
+
+    _, response = value(
+        "home_command", 2, home_command(1, target=0.2), (777, 0, 0)
+    )
+    value.close()
+
+    assert response["accepted"] and not response["completed"]
+    assert observation_count == 1
+
+
 def test_home_does_not_require_pedal_and_reuses_process_session_lease() -> None:
     value, _ = dispatcher()
     first = home_command(1, physical_pedal=False)

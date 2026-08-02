@@ -21,6 +21,7 @@ from .models import ActionChunk
 from .server import TlsFiles, serve
 from .generated import policy_service_v1_pb2 as pb
 from flexiv_inspire_isaac.dftp.protocol import TACTILE_LAYOUT, TOTAL_TAXELS
+from isaac_teleop_core.command import ROTATION_ORDER
 
 
 def _time_ns(value: Any) -> int:
@@ -414,7 +415,7 @@ def build_ros_node(
             message.ttl.nanosec = int(remaining_ns % 1_000_000_000)
             message.representation = BimanualCommand.CARTESIAN_ROT6D
             message.frame_id = "world"
-            message.rotation_order = "R00,R10,R20,R01,R11,R21"
+            message.rotation_order = ROTATION_ORDER
             message.valid_mask = (
                 BimanualCommand.LEFT_ARM_VALID | BimanualCommand.RIGHT_ARM_VALID
                 | BimanualCommand.LEFT_HAND_VALID | BimanualCommand.RIGHT_HAND_VALID

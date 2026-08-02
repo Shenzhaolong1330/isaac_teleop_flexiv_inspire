@@ -299,6 +299,12 @@ class RDKRequestDispatcher:
         self._home_authorized_session: str | None = None
         self._home_authorized_owner_pid: int | None = None
         self._home_authorized_generation: int | None = None
+        # The control bridge already samples both arms at high rate. Home uses
+        # that fresh sample instead of issuing a second pair of blocking RDK
+        # state reads on every 40 ms keepalive.
+        self._observation_lock = threading.Lock()
+        self._latest_observation: Any | None = None
+        self._latest_observation_ns = 0
         self._active_source: str | None = None
         self._active_session: str | None = None
         self._owner_pid: int | None = None
@@ -371,10 +377,12 @@ class RDKRequestDispatcher:
         if kind == "hello":
             return self._ack(sequence, True, "hello")
         if kind == "observe":
-            observation = self._observe_provider().to_wire()
-            self._emit_deviceio(observation)
-            observation["daemon_instance_id"] = self.daemon_instance_id
-            return "dual_arm_state", observation
+            sample = self._observe_provider()
+            self._cache_observation(sample)
+            observation_wire = sample.to_wire()
+            self._emit_deviceio(observation_wire)
+            observation_wire["daemon_instance_id"] = self.daemon_instance_id
+            return "dual_arm_state", observation_wire
         if kind == "hand_observation":
             self._hands.update(
                 payload.get("left"),
@@ -410,6 +418,34 @@ class RDKRequestDispatcher:
         if kind == "hold":
             return self._hold(sequence, str(payload.get("reason", "hold")))
         raise ValueError(f"packet kind {kind!r} is not valid as a request")
+
+    def _cache_observation(self, sample: Any) -> None:
+        with self._observation_lock:
+            self._latest_observation = sample
+            self._latest_observation_ns = time.monotonic_ns()
+
+    def _home_observation(self, max_age_ns: int = 100_000_000) -> Any:
+        """Return a recent dual-arm sample without duplicating normal polling."""
+
+        now = time.monotonic_ns()
+        with self._observation_lock:
+            sample = self._latest_observation
+            received_ns = self._latest_observation_ns
+        if (
+            sample is not None
+            and now - received_ns <= max_age_ns
+            and sample.left.connection_generation
+            == self._backend.connection_generation
+            and sample.right.connection_generation
+            == self._backend.connection_generation
+        ):
+            return sample
+        # Direct dispatcher tests and startup can reach Home before the first
+        # bridge poll. One synchronous read preserves the daemon's independent
+        # health check; subsequent keepalives reuse the normal observation feed.
+        sample = self._observe_provider()
+        self._cache_observation(sample)
+        return sample
 
     def _emit_deviceio(self, observation: dict[str, Any]) -> None:
         """Mirror each native RDK sample before protobuf/ROS conversion."""
@@ -861,7 +897,7 @@ class RDKRequestDispatcher:
                         False, False, "non_monotonic_home_sequence"
                     )
             else:
-                sample = self._backend.observe_both()
+                sample = self._home_observation()
                 for side in ("left", "right"):
                     arm = getattr(sample, side)
                     if not arm.connected or arm.fault:
@@ -911,7 +947,7 @@ class RDKRequestDispatcher:
             if now - self._home_started_ns > self._home_timeout_ns:
                 self._latch_hold_locked("home_timeout", force_hardware_hold=True)
                 return self._home_result(False, False, "home_timeout")
-            sample = self._backend.observe_both()
+            sample = self._home_observation()
             errors = [
                 float(np.max(np.abs(getattr(sample, side).q - targets[side])))
                 for side in ("left", "right")

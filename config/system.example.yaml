@@ -17,10 +17,10 @@ sampling:
   action_label: sent_command # the command accepted by hardware, never requested/safe alone
 
 pedal:
-  device: /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
-  # PCsensor keyboard mapping: left=105, down=108, right=106.
+  device: "name:input-remapper keyboard"
+  # Input Remapper mapping: left=105, middle/space=57, right=106.
   rerecord_key_code: 105       # left: discard current, guarded Home, then start fresh
-  enable_key_code: 108         # down arrow: hold-to-enable; release latches hold
+  enable_key_code: 57          # space: hold-to-enable; release stops increments
   record_toggle_key_code: 106  # right: commit current, guarded Home, then next
 
 flexiv:
@@ -43,10 +43,10 @@ flexiv:
     hand_reference_tolerance: 1.0
     max_translation_step_m: 0.01
     max_rotation_step_rad: 0.10
-    max_linear_velocity_m_s: 0.05
-    max_angular_velocity_rad_s: 0.15
-    max_linear_acceleration_m_s2: 0.25
-    max_angular_acceleration_rad_s2: 0.50
+    max_linear_velocity_m_s: 0.20
+    max_angular_velocity_rad_s: 0.60
+    max_linear_acceleration_m_s2: 1.0
+    max_angular_acceleration_rad_s2: 2.0
   cartesian_control:
     # Both profiles use RDK NRT_CARTESIAN_MOTION_FORCE and are applied through
     # SetCartesianImpedance before the first Cartesian target.
@@ -73,6 +73,14 @@ inspire:
   right_host: 192.168.5.12
   port: 6000
   hardware_write_enabled: false
+  reset:
+    enabled: false
+    open_angle: 1000
+    closed_angle: 0
+    pause_s: 0.35
+    command_timeout_s: 8.0
+    open_tolerance: 30
+    open_timeout_s: 10.0
 
 cameras:
   config: ros2_ws/src/flexiv_inspire_cameras/realsense_rgb.yaml
@@ -86,9 +94,9 @@ cameras:
   # Keeps RGB + z16 depth + XYZ in one DeviceIO record under 2 MiB.
   pointcloud_stride: 2
   streams:
-    head:        {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: true}}
-    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: false}}
-    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: false}}
+    head:        {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: true}}
+    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
 
 
 # Quest video return is a display branch of the same CameraFrame messages that
@@ -96,6 +104,8 @@ cameras:
 xr_video:
   enabled: true
   auto_start_with_record: true
+  transport: lan              # lan (low latency) | usb_tcp (fallback only)
+  wifi_connection: Deepybo-Prime
   ffmpeg: /usr/bin/ffmpeg
   encoder: auto               # auto: NVENC first, then libx264 fallback
   receiver_host: 127.0.0.1
@@ -114,7 +124,7 @@ xr_video:
     head:        {distance: 1.5, width: 1.0, offset_x: 0.0, offset_y: 0.0}
     left_wrist:  {distance: 1.2, width: 0.4, offset_x: -1.0, offset_y: -0.4}
     right_wrist: {distance: 1.2, width: 0.4, offset_x: 1.0, offset_y: -0.4}
-    lock_mode: lazy
+    lock_mode: world
     look_away_angle: 45.0
     reposition_distance: 0.5
     reposition_delay: 0.5
@@ -125,6 +135,7 @@ teleop:
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
   manus_calibration: ""
   control_enabled: false # always shadow at startup; local authorization is separate
+  deadman_source: external_bool
 
 lerobot_export:
   schema_version: 1

@@ -136,10 +136,15 @@ def hand_features(poses: object) -> dict[str, float]:
     features["thumb_ip"] = _relative_angle(
         rotations, "thumb_proximal", "thumb_distal"
     )
-    wrist_index = TRANSPORT_JOINT_NAMES.index("wrist")
-    thumb_index = TRANSPORT_JOINT_NAMES.index("thumb_metacarpal")
+    # The wrist-to-thumb-metacarpal vector points at the CMC joint location,
+    # which is effectively fixed in the hand skeleton and therefore cannot
+    # measure thumb opposition.  Use the metacarpal bone direction instead:
+    # its proximal endpoint moves as the thumb abducts/rotates.
+    thumb_metacarpal_index = TRANSPORT_JOINT_NAMES.index("thumb_metacarpal")
+    thumb_proximal_index = TRANSPORT_JOINT_NAMES.index("thumb_proximal")
     thumb_direction_world = (
-        values[thumb_index, :3] - values[wrist_index, :3]
+        values[thumb_proximal_index, :3]
+        - values[thumb_metacarpal_index, :3]
     )
     thumb_direction_local = rotations["wrist"].T @ thumb_direction_world
     planar_norm = float(np.linalg.norm(thumb_direction_local[:2]))

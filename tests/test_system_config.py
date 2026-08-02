@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 import yaml
 
@@ -40,17 +41,65 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
         80,
         80,
     ]
+    assert all(
+        isinstance(value, float)
+        for value in parameters["cartesian_position_stiffness"]
+    )
+    assert all(
+        isinstance(value, float)
+        for value in parameters["cartesian_impedance_stiffness"]
+    )
     assert parameters["cartesian_damping_ratio"] == [0.7] * 6
     assert len(parameters["home_left_joints_rad"]) == 7
     assert parameters["home_max_velocity_rad_s"] <= parameters[
         "max_joint_velocity_rad_s"
     ]
+    assert parameters["max_linear_velocity_m_s"] == 0.20
+    assert parameters["max_angular_velocity_rad_s"] == 0.60
     assert parameters["frame_config"].endswith("/config/dual_arm_frames.yaml")
+    dftp = yaml.safe_load(rendered["dftp.yaml"].read_text())[
+        "flexiv_inspire_dftp_driver"
+    ]["ros__parameters"]
+    assert dftp["hardware_write_enabled"] is False
+    assert dftp["local_write_confirmation"] == ""
+    assert dftp["hand_reset_enabled"] is False
+    assert dftp["hand_reset_open_angle"] == 1000
+    assert dftp["hand_reset_closed_angle"] == 0
+    assert dftp["hand_reset_open_tolerance"] == 30
+    assert dftp["hand_reset_open_timeout_s"] == 10.0
+    teleop = yaml.safe_load(rendered["teleop.yaml"].read_text())["/**"][
+        "ros__parameters"
+    ]
+    assert teleop["deadman_source"] == "external_bool"
+    assert teleop["foot_pedal"] == "name:input-remapper keyboard"
+    assert teleop["enable_key_code"] == 57
+    pedal = yaml.safe_load(rendered["pedal.yaml"].read_text())["/**"][
+        "ros__parameters"
+    ]
+    assert pedal["foot_pedal"] == "name:input-remapper keyboard"
+    assert pedal["enable_key_code"] == 57
     commands = _commands(config, rendered, include_xr_receiver=False)
     rdk = commands[0]
     assert rdk[rdk.index("--config") + 1] == str(
         Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
     )
+    assert commands[1][:3] == [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_control.node",
+    ]
+    assert commands[2][:3] == [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_control.teleop_input_node",
+    ]
+    xr_source = next(
+        command for command in commands
+        if command[0].endswith("run_xr_raw_source.sh")
+    )
+    assert xr_source[xr_source.index("--transport") + 1] == "lan"
+    assert xr_source[xr_source.index("--wifi-connection") + 1] == "Deepybo-Prime"
+    assert any(command[0].endswith("run_manus_plugin.sh") for command in commands)
     episode = next(
         command
         for command in commands
@@ -76,7 +125,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     )
 
 
-def test_site_entry_composes_small_hardware_sensor_recording_runtime_files():
+def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_path):
     config = load_system_config(_site())
 
     assert config.document["recording"]["dataset_name"] == "pick_place_demo"
@@ -85,7 +134,22 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files():
         "right_primary_click"
     )
     assert config.document["cameras"]["streams"]["head"]["serial"]
-    assert config.document["commands"]["rdk_daemon"][-1] == "--mock"
+    assert "--mock" not in config.document["commands"]["rdk_daemon"]
+
+    rendered = render_runtime_configs(config, tmp_path)
+    dftp = yaml.safe_load(rendered["dftp.yaml"].read_text())[
+        "flexiv_inspire_dftp_driver"
+    ]["ros__parameters"]
+    assert dftp["hardware_write_enabled"] is True
+    assert dftp["local_write_confirmation"] == (
+        "DFTP-LOCAL-CONTROL-AUTHORIZED"
+    )
+    assert dftp["hand_reset_enabled"] is True
+    assert dftp["hand_reset_pause_s"] == 0.35
+    rdk = _commands(config, rendered, include_xr_receiver=False)[0]
+    assert "--hardware" in rdk
+    assert "--allow-hardware-writes" in rdk
+    assert "--local-permit-file" in rdk
 
 
 def test_system_config_rejects_non_executed_action_label(tmp_path):

@@ -1,6 +1,7 @@
 # 日常数采只改这个文件；启动命令不接收参数。
 recording:
-  # 输出目录为 <output_root>/<dataset_name>/episode_000001_attempt_01_<id>/
+  # 输出目录为 <output_root>/<dataset_name>/
+  # episode_000001_attempt_01_YYYYMMDD_HHMM/
   dataset_name: pick_place_demo
   episode_count: 20
   output_root: sessions

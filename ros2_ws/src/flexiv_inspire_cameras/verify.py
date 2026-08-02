@@ -33,7 +33,16 @@ def verify(config_path: str) -> dict:
         "expected_serials": sorted(expected),
         "attached_serials": sorted(attached),
         "all_attached": expected <= attached,
-        "configuration": "424x240@30 RGB-only, JPEG quality 90",
+        "modalities": {
+            name: {
+                "rgb": True,
+                "depth": camera.record_depth,
+                "pointcloud": camera.pointcloud_enabled,
+                "resolution": f"{camera.width}x{camera.height}@{camera.fps}",
+                "jpeg_quality": camera.jpeg_quality,
+            }
+            for name, camera in configs.items()
+        },
     }
 
 
@@ -44,8 +53,9 @@ def main() -> int:
         default=str(DEFAULT_CONFIG),
     )
     args = parser.parse_args()
-    print(json.dumps(verify(args.config), indent=2))
-    return 0
+    result = verify(args.config)
+    print(json.dumps(result, indent=2))
+    return 0 if result["all_attached"] else 2
 
 
 if __name__ == "__main__":

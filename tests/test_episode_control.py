@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 from types import SimpleNamespace
 
@@ -17,9 +18,13 @@ class _Publisher:
 class _Logger:
     def __init__(self) -> None:
         self.warnings = []
+        self.infos = []
 
     def warning(self, message: str) -> None:
         self.warnings.append(message)
+
+    def info(self, message: str) -> None:
+        self.infos.append(message)
 
 
 class _FakeController:
@@ -36,6 +41,9 @@ class _FakeController:
             "tool_config": "/tmp/tool.yaml",
             "ft_zero_record": "/tmp/ft-zero.jsonl",
             "camera_config": "/tmp/camera.yaml",
+            "camera_head_extrinsics": "",
+            "camera_left_wrist_extrinsics": "",
+            "camera_right_wrist_extrinsics": "",
             "manus_calibration": manus_calibration,
             "camera_recording_mode": "jpeg",
             "deviceio_mode": "native",
@@ -67,15 +75,30 @@ def test_episode_command_contains_configured_identity_prompt_and_attempt() -> No
     assert command[command.index("--task-description") + 1] == (
         "Pick up the red block."
     )
-    assert "episode_000003_attempt_02_" in command[
-        command.index("--episode-directory-name") + 1
-    ]
+    episode_name = command[command.index("--episode-directory-name") + 1]
+    match = re.fullmatch(
+        r"episode_000003_attempt_02_(\d{8}_\d{4})",
+        episode_name,
+    )
+    assert match is not None
+    assert command[command.index("--collection-timestamp-local") + 1] == (
+        match.group(1)
+    )
 
 
 def test_manus_calibration_is_recorded_when_configured() -> None:
     fake = _FakeController("/tmp/manus.yaml")
     command = EpisodeController._command(fake)
     assert "manus=/tmp/manus.yaml" in command
+
+
+def test_camera_extrinsics_are_hashed_into_episode_manifest_inputs() -> None:
+    fake = _FakeController("")
+    fake.values["camera_head_extrinsics"] = "/tmp/head-extrinsics.yaml"
+
+    command = EpisodeController._command(fake)
+
+    assert "camera_head=/tmp/head-extrinsics.yaml" in command
 
 
 class _EpisodeWorkflow:
@@ -248,8 +271,10 @@ def test_home_failure_never_finalizes_or_starts_episode() -> None:
 
 def test_pedal_router_maps_right_press_to_stop() -> None:
     publisher = _Publisher()
+    logger = _Logger()
     fake = SimpleNamespace(
         _publisher=publisher,
+        get_logger=lambda: logger,
         get_parameter=lambda name: SimpleNamespace(value={
             "rerecord_key_code": 105,
             "record_toggle_key_code": 106,
@@ -259,3 +284,48 @@ def test_pedal_router_maps_right_press_to_stop() -> None:
     PedalRouter._on_event(fake, SimpleNamespace(pressed=True, key_code=106))
 
     assert publisher.messages[-1].data == "stop"
+    assert logger.infos == ["右踏板：保存本条并进入下一条"]
+
+
+class _ClutchRearm:
+    def __init__(self) -> None:
+        self._routine_control_rearm_pending = False
+        self._pending_home_action = None
+        self.calls = []
+        self.errors = []
+
+    def _authorize_control(self, *, clear_hold_latched: bool = False) -> None:
+        self.calls.append(clear_hold_latched)
+
+    def get_logger(self):
+        return SimpleNamespace(error=self.errors.append)
+
+
+def _control_state(
+    *, state="HOLD_LATCHED", reason="physical_pedal_released", pedal=False
+):
+    return SimpleNamespace(
+        state_name=state,
+        hold_reason=reason,
+        physical_pedal=pedal,
+    )
+
+
+def test_routine_pedal_release_rearms_once_with_fresh_authorization() -> None:
+    fake = _ClutchRearm()
+
+    EpisodeController._on_control_state(fake, _control_state())
+    EpisodeController._on_control_state(fake, _control_state())
+
+    assert fake.calls == [True]
+    assert fake._routine_control_rearm_pending is True
+
+
+def test_non_routine_hold_is_not_automatically_cleared() -> None:
+    fake = _ClutchRearm()
+
+    EpisodeController._on_control_state(
+        fake, _control_state(reason="invalid_command")
+    )
+
+    assert fake.calls == []

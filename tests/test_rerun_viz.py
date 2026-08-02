@@ -10,6 +10,7 @@ from flexiv_inspire_isaac.rerun_viz.runtime import (
     LatestOnlyDispatcher,
     RerunVisualizer,
     ROT6D_IDENTITY,
+    TACTILE_ATLAS_SHAPE,
     command_action_vector,
     tactile_atlas,
 )
@@ -47,9 +48,22 @@ def _surfaces() -> list[dict]:
 
 def test_tactile_atlas_preserves_raw_uint16() -> None:
     atlas = tactile_atlas(_surfaces())
-    assert atlas.shape == (48, 48)
+    assert atlas.shape == TACTILE_ATLAS_SHAPE
     assert atlas.dtype == np.uint16
     assert int(atlas.max()) == 65535
+
+
+def test_right_tactile_atlas_mirrors_left_palm_view() -> None:
+    left = tactile_atlas(_surfaces(), side="left")
+    right = tactile_atlas(_surfaces(), side="right")
+    np.testing.assert_array_equal(right, np.fliplr(left))
+
+
+def test_tactile_atlas_rejects_unknown_side() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="left or right"):
+        tactile_atlas(_surfaces(), side="center")
 
 
 def test_command_action_is_exact_30d_rotation6d_layout() -> None:

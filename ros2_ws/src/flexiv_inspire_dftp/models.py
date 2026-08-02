@@ -56,11 +56,17 @@ class HandState:
         ):
             object.__setattr__(self, field_name, _six(getattr(self, field_name), field_name))
         invalid_fields = []
-        for field_name in ("actuator_position", "actuator_angle"):
-            if any(value < 0 or value > 1000 for value in getattr(self, field_name)):
-                invalid_fields.append(f"{field_name}-outside-0..1000")
-        if any(value < 0 or value > 125 for value in self.temperature_c):
-            invalid_fields.append("temperature-outside-0..125C")
+        # ANGLE_ACTUAL uses the same normalized 0..1000 convention as the
+        # command register.  POSITION_ACTUAL is a raw actuator/encoder value:
+        # installed RH56DFTP-2 hands can briefly report it outside 0..1000
+        # while moving.  Preserve that observation, but do not tear down the
+        # Modbus worker (and discard an in-flight Reset command) because of it.
+        if any(value < 0 or value > 1000 for value in self.actuator_angle):
+            invalid_fields.append("actuator_angle-outside-0..1000")
+        # The DFTP transport exposes temperature as six packed raw bytes and
+        # installed hands may report vendor sentinel values above 125. Keep
+        # those bytes for observation, but do not invalidate otherwise healthy
+        # actuator angles/positions or disconnect the entire hand.
         if invalid_fields:
             reason = ";".join(invalid_fields)
             if self.acquisition.invalid_reason:
@@ -68,7 +74,6 @@ class HandState:
             object.__setattr__(
                 self, "acquisition", replace(self.acquisition, valid=False, invalid_reason=reason)
             )
-
 
 
 @dataclass(frozen=True)

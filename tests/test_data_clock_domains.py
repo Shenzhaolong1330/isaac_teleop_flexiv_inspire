@@ -1,7 +1,11 @@
 import json
+from types import SimpleNamespace
 
 from flexiv_inspire_isaac.data_pipeline.recorder import RecordEnvelope
 from flexiv_inspire_isaac.data_pipeline.alignment import TimedSample, causal_nearest
+from flexiv_inspire_isaac.data_pipeline.mcap_input import (
+    _camera_sample_from_ros_message,
+)
 
 
 def test_unmapped_device_clock_has_null_age_and_explicit_invalid_timing():
@@ -84,6 +88,33 @@ def test_unmapped_explicit_clock_sample_is_not_aligned():
     aligned = causal_nearest([sample], 5_000, 100)
     assert not aligned.valid
     assert aligned.reason == "timing-unmapped"
+
+
+def test_ros_camera_recovery_preserves_mapped_monotonic_time():
+    def stamp(value):
+        return SimpleNamespace(sec=value // 1_000_000_000, nanosec=value % 1_000_000_000)
+
+    acquisition = SimpleNamespace(
+        source_time=stamp(123),
+        host_receive_time=stamp(1_050),
+        mapped_host_time=stamp(1_000),
+        source_sequence=7,
+        valid=True,
+        invalid_reason="",
+        timing_valid=True,
+        source_clock_domain="realsense_hardware_clock",
+        host_clock_domain="host_monotonic",
+    )
+    message = SimpleNamespace(
+        camera="head",
+        acquisition=acquisition,
+        image=SimpleNamespace(data=b"jpeg"),
+    )
+    name, sample = _camera_sample_from_ros_message(message)
+    assert name == "camera/head/jpeg"
+    assert sample.value == b"jpeg"
+    assert sample.alignment_time_ns == 1_000
+    assert sample.valid
 
 
 def test_mcap_loader_requires_mapping_and_normalizes_camera_topic(tmp_path):

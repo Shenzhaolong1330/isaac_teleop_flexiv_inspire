@@ -46,6 +46,7 @@ class _Arbiter:
     def __init__(self) -> None:
         self.state = ControlState.ACTIVE
         self.marked_sent = []
+        self.deadman_releases = []
 
     @property
     def snapshot(self):
@@ -64,6 +65,9 @@ class _Arbiter:
 
     def fault(self) -> None:
         self.state = ControlState.FAULT
+
+    def observe_deadman_released(self, source: CommandSource) -> None:
+        self.deadman_releases.append(source)
 
 
 class _IPC:
@@ -228,4 +232,19 @@ def test_sent_is_published_only_after_positive_rdk_ack() -> None:
     assert bridge._sent_pub.messages[0] is bridge._safe_pub.messages[0]
     assert bridge._arbiter.marked_sent == [command]
     assert bridge._arbiter.state is ControlState.ACTIVE
+    assert not bridge.holds
+
+
+def test_neutral_teleop_packet_does_not_latch_hold() -> None:
+    bridge = _bridge(token="local-token", rdk_accepts=True)
+    bridge._requested_pub = _Publisher()
+    bridge._emit_deviceio = lambda *args, **kwargs: True
+    message = SimpleNamespace(deadman=False, valid_mask=0)
+
+    bridge._on_command(CommandSource.TELEOP, message)
+
+    assert bridge._arbiter.state is ControlState.ACTIVE
+    assert bridge._arbiter.deadman_releases == [CommandSource.TELEOP]
+    assert bridge._requested_pub.messages == [message]
+    assert bridge.traces[0][3] == "teleop_clutch_released"
     assert not bridge.holds

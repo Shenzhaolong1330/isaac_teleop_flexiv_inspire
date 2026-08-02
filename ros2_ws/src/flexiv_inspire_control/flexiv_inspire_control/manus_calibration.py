@@ -83,6 +83,22 @@ def build_calibration(template: dict, opened: dict, closed: dict) -> dict:
     ):
         raise ValueError("unsupported MANUS calibration template")
     result = copy.deepcopy(template)
+    # YAML merge anchors in the template make left/right actuator mappings
+    # share the same Python dictionaries after ``safe_load``.  A normal
+    # deepcopy preserves that aliasing, so calibrating the right hand would
+    # overwrite the endpoints already computed for the left hand.  Rebuild
+    # every actuator mapping independently before inserting site endpoints.
+    result["sides"] = {
+        side: {
+            actuator: copy.deepcopy(channel)
+            for actuator, channel in template["sides"][side].items()
+        }
+        for side in ("left", "right")
+    }
+    # These are template-only helpers; retaining them would reintroduce YAML
+    # anchors in the finalized runtime document.
+    result.pop("channel_defaults", None)
+    result.pop("side_channels", None)
     result["calibrated"] = True
     result["calibration"] = {
         "created_utc": datetime.now(timezone.utc).isoformat(),

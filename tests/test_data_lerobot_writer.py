@@ -14,6 +14,7 @@ class FakeDataset:
         return instance
 
     def __init__(self, **kwargs):
+        self.create_kwargs = kwargs
         self.frames = []
         self.saved = False
         self.finalized = False
@@ -110,6 +111,47 @@ def test_writer_calls_create_add_save_finalize_and_reload(tmp_path):
     assert result.frames_written == result.reload_length == 1
 
 
+def test_writer_accepts_an_existing_empty_output_directory(tmp_path):
+    FakeDataset.instances.clear()
+    output_root = tmp_path / "empty-dataset-root"
+    output_root.mkdir()
+
+    result = export_rows(
+        [valid_row()],
+        output_root=output_root,
+        repo_id="local/test",
+        task="test task",
+        dataset_class=FakeDataset,
+    )
+
+    assert result.frames_written == 1
+
+
+def test_writer_infers_configured_camera_resolution(tmp_path):
+    FakeDataset.instances.clear()
+    row = valid_row()
+    for camera in ("head", "left_wrist", "right_wrist"):
+        row[f"observation.images.{camera}"] = np.zeros(
+            (120, 160, 3), dtype=np.uint8
+        )
+
+    result = export_rows(
+        [row],
+        output_root=tmp_path / "dataset",
+        repo_id="local/test",
+        task="test task",
+        dataset_class=FakeDataset,
+    )
+
+    assert result.frames_written == 1
+    assert FakeDataset.instances[0].frames[0][
+        "observation.images.head"
+    ].shape == (120, 160, 3)
+    assert FakeDataset.instances[0].create_kwargs["features"][
+        "observation.images.head"
+    ]["shape"] == (120, 160, 3)
+
+
 def test_hand_field_timing_uses_each_modbus_read_timestamp():
     row = valid_row()
     row["timestamp_ns"] = 2_000_000_000
@@ -146,3 +188,20 @@ def test_invalid_image_row_is_dropped_not_zero_filled(tmp_path):
         assert "no fully valid" in str(exc)
     else:
         raise AssertionError("invalid image row must not be silently filled")
+
+
+def test_export_report_separates_invalid_actions_from_invalid_images(tmp_path):
+    FakeDataset.instances.clear()
+    invalid_action = valid_row()
+    invalid_action["valid"] = {"action": False}
+
+    result = export_rows(
+        [invalid_action, valid_row()],
+        output_root=tmp_path / "dataset",
+        repo_id="local/test",
+        task="test task",
+        dataset_class=FakeDataset,
+    )
+
+    assert result.frames_dropped_invalid_action == 1
+    assert result.frames_dropped_invalid_image == 0

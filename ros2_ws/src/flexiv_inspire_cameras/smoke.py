@@ -1,4 +1,4 @@
-"""Read-only three-camera acquisition smoke test."""
+"""Read-only three-camera RGB/depth/point-cloud acquisition smoke test."""
 
 from __future__ import annotations
 
@@ -24,11 +24,20 @@ def run_smoke(
     configs = load_camera_configs(config_path)
     counts: Counter[str] = Counter()
     last_status = {}
+    modalities = {}
     lock = threading.Lock()
 
     def on_frame(frame) -> None:
         with lock:
             counts[frame.camera_name] += 1
+            modalities[frame.camera_name] = {
+                "rgb_bytes": len(frame.jpeg),
+                "depth_bytes": len(frame.depth_z16 or b""),
+                "pointcloud_bytes": len(frame.pointcloud_xyz_f32 or b""),
+                "pointcloud_width": frame.pointcloud_width,
+                "pointcloud_height": frame.pointcloud_height,
+                "pointcloud_frame_id": frame.pointcloud_frame_id,
+            }
 
     def on_status(status) -> None:
         with lock:
@@ -63,10 +72,28 @@ def run_smoke(
         capture.stop()
     ended_ns = time.monotonic_ns()
     with lock:
+        missing_modalities = []
+        for name, config in configs.items():
+            actual = modalities.get(name, {})
+            if int(actual.get("rgb_bytes", 0)) <= 0:
+                missing_modalities.append(f"{name}:rgb")
+            if config.record_depth and int(actual.get("depth_bytes", 0)) <= 0:
+                missing_modalities.append(f"{name}:depth")
+            if (
+                config.pointcloud_enabled
+                and int(actual.get("pointcloud_bytes", 0)) <= 0
+            ):
+                missing_modalities.append(f"{name}:pointcloud")
+        if missing_modalities:
+            raise RuntimeError(
+                "configured camera modalities produced no data: "
+                + ", ".join(missing_modalities)
+            )
         document = {
-            "mode": "read-only-rgb-no-firmware-change",
+            "mode": "read-only-no-firmware-change",
             "frames_per_camera_required": frames_per_camera,
             "counts": dict(counts),
+            "modalities": dict(modalities),
             "last_status": dict(last_status),
             "elapsed_s": (ended_ns - started_ns) / 1e9,
         }

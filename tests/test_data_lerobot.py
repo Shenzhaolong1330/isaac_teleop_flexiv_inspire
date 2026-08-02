@@ -48,3 +48,29 @@ def test_absolute_cartesian_action_view_uses_interpolated_pose():
     assert len(row["action"]) == 18
     assert row["action"][:3] == (1.0, 0.0, 0.0)
     assert row["action.valid"]
+
+
+def test_episode_aligner_indexes_high_rate_stream_only_once_per_key():
+    class CountingList(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    states = CountingList(
+        s({"q": tuple(range(7))}, timestamp, timestamp)
+        for timestamp in range(1, 10_001)
+    )
+    streams = {
+        "camera/head/jpeg": [
+            s(b"head", timestamp) for timestamp in range(100, 10_001, 100)
+        ],
+        "robot/left_arm/state": states,
+        "robot/right_arm/state": states,
+    }
+    rows = EpisodeAligner(
+        streams, action=ActionView("absolute_joint_position")
+    ).rows()
+    assert len(rows) == 100
+    assert states.iterations == 2

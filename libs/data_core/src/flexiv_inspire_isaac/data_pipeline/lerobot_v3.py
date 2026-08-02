@@ -5,9 +5,8 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from io import BytesIO
-import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 from PIL import Image
@@ -53,7 +52,10 @@ HAND_FIELD_TIMING_NAMES = tuple(
 )
 
 
-def lerobot_features(action: ActionView = ActionView()) -> dict[str, dict]:
+def lerobot_features(
+    action: ActionView = ActionView(),
+    image_shapes: Mapping[str, tuple[int, int, int]] | None = None,
+) -> dict[str, dict]:
     features: dict[str, dict] = {
         "observation.arm_pose": {
             "dtype": "float32",
@@ -210,9 +212,10 @@ def lerobot_features(action: ActionView = ActionView()) -> dict[str, dict]:
             "names": [f"{field}_{name}" for name in hand_actuator_names],
         }
     for camera in CAMERAS:
+        shape = (240, 424, 3) if image_shapes is None else image_shapes[camera]
         features[f"observation.images.{camera}"] = {
             "dtype": "video",
-            "shape": (240, 424, 3),
+            "shape": shape,
             "names": ["height", "width", "channel"],
         }
     return features
@@ -321,7 +324,9 @@ def _pose_quaternion_vector(value: Any) -> np.ndarray:
     return _vector(quaternion, 4)
 
 
-def _decode_image(value: Any) -> np.ndarray:
+def _decode_image(
+    value: Any, expected_shape: tuple[int, int, int] | None = None
+) -> np.ndarray:
     if isinstance(value, np.ndarray):
         image = value
     else:
@@ -333,9 +338,14 @@ def _decode_image(value: Any) -> np.ndarray:
         if not isinstance(value, (bytes, bytearray)):
             raise ValueError("image is not JPEG bytes or an ndarray")
         image = np.asarray(Image.open(BytesIO(value)).convert("RGB"))
-    if image.shape != (240, 424, 3) or image.dtype != np.uint8:
+    if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
         raise ValueError(
-            f"image must be uint8 HWC 240x424x3, got {image.shape}/{image.dtype}"
+            f"image must be uint8 HWC with 3 channels, got {image.shape}/{image.dtype}"
+        )
+    if expected_shape is not None and image.shape != expected_shape:
+        raise ValueError(
+            f"image shape changed within episode: expected {expected_shape}, "
+            f"got {image.shape}"
         )
     return image
 
@@ -390,7 +400,12 @@ def _hand_field_timing(row: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def aligned_row_to_frame(row: Mapping[str, Any], task: str, action: ActionView = ActionView()) -> dict[str, Any]:
+def aligned_row_to_frame(
+    row: Mapping[str, Any],
+    task: str,
+    action: ActionView = ActionView(),
+    image_shapes: Mapping[str, tuple[int, int, int]] | None = None,
+) -> dict[str, Any]:
     if not task:
         raise ValueError("LeRobot frames require a non-empty task")
     images = {}
@@ -400,7 +415,8 @@ def aligned_row_to_frame(row: Mapping[str, Any], task: str, action: ActionView =
             # Video features cannot represent a missing frame. Drop the aligned
             # row at the caller rather than inserting a black image.
             raise ValueError(f"required image {camera} is invalid")
-        images[key] = _decode_image(row[key])
+        expected_shape = None if image_shapes is None else image_shapes[camera]
+        images[key] = _decode_image(row[key], expected_shape)
 
     arm_pose = np.concatenate(
         [
@@ -523,6 +539,7 @@ def aligned_row_to_frame(row: Mapping[str, Any], task: str, action: ActionView =
 class ExportResult:
     output_root: str
     frames_written: int
+    frames_dropped_invalid_action: int
     frames_dropped_invalid_image: int
     reload_length: int
 
@@ -537,6 +554,34 @@ def export_rows(
     action: ActionView = ActionView(),
     fps: float = FPS,
 ) -> ExportResult:
+    image_shapes: dict[str, tuple[int, int, int]] | None = None
+    for row in rows:
+        validity = row.get("valid", {})
+        if row.get("action") is None or (
+            isinstance(validity, Mapping)
+            and "action" in validity
+            and not bool(validity["action"])
+        ):
+            continue
+        try:
+            candidate = {
+                camera: tuple(
+                    int(value)
+                    for value in _decode_image(
+                        row[f"observation.images.{camera}"]
+                    ).shape
+                )
+                for camera in CAMERAS
+                if row.get(f"observation.images.{camera}.valid", False)
+            }
+        except (KeyError, ValueError):
+            continue
+        if len(candidate) == len(CAMERAS):
+            image_shapes = candidate
+            break
+    if image_shapes is None:
+        raise ValueError("no fully valid aligned frames to export")
+
     if dataset_class is None:
         try:
             import lerobot
@@ -552,18 +597,26 @@ def export_rows(
         dataset_class = LeRobotDataset
 
     root = Path(output_root)
-    if root.exists() and any(root.iterdir()):
-        raise FileExistsError(f"refusing to overwrite non-empty dataset root: {root}")
+    if root.exists():
+        if not root.is_dir() or any(root.iterdir()):
+            raise FileExistsError(
+                f"refusing to overwrite existing dataset root: {root}"
+            )
+        # LeRobotDataset.create() deliberately requires the root not to exist.
+        # Accept a conventional empty mktemp/mkdir target, but remove only the
+        # exact empty leaf directory immediately before handing it to LeRobot.
+        root.rmdir()
     dataset = dataset_class.create(
         repo_id=repo_id,
         fps=int(fps),
-        features=lerobot_features(action),
+        features=lerobot_features(action, image_shapes),
         root=root,
         robot_type="flexiv_rizon4s_dual_inspire_dftp2",
         use_videos=True,
     )
     written = 0
-    dropped = 0
+    dropped_action = 0
+    dropped_image = 0
     try:
         for row in rows:
             validity = row.get("valid", {})
@@ -573,13 +626,13 @@ def export_rows(
                 and not bool(validity["action"])
             )
             if row.get("action") is None or action_explicitly_invalid:
-                dropped += 1
+                dropped_action += 1
                 continue
             try:
-                frame = aligned_row_to_frame(row, task, action)
+                frame = aligned_row_to_frame(row, task, action, image_shapes)
             except ValueError as exc:
                 if "required image" in str(exc):
-                    dropped += 1
+                    dropped_image += 1
                     continue
                 raise
             dataset.add_frame(frame)
@@ -632,4 +685,10 @@ def export_rows(
         raise RuntimeError(
             "reloaded tactile values must preserve the uint16 value domain"
         )
-    return ExportResult(str(root.resolve()), written, dropped, reload_length)
+    return ExportResult(
+        str(root.resolve()),
+        written,
+        dropped_action,
+        dropped_image,
+        reload_length,
+    )

@@ -9,13 +9,19 @@ cameras:
   pointcloud_enabled: true
   pointcloud_stride: 2
   streams:
-    head: {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: true, pointcloud: true}}
-    left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: false, pointcloud: false}}
-    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, recording: {rgb: true, depth: false, pointcloud: false}}
+    # Fill these optional extrinsics paths after running camera calibration.
+    # Raw depth/point clouds remain in each camera optical frame when blank.
+    head: {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: true}}
+    left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
 
 xr_video:
   enabled: true
   auto_start_with_record: true
+  # Put the PC and Quest on the same AP and use direct UDP/WebRTC.  USB is
+  # retained for automatic Quest setup only; it must not carry the live stream.
+  transport: lan
+  wifi_connection: Deepybo-Prime
   ffmpeg: /usr/bin/ffmpeg
   encoder: auto
   receiver_host: 127.0.0.1
@@ -34,7 +40,8 @@ xr_video:
     head: {distance: 1.5, width: 1.0, offset_x: 0.0, offset_y: 0.0}
     left_wrist: {distance: 1.2, width: 0.4, offset_x: -1.0, offset_y: -0.4}
     right_wrist: {distance: 1.2, width: 0.4, offset_x: 1.0, offset_y: -0.4}
-    lock_mode: lazy
+    # Keep all three video panels fixed where they first appear in the room.
+    lock_mode: world
     look_away_angle: 45.0
     reposition_distance: 0.5
     reposition_delay: 0.5
@@ -43,5 +50,11 @@ xr_video:
 teleop:
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
-  manus_calibration: ""
-  control_enabled: false
+  manus_calibration: artifacts/calibration/manus_inspire_v2.yaml
+  # Teleop may command the arms only after Reset, local authorization, valid
+  # tracking, and the physical deadman pedal are all simultaneously active.
+  control_enabled: true
+  # The middle physical pedal is the arm motion clutch. Quest A remains an
+  # independent guarded Home request and does not require this deadman.
+  # One pedal router owns the evdev device and forwards the middle pedal here.
+  deadman_source: external_bool

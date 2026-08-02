@@ -214,12 +214,21 @@ def resolve_episode(spec: PlaybackSpec, *, for_hardware: bool = False) -> Episod
         raise FileNotFoundError(f"no episode manifests under {root}")
 
     selector = spec.dataset.episode
+    completed_required = spec.dataset.require_completed or for_hardware
+    eligible = candidates
     if selector == "latest":
-        selected = max(candidates, key=lambda item: _candidate_key(*item))
+        eligible = (
+            [item for item in candidates if bool(item[1].get("completed", False))]
+            if completed_required
+            else candidates
+        )
+        if not eligible:
+            raise PlaybackConfigError(f"no completed episodes under {root}")
+        selected = max(eligible, key=lambda item: _candidate_key(*item))
     elif selector.isdigit():
         index = int(selector)
         matching = [
-            item for item in candidates if int(item[1].get("episode_index", -1)) == index
+            item for item in eligible if int(item[1].get("episode_index", -1)) == index
         ]
         if not matching:
             raise FileNotFoundError(f"episode index {index} is absent under {root}")
@@ -236,7 +245,6 @@ def resolve_episode(spec: PlaybackSpec, *, for_hardware: bool = False) -> Episod
         selected = matching[0]
 
     directory, manifest = selected
-    completed_required = spec.dataset.require_completed or for_hardware
     if completed_required and not bool(manifest.get("completed", False)):
         raise PlaybackConfigError(
             f"episode is incomplete: {manifest.get('completion_reason', '')}"

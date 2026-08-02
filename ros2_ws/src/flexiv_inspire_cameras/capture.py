@@ -1,4 +1,4 @@
-"""Independent RGB-only Intel RealSense acquisition.
+"""Independent RGB/depth/point-cloud Intel RealSense acquisition.
 
 This module never changes camera firmware or persistent device settings.  Each
 camera owns its own pipeline and thread, so a slow or disconnected wrist camera
@@ -213,6 +213,10 @@ class CameraFrame:
     pointcloud_width: int | None = None
     pointcloud_height: int | None = None
     pointcloud_stride: int | None = None
+    pointcloud_frame_id: str = ""
+    extrinsics_path: str = ""
+    extrinsics_sha256: str = ""
+    extrinsics_mode: str = ""
     valid: bool = True
     invalid_reason: str = ""
 
@@ -251,11 +255,19 @@ class CameraFrame:
             })
         if self.pointcloud_xyz_f32 is not None:
             payload.update({
-                "pointcloud_encoding": "xyz_f32_le", "pointcloud_frame_id": f"{self.camera_name}_color_optical_frame",
+                "pointcloud_encoding": "xyz_f32_le", "pointcloud_frame_id": self.pointcloud_frame_id or f"{self.camera_name}_color_optical_frame",
                 "pointcloud_width": self.pointcloud_width, "pointcloud_height": self.pointcloud_height,
                 "pointcloud_stride": self.pointcloud_stride,
                 "pointcloud_xyz_f32_b64": base64.b64encode(self.pointcloud_xyz_f32).decode("ascii"),
             })
+        if self.extrinsics_sha256:
+            payload.update(
+                {
+                    "extrinsics_path": self.extrinsics_path,
+                    "extrinsics_sha256": self.extrinsics_sha256,
+                    "extrinsics_mode": self.extrinsics_mode,
+                }
+            )
         return RecordEnvelope(
             topic=topic,
             source_time_ns=self.source_time_ns,
@@ -352,6 +364,19 @@ class RealSenseRgbCapture:
         self._encode_failures = 0
         self._lock = threading.Lock()
         self._align = self.rs.align(self.rs.stream.color) if self.config.depth_enabled else None
+        self._world_T_camera: np.ndarray | None = None
+        if self.config.extrinsics_mode == "eye_to_hand":
+            import yaml
+
+            from .calibration import _matrix
+
+            document = yaml.safe_load(
+                Path(self.config.extrinsics_path).read_text(encoding="utf-8")
+            )
+            pose = document["world_T_camera"]
+            self._world_T_camera = _matrix(
+                pose["xyz"], pose["quaternion_xyzw"]
+            )
 
     def start(self) -> None:
         if self._thread is not None:
@@ -478,6 +503,7 @@ class RealSenseRgbCapture:
         depth_intrinsics = None
         pointcloud_xyz_f32 = None
         pointcloud_width = pointcloud_height = pointcloud_stride = None
+        pointcloud_frame_id = f"{self.config.name}_color_optical_frame"
         if self.config.depth_enabled:
             depth = frames.get_depth_frame()
             if not depth:
@@ -501,6 +527,12 @@ class RealSenseRgbCapture:
                 xyz = np.stack(((u - depth_intrinsics["ppx"]) * sampled / depth_intrinsics["fx"],
                                 (v - depth_intrinsics["ppy"]) * sampled / depth_intrinsics["fy"], sampled), axis=-1)
                 xyz[sampled <= 0.0] = np.nan
+                if self._world_T_camera is not None:
+                    xyz = (
+                        xyz @ self._world_T_camera[:3, :3].T
+                        + self._world_T_camera[:3, 3]
+                    )
+                    pointcloud_frame_id = "world"
                 pointcloud_xyz_f32 = xyz.astype("<f4", copy=False).tobytes(order="C")
                 pointcloud_height, pointcloud_width = sampled.shape
                 pointcloud_stride = stride
@@ -562,6 +594,10 @@ class RealSenseRgbCapture:
             depth_scale_m=depth_scale_m, depth_intrinsics=depth_intrinsics,
             pointcloud_xyz_f32=pointcloud_xyz_f32, pointcloud_width=pointcloud_width,
             pointcloud_height=pointcloud_height, pointcloud_stride=pointcloud_stride,
+            pointcloud_frame_id=pointcloud_frame_id,
+            extrinsics_path=self.config.extrinsics_path,
+            extrinsics_sha256=self.config.extrinsics_sha256,
+            extrinsics_mode=self.config.extrinsics_mode,
         )
 
 
@@ -580,10 +616,42 @@ class TripleRealSenseCapture:
             for name, config in configs.items()
         }
 
+    def _attached_serials(self) -> set[str] | None:
+        """Return cameras that librealsense can actually open for this user.
+
+        Starting a pipeline for a present-but-inaccessible RealSense device can
+        block inside the native extension while holding Python's GIL.  That
+        starves the otherwise independent workers and makes every healthy
+        camera look like a one-frame-per-second stream.  Enumerate once before
+        starting any worker and leave unavailable cameras stopped instead.
+        """
+
+        rs_module = next(iter(self.captures.values())).rs
+        context_factory = getattr(rs_module, "context", None)
+        camera_info = getattr(rs_module, "camera_info", None)
+        if context_factory is None or camera_info is None:
+            return None
+        context = context_factory()
+        return {
+            str(device.get_info(camera_info.serial_number))
+            for device in context.devices
+        }
+
     def start(self) -> None:
         started: list[RealSenseRgbCapture] = []
         try:
+            attached = self._attached_serials()
             for capture in self.captures.values():
+                if attached is not None and capture.config.serial not in attached:
+                    capture._emit_status(
+                        connected=False,
+                        fault=True,
+                        reason=(
+                            "not-attached-or-permission-denied;visible="
+                            + ",".join(sorted(attached))
+                        ),
+                    )
+                    continue
                 capture.start()
                 started.append(capture)
         except Exception:

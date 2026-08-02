@@ -6,7 +6,7 @@ writer then feeds those rows to ``lerobot==0.6.0``. MCAP remains immutable.
 
 from __future__ import annotations
 
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -15,7 +15,6 @@ from .alignment import (
     AlignedValue,
     Pose,
     TimedSample,
-    causal_nearest,
     interpolate_pose,
 )
 
@@ -32,19 +31,16 @@ class ExportTolerance:
 
 def _pose_at(
     samples: Sequence[TimedSample[Pose]],
+    times: Sequence[int],
     timestamp_ns: int,
     tolerance_ns: int,
 ) -> AlignedValue:
-    mapped_samples = [
-        sample for sample in samples if sample.alignment_time_ns is not None
-    ]
-    times = [int(sample.alignment_time_ns) for sample in mapped_samples]
     right_index = bisect_left(times, timestamp_ns)
-    if right_index == 0 or right_index == len(mapped_samples):
+    if right_index == 0 or right_index == len(samples):
         return AlignedValue(None, None, None, False, "pose-not-bracketed")
     return interpolate_pose(
-        mapped_samples[right_index - 1],
-        mapped_samples[right_index],
+        samples[right_index - 1],
+        samples[right_index],
         timestamp_ns,
         tolerance_ns,
     )
@@ -65,6 +61,21 @@ class EpisodeAligner:
         self.tolerance = tolerance
         self.timeline_source = timeline_source.lstrip("/")
         self.action = action
+        self._mapped_streams: dict[str, tuple[TimedSample, ...]] = {}
+        self._stream_times: dict[str, tuple[int, ...]] = {}
+        for name, samples in streams.items():
+            mapped = tuple(
+                sample
+                for sample in samples
+                if sample.alignment_time_ns is not None
+            )
+            times = tuple(int(sample.alignment_time_ns) for sample in mapped)
+            if any(left > right for left, right in zip(times, times[1:])):
+                raise ValueError(
+                    f"stream {name} must be sorted by alignment_time_ns"
+                )
+            self._mapped_streams[name] = mapped
+            self._stream_times[name] = times
 
     def rows(self) -> list[dict[str, Any]]:
         reference = self.streams.get(self.timeline_source, ())
@@ -88,8 +99,10 @@ class EpisodeAligner:
                     self.tolerance.image_ns,
                 )
             for side in ("left", "right"):
+                pose_stream = f"robot/{side}_arm/tcp_pose"
                 pose = _pose_at(
-                    self.streams.get(f"robot/{side}_arm/tcp_pose", ()),
+                    self._mapped_streams.get(pose_stream, ()),
+                    self._stream_times.get(pose_stream, ()),
                     timestamp,
                     self.tolerance.pose_bracket_ns,
                 )
@@ -138,12 +151,18 @@ class EpisodeAligner:
     def _action_at(self, timestamp_ns: int) -> AlignedValue:
         if self.action.name == "sent_command":
             # Exact RDK-acknowledged command: default behavioural-cloning label.
-            return causal_nearest(self.streams.get("control/sent_command", ()), timestamp_ns, self.tolerance.action_ns)
+            return self._causal(
+                "control/sent_command", timestamp_ns, self.tolerance.action_ns
+            )
         if self.action.name == "absolute_joint_position":
             values: list[float] = []
             ages: list[int] = []
             for side in ("left", "right"):
-                value = causal_nearest(self.streams.get(f"robot/{side}_arm/state", ()), timestamp_ns, self.tolerance.state_ns)
+                value = self._causal(
+                    f"robot/{side}_arm/state",
+                    timestamp_ns,
+                    self.tolerance.state_ns,
+                )
                 if not value.valid or not isinstance(value.value, Mapping):
                     return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:{value.reason}")
                 try:
@@ -160,7 +179,13 @@ class EpisodeAligner:
         values: list[float] = []
         ages: list[int] = []
         for side in ("left", "right"):
-            pose = _pose_at(self.streams.get(f"robot/{side}_arm/tcp_pose", ()), timestamp_ns, self.tolerance.pose_bracket_ns)
+            pose_stream = f"robot/{side}_arm/tcp_pose"
+            pose = _pose_at(
+                self._mapped_streams.get(pose_stream, ()),
+                self._stream_times.get(pose_stream, ()),
+                timestamp_ns,
+                self.tolerance.pose_bracket_ns,
+            )
             if not pose.valid or pose.value is None:
                 return AlignedValue(None, None, pose.age_ns, False, f"absolute-cartesian-{side}:{pose.reason}")
             values.extend((*pose.value.pose.xyz, *pose.value.rotation6d))
@@ -175,10 +200,35 @@ class EpisodeAligner:
         timestamp_ns: int,
         tolerance_ns: int,
     ) -> None:
-        aligned = causal_nearest(
-            self.streams.get(stream_name, ()), timestamp_ns, tolerance_ns
-        )
+        aligned = self._causal(stream_name, timestamp_ns, tolerance_ns)
         self._put(row, output_name, aligned)
+
+    def _causal(
+        self, stream_name: str, timestamp_ns: int, tolerance_ns: int
+    ) -> AlignedValue:
+        samples = self._mapped_streams.get(stream_name, ())
+        times = self._stream_times.get(stream_name, ())
+        if not samples:
+            return AlignedValue(None, None, None, False, "timing-unmapped")
+        index = bisect_right(times, timestamp_ns) - 1
+        if index < 0:
+            return AlignedValue(None, None, None, False, "no-causal-sample")
+        sample = samples[index]
+        sample_time = times[index]
+        age = timestamp_ns - sample_time
+        if not sample.valid:
+            return AlignedValue(
+                None,
+                sample_time,
+                age,
+                False,
+                sample.invalid_reason or "invalid",
+            )
+        if age > tolerance_ns:
+            return AlignedValue(
+                None, sample_time, age, False, "outside-tolerance"
+            )
+        return AlignedValue(sample.value, sample_time, age, True)
 
     @staticmethod
     def _put(row: dict[str, Any], name: str, aligned: AlignedValue) -> None:

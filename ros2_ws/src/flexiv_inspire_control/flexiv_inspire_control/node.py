@@ -23,6 +23,7 @@ from geometry_msgs.msg import PoseStamped, TwistStamped, WrenchStamped
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Empty, String, UInt64
@@ -49,7 +50,7 @@ from isaac_teleop_core.control import (
 from .clock_mapper import OnlineClockMapper
 from .conversion import cartesian_target_from_point, command_from_ros
 from .frames import load_base_transforms, rdk_pose_base_to_world
-from .foot_pedal import FootPedalMonitor
+from .foot_pedal import KEY_DOWN
 from .ipc_client import RDKIPCClient
 
 
@@ -96,13 +97,14 @@ class ControlBridge(Node):
             "foot_pedal",
             "/dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd",
         )
+        self.declare_parameter("enable_key_code", KEY_DOWN)
         self.declare_parameter("observation_rate_hz", 200.0)
         self.declare_parameter("max_translation_step_m", 0.01)
         self.declare_parameter("max_rotation_step_rad", 0.10)
-        self.declare_parameter("max_linear_velocity_m_s", 0.05)
-        self.declare_parameter("max_angular_velocity_rad_s", 0.15)
-        self.declare_parameter("max_linear_acceleration_m_s2", 0.25)
-        self.declare_parameter("max_angular_acceleration_rad_s2", 0.50)
+        self.declare_parameter("max_linear_velocity_m_s", 0.20)
+        self.declare_parameter("max_angular_velocity_rad_s", 0.60)
+        self.declare_parameter("max_linear_acceleration_m_s2", 1.0)
+        self.declare_parameter("max_angular_acceleration_rad_s2", 2.0)
         self.declare_parameter("cartesian_control_mode", "position")
         self.declare_parameter(
             "cartesian_position_stiffness",
@@ -116,14 +118,22 @@ class ControlBridge(Node):
             "cartesian_damping_ratio",
             [0.7, 0.7, 0.7, 0.7, 0.7, 0.7],
         )
-        self.declare_parameter("home_left_joints_rad", [])
-        self.declare_parameter("home_right_joints_rad", [])
+        self.declare_parameter(
+            "home_left_joints_rad", Parameter.Type.DOUBLE_ARRAY
+        )
+        self.declare_parameter(
+            "home_right_joints_rad", Parameter.Type.DOUBLE_ARRAY
+        )
         self.declare_parameter("home_max_velocity_rad_s", 0.50)
         self.declare_parameter("home_max_acceleration_rad_s2", 1.0)
         self.declare_parameter("home_tolerance_rad", 0.01)
         self.declare_parameter("home_timeout_s", 20.0)
-        self.declare_parameter("joint_lower_limits_rad", [])
-        self.declare_parameter("joint_upper_limits_rad", [])
+        self.declare_parameter(
+            "joint_lower_limits_rad", Parameter.Type.DOUBLE_ARRAY
+        )
+        self.declare_parameter(
+            "joint_upper_limits_rad", Parameter.Type.DOUBLE_ARRAY
+        )
         self.declare_parameter("max_joint_velocity_rad_s", 0.75)
         self.declare_parameter("max_tcp_linear_speed_m_s", 0.35)
         self.declare_parameter("max_tcp_angular_speed_rad_s", 1.0)
@@ -267,11 +277,12 @@ class ControlBridge(Node):
             cancel_callback=lambda request: CancelResponse.REJECT,
         )
         self._watchdog_timer = self.create_timer(0.01, self._watchdog_tick)
-        self._pedal = FootPedalMonitor(
-            Path(str(self.get_parameter("foot_pedal").value)),
-            self._on_pedal_state,
+        self.create_subscription(
+            Bool,
+            "/teleop/deadman",
+            lambda message: self._on_pedal_state(bool(message.data)),
+            command_qos,
         )
-        self._pedal.start()
         self._poll_thread = threading.Thread(
             target=self._observation_loop,
             name="rdk-observation-bridge",
@@ -293,7 +304,6 @@ class ControlBridge(Node):
 
     def destroy_node(self) -> bool:
         self._stop.set()
-        self._pedal.close()
         for client in (self._ipc_observation, self._ipc_command, self._ipc_maintenance, self._ipc_hand):
             client.close()
         if self._poll_thread is not None:
@@ -392,19 +402,7 @@ class ControlBridge(Node):
                     raise RuntimeError(f"unexpected RDK response {kind}")
                 now = time.monotonic_ns()
                 instance_id = str(payload.get("daemon_instance_id", ""))
-                with self._state_lock:
-                    if self._daemon_instance_id and instance_id != self._daemon_instance_id:
-                        self._arbiter.on_rdk_reconnect()
-                        self._safe_pose_rdk.clear()
-                        self._pending_arm_token = None
-                        self._pending_arm_token_expiry_ns = 0
-                        self._rdk_control_lease_active = False
-                        self._pending_home_token = None
-                        self._pending_home_token_expiry_ns = 0
-                        self._home_authorization_lease_active = False
-                        for mapper in self._clock_mappers.values():
-                            mapper.reset()
-                    self._daemon_instance_id = instance_id
+                self._accept_daemon_instance(instance_id)
                 for side in ("left", "right"):
                     self._publish_arm(side, payload[side], now)
             except Exception as exc:
@@ -420,6 +418,42 @@ class ControlBridge(Node):
                 self._stop.wait(delay)
             else:
                 deadline = time.monotonic()
+
+    def _accept_daemon_instance(self, instance_id: str) -> bool:
+        """Invalidate every persistent IPC channel after a daemon restart.
+
+        Each channel owns an independent persistent seqpacket connection.  The
+        observation channel is the first one to reconnect and reports the new
+        daemon instance.  The other channels must be closed explicitly or
+        their first later request will be sent through a stale connection and
+        fail with ``BrokenPipeError``.
+        """
+
+        changed = False
+        with self._state_lock:
+            if self._daemon_instance_id and instance_id != self._daemon_instance_id:
+                self._arbiter.on_rdk_reconnect()
+                self._safe_pose_rdk.clear()
+                self._pending_arm_token = None
+                self._pending_arm_token_expiry_ns = 0
+                self._rdk_control_lease_active = False
+                self._pending_home_token = None
+                self._pending_home_token_expiry_ns = 0
+                self._home_authorization_lease_active = False
+                for mapper in self._clock_mappers.values():
+                    mapper.reset()
+                changed = True
+            self._daemon_instance_id = instance_id
+        if changed:
+            # Do not close the observation client from its own request thread.
+            # The new observation already arrived through its fresh socket.
+            for client in (
+                self._ipc_command,
+                self._ipc_maintenance,
+                self._ipc_hand,
+            ):
+                client.close()
+        return changed
 
     def _publish_arm(self, side: str, wire: dict, host_receive_ns: int) -> None:
         generation = int(wire.get("connection_generation", "0"))
@@ -623,6 +657,20 @@ class ControlBridge(Node):
             self._publish_control_state()
             return
         self._requested_pub.publish(message)
+        # Teleop publishes a neutral packet while the clutch is released so
+        # observation and recording remain continuous.  It is not a malformed
+        # motion request and must not latch HOLD immediately after arming.
+        if (
+            source is CommandSource.TELEOP
+            and not bool(message.deadman)
+            and int(message.valid_mask) == 0
+        ):
+            self._arbiter.observe_deadman_released(source)
+            self._publish_trace(
+                message, None, None, "teleop_clutch_released", receive_ns
+            )
+            self._publish_control_state()
+            return
         try:
             command = command_from_ros(
                 message,
@@ -634,10 +682,8 @@ class ControlBridge(Node):
             self._arbiter.submit(command, now_monotonic_ns=receive_ns)
         except Exception as exc:
             self._arbiter.reject_invalid_command(source, now_monotonic_ns=receive_ns)
-            # Teleop emits an empty-mask packet when its physical deadman is
-            # released. Envelope validation rejects that packet by design, but
-            # the release must still be observed after latching so a local
-            # operator can acknowledge and clear HOLD_LATCHED.
+            # A malformed non-neutral packet still latches fail-closed. Record
+            # a released deadman so a later local authorization can clear it.
             if not bool(message.deadman):
                 self._arbiter.observe_deadman_released(source)
             self._publish_trace(message, None, None, str(exc), receive_ns)
@@ -928,6 +974,12 @@ class ControlBridge(Node):
     def _on_pedal_state(self, pressed: bool) -> None:
         self._physical_pedal = pressed
         self._update_gates(time.monotonic_ns())
+        snapshot = self._arbiter.snapshot
+        if not pressed and snapshot.state is ControlState.HOLD_LATCHED:
+            # Complete the measured hardware hold before the episode
+            # controller clears this routine latch and re-arms the clutch.
+            self._send_hold_once(snapshot.hold_reason.value)
+        self._publish_control_state()
 
     def _on_arm_authorization(self, message: String) -> None:
         try:
@@ -969,6 +1021,11 @@ class ControlBridge(Node):
                     raise RuntimeError("Home is already active")
                 self._pending_home_token = token
                 self._pending_home_token_expiry_ns = expires
+                # An explicit fresh authorization must be presented on the
+                # next Home command even if our cached daemon lease appears
+                # active. The daemon may have revoked that lease after an IPC
+                # reconnect that happened between control-state updates.
+                self._home_authorization_lease_active = False
             self._publish_home_status("authorized", "")
         except Exception as exc:
             self.get_logger().error(f"Home authorization rejected: {exc}")
@@ -1516,3 +1573,7 @@ def main(args=None) -> None:
         executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

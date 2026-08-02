@@ -155,14 +155,29 @@ def test_hand_motion_rejects_transaction() -> None:
     assert "hand moved" in result.failure_reason
 
 
-def test_residual_rejects_and_reconnect_invalidates_old_zero() -> None:
-    class ResidualBackend(MockBackend):
+def test_raw_tool_load_is_not_mistaken_for_post_zero_residual() -> None:
+    class RawToolLoadBackend(MockBackend):
         def execute_zero_ft(self, side: str, *, local_console: bool) -> None:
             super().execute_zero_ft(side, local_console=local_console)
             self.samples[side] = replace(
                 self.samples[side],
-                raw_ft=np.array([10.0, 0, 0, 0, 0, 0]),
+                raw_ft=np.array([0.0, -12.0, -3.0, 1.0, 0.0, 0.0]),
             )
+
+    backend = RawToolLoadBackend()
+    value, _, _, _ = manager(backend)
+    assert value.zero(request()).success
+
+
+def test_external_residual_rejects_and_reconnect_invalidates_old_zero() -> None:
+    class ResidualBackend(MockBackend):
+        def primitive_state(self, side: str):
+            state = super().primitive_state(side)
+            self.samples[side] = replace(
+                self.samples[side],
+                external_wrench=np.array([2.0, 0, 0, 0, 0, 0]),
+            )
+            return state
 
     residual = ResidualBackend()
     value, _, _, _ = manager(residual)

@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import asdict
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 from .capture import CameraFrame as CapturedCameraFrame, CameraStatus, TripleRealSenseCapture
@@ -43,6 +44,10 @@ def main(args=None) -> int:
                 name: deque(maxlen=2) for name in self._configs
             }
             self._status_queue: deque[CameraStatus] = deque(maxlen=100)
+            self._latest_status: dict[str, CameraStatus] = {}
+            self._frame_counts = {name: 0 for name in self._configs}
+            self._last_health_counts = dict(self._frame_counts)
+            self._last_health_time = time.monotonic()
             self._image_publishers = {}
             self._depth_publishers = {}
             self._pointcloud_publishers = {}
@@ -86,11 +91,12 @@ def main(args=None) -> int:
             self._capture = TripleRealSenseCapture(
                 self._configs,
                 on_frame=self._on_frame,
-                on_status=self._status_queue.append,
+                on_status=self._on_status,
                 recording_mode=recording_mode,
                 raw_rgb_confirmation=raw_rgb_confirmation,
             )
             self.create_timer(0.002, self._drain)
+            self.create_timer(5.0, self._report_health)
             self._capture.start()
             self.get_logger().info(
                 "three independent RealSense RGB+depth pipelines started; "
@@ -109,6 +115,7 @@ def main(args=None) -> int:
             return super().destroy_node()
 
         def _on_frame(self, frame: CapturedCameraFrame) -> None:
+            self._frame_counts[frame.camera_name] += 1
             native = frame.to_record_envelope()
             try:
                 self._deviceio.emit(record_envelope(
@@ -131,6 +138,50 @@ def main(args=None) -> int:
             if self._recorder is not None:
                 self._recorder.submit(native)
             self._frame_queues[frame.camera_name].append(frame)
+
+        def _on_status(self, status: CameraStatus) -> None:
+            previous = self._latest_status.get(status.camera_name)
+            self._latest_status[status.camera_name] = status
+            self._status_queue.append(status)
+            if previous is not None and (
+                previous.connected,
+                previous.fault,
+                previous.reason,
+            ) == (status.connected, status.fault, status.reason):
+                return
+            message = (
+                f"camera {status.camera_name} ({status.serial}): "
+                f"{status.reason}"
+            )
+            if status.fault:
+                self.get_logger().error(message)
+            else:
+                self.get_logger().info(message)
+
+        def _report_health(self) -> None:
+            now = time.monotonic()
+            elapsed = max(now - self._last_health_time, 1e-6)
+            rates = {
+                name: (self._frame_counts[name] - self._last_health_counts[name])
+                / elapsed
+                for name in self._configs
+            }
+            self._last_health_counts = dict(self._frame_counts)
+            self._last_health_time = now
+            summary = ", ".join(
+                f"{name}={rates[name]:.1f}fps"
+                + (
+                    ""
+                    if self._latest_status.get(name, None) is not None
+                    and self._latest_status[name].connected
+                    else f" ({self._latest_status.get(name).reason if name in self._latest_status else 'waiting'})"
+                )
+                for name in self._configs
+            )
+            if any(rate < 0.5 * self._configs[name].fps for name, rate in rates.items()):
+                self.get_logger().warning("camera health: " + summary)
+            else:
+                self.get_logger().info("camera health: " + summary)
 
         def _drain(self) -> None:
             while self._status_queue:
@@ -165,7 +216,11 @@ def main(args=None) -> int:
                 self._depth_publishers[name].publish(depth)
             if frame.pointcloud_xyz_f32 is not None:
                 cloud = PointCloud2()
-                cloud.header = image.header
+                cloud.header.stamp = image.header.stamp
+                cloud.header.frame_id = (
+                    frame.pointcloud_frame_id
+                    or f"{name}_color_optical_frame"
+                )
                 cloud.height, cloud.width = frame.pointcloud_height, frame.pointcloud_width
                 cloud.fields = [PointField(name=axis, offset=index * 4, datatype=PointField.FLOAT32, count=1) for index, axis in enumerate(("x", "y", "z"))]
                 cloud.is_bigendian, cloud.point_step = False, 12

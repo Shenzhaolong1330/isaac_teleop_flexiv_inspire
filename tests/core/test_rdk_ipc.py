@@ -101,6 +101,22 @@ def test_server_refuses_to_replace_regular_file(tmp_path: Path) -> None:
         server.open()
     assert path.read_text(encoding="utf-8") == "do not delete"
 
+
+def test_server_does_not_change_existing_parent_permissions(tmp_path: Path) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    before = stat.S_IMODE(parent.stat().st_mode)
+    server = SeqpacketServer(
+        parent / "rdk.sock",
+        lambda *args: ("error", {}),
+        codec=StructEnvelopeCodec(),
+    )
+    server.open()
+    try:
+        assert stat.S_IMODE(parent.stat().st_mode) == before
+    finally:
+        server.close()
+
 def test_typed_codec_preserves_empty_observe_oneof_presence() -> None:
     codec = TypedEnvelopeCodec.load()
     packet = codec.encode("observe", 1, {})

@@ -70,8 +70,9 @@ def validate_safe_command_message(
     if len(message.trajectory) != 1:
         raise SafeCommandRejected("sent_command must contain exactly one safe point")
     point = message.trajectory[0]
-    if message_time_ns(point.execute_after) >= ttl_ns:
-        raise SafeCommandRejected("execute_after exceeds TTL")
+    execute_after_ns = message_time_ns(point.execute_after)
+    if execute_after_ns < 0 or execute_after_ns >= ttl_ns:
+        raise SafeCommandRejected("execute_after must be in [0, TTL)")
     remaining = ttl_ns - max(0, age_ns)
     output = []
     for side, constant_name, fallback_bit in (

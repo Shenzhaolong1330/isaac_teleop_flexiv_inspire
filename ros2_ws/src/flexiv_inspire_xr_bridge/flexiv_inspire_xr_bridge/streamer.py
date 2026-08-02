@@ -42,28 +42,36 @@ def build_ffmpeg_command(settings: EncoderSettings, encoder: str) -> list[str]:
     if encoder not in {"h264_nvenc", "libx264"}:
         raise ValueError(f"unsupported encoder: {encoder}")
     bitrate = f"{settings.bitrate_mbps:g}M"
+    # Keep at most two frames in the encoder VBV instead of the old one-second
+    # buffer.  The latest-only mailbox already handles overload by dropping.
+    vbv_kbits = max(64, round(settings.bitrate_mbps * 1000 * 2 / settings.fps))
+    vbv_buffer = f"{vbv_kbits}k"
     common = [
         settings.ffmpeg, "-hide_banner", "-loglevel", "warning", "-nostdin",
-        "-fflags", "nobuffer", "-f", "image2pipe", "-vcodec", "mjpeg",
+        "-fflags", "nobuffer+flush_packets", "-f", "image2pipe", "-vcodec", "mjpeg",
         "-r", f"{settings.fps:g}", "-i", "pipe:0", "-an",
     ]
     if encoder == "h264_nvenc":
         codec = [
             "-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
             "-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate,
-            "-bufsize", bitrate, "-g", str(settings.gop), "-bf", "0",
+            "-bufsize", vbv_buffer, "-g", str(settings.gop), "-bf", "0",
+            "-rc-lookahead", "0", "-delay", "0", "-surfaces", "2",
+            "-zerolatency", "1",
             "-pix_fmt", "yuv420p",
         ]
     else:
         codec = [
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate,
+            "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", vbv_buffer,
             "-g", str(settings.gop), "-keyint_min", str(settings.gop),
             "-sc_threshold", "0", "-bf", "0", "-pix_fmt", "yuv420p",
         ]
     destination = f"rtp://{settings.host}:{settings.port}?pkt_size={settings.packet_size}"
     return common + codec + [
-        "-f", "rtp", "-payload_type", str(settings.payload_type), destination,
+        "-fps_mode", "passthrough", "-flush_packets", "1",
+        "-muxdelay", "0", "-muxpreload", "0", "-f", "rtp",
+        "-payload_type", str(settings.payload_type), destination,
     ]
 
 
@@ -111,6 +119,9 @@ class LatestFrameEncoder:
         if not jpeg:
             return
         with self._condition:
+            if self._stop:
+                self.dropped += 1
+                return
             self.submitted += 1
             if self._pending is not None:
                 self.dropped += 1
@@ -121,9 +132,15 @@ class LatestFrameEncoder:
         with self._condition:
             self._stop = True
             self._condition.notify_all()
+        # Closing ffmpeg first also unblocks a worker stuck in a pipe write.
+        self._close_process()
         if self._thread is not None:
             self._thread.join(timeout)
-        self._close_process()
+            if self._thread.is_alive():
+                raise TimeoutError(
+                    f"XR encoder worker on port {self.settings.port} did not stop"
+                )
+            self._thread = None
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -164,11 +181,13 @@ class LatestFrameEncoder:
                 self._pending = None
             assert payload is not None
             try:
-                if self._process is None or self._process.poll() is not None:
-                    if self._process is not None:
+                process = self._process
+                if process is None or process.poll() is not None:
+                    if process is not None:
                         self._switch_or_restart()
                     self._process = self._spawn()
-                stream: BinaryIO | None = self._process.stdin
+                    process = self._process
+                stream: BinaryIO | None = process.stdin
                 if stream is None:
                     raise BrokenPipeError("ffmpeg stdin unavailable")
                 stream.write(payload)

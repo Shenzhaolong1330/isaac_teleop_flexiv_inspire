@@ -219,6 +219,62 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError("flexiv.home.timeout_s must be at least 1 second")
     if not str(home.get("quest_button", "")).strip():
         raise SystemConfigError("flexiv.home.quest_button is required")
+    inspire = _mapping(root.get("inspire"), "inspire")
+    for key in ("left_host", "right_host"):
+        if not str(inspire.get(key, "")).strip():
+            raise SystemConfigError(f"inspire.{key} is required")
+    port = int(inspire.get("port", 0))
+    if not 1 <= port <= 65535:
+        raise SystemConfigError("inspire.port is invalid")
+    if not isinstance(inspire.get("hardware_write_enabled"), bool):
+        raise SystemConfigError("inspire.hardware_write_enabled must be a bool")
+    hand_reset = _mapping(inspire.get("reset"), "inspire.reset")
+    if not isinstance(hand_reset.get("enabled"), bool):
+        raise SystemConfigError("inspire.reset.enabled must be a bool")
+    open_angle = int(hand_reset.get("open_angle", -1))
+    closed_angle = int(hand_reset.get("closed_angle", -1))
+    if (
+        not 0 <= open_angle <= 1000
+        or not 0 <= closed_angle <= 1000
+        or open_angle == closed_angle
+    ):
+        raise SystemConfigError(
+            "inspire.reset open/closed angles must be distinct values in [0,1000]"
+        )
+    _positive(
+        hand_reset.get("pause_s"), "inspire.reset.pause_s", upper=2.0
+    )
+    command_timeout = _positive(
+        hand_reset.get("command_timeout_s"),
+        "inspire.reset.command_timeout_s",
+        upper=10.0,
+    )
+    if command_timeout < 1.0:
+        raise SystemConfigError(
+            "inspire.reset.command_timeout_s must be at least 1 second"
+        )
+    open_tolerance = int(hand_reset.get("open_tolerance", -1))
+    if not 0 <= open_tolerance <= 200:
+        raise SystemConfigError(
+            "inspire.reset.open_tolerance must be in [0,200]"
+        )
+    open_timeout = _positive(
+        hand_reset.get("open_timeout_s"),
+        "inspire.reset.open_timeout_s",
+        upper=30.0,
+    )
+    if open_timeout < 1.0:
+        raise SystemConfigError(
+            "inspire.reset.open_timeout_s must be at least 1 second"
+        )
+    teleop = _mapping(root.get("teleop"), "teleop")
+    if teleop.get("deadman_source") not in {
+        "pedal",
+        "external_bool",
+        "quest_squeeze_both",
+        "quest_squeeze_either",
+    }:
+        raise SystemConfigError("teleop.deadman_source is unsupported")
     export = _mapping(root.get("lerobot_export"), "lerobot_export")
     if int(export.get("schema_version", 0)) != 1:
         raise SystemConfigError("lerobot_export.schema_version must be 1")
@@ -262,7 +318,20 @@ def load_system_config(path: str | Path) -> SystemConfig:
         _positive(stream.get("fps"), f"cameras.streams.{name}.fps", upper=90.0)
         if stream.get("pixel_format") != "rgb8":
             raise SystemConfigError(f"cameras.streams.{name}.pixel_format must be rgb8")
+        extrinsics = str(stream.get("extrinsics", "")).strip()
+        if extrinsics and Path(extrinsics).suffix.lower() not in {".yaml", ".yml"}:
+            raise SystemConfigError(
+                f"cameras.streams.{name}.extrinsics must be a YAML file"
+            )
     xr = _mapping(root.get("xr_video"), "xr_video")
+    if xr.get("transport") not in {"lan", "usb_tcp"}:
+        raise SystemConfigError("xr_video.transport must be lan or usb_tcp")
+    if xr.get("transport") == "lan" and not str(
+        xr.get("wifi_connection", "")
+    ).strip():
+        raise SystemConfigError(
+            "xr_video.wifi_connection is required for lan transport"
+        )
     if xr.get("encoder") not in {"auto", "h264_nvenc", "libx264"}:
         raise SystemConfigError("xr_video.encoder must be auto, h264_nvenc, or libx264")
     if not str(xr.get("ffmpeg", "")).strip() or not str(xr.get("receiver_host", "")).strip():
@@ -324,7 +393,8 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
     camera = {"schema_version": 1, "librealsense_version": "2.57.7", "firmware_policy": "preserve", "recording": {"encoding": cameras["recording_encoding"], "jpeg_quality": cameras["jpeg_quality"], "depth_enabled": bool(cameras["depth_enabled"])}, "cameras": {}}
     for name, stream in cameras["streams"].items():
         recording = stream.get("recording", {})
-        camera["cameras"][name] = {**stream, "jpeg_quality": cameras["jpeg_quality"], "depth_enabled": bool(recording.get("depth", cameras["depth_enabled"])) or bool(recording.get("pointcloud", cameras.get("pointcloud_enabled", False))), "depth_width": int(cameras.get("depth_width", stream["width"])), "depth_height": int(cameras.get("depth_height", stream["height"])), "depth_fps": int(cameras.get("depth_fps", stream["fps"])), "pointcloud_enabled": bool(recording.get("pointcloud", cameras.get("pointcloud_enabled", False))), "pointcloud_stride": int(recording.get("pointcloud_stride", cameras.get("pointcloud_stride", 2))), "fps": int(stream["fps"])}
+        extrinsics = str(stream.get("extrinsics", "")).strip()
+        camera["cameras"][name] = {**stream, "extrinsics": str(config.resolve(extrinsics)) if extrinsics else "", "jpeg_quality": cameras["jpeg_quality"], "depth_enabled": bool(recording.get("depth", cameras["depth_enabled"])) or bool(recording.get("pointcloud", cameras.get("pointcloud_enabled", False))), "depth_width": int(cameras.get("depth_width", stream["width"])), "depth_height": int(cameras.get("depth_height", stream["height"])), "depth_fps": int(cameras.get("depth_fps", stream["fps"])), "pointcloud_enabled": bool(recording.get("pointcloud", cameras.get("pointcloud_enabled", False))), "pointcloud_stride": int(recording.get("pointcloud_stride", cameras.get("pointcloud_stride", 2))), "fps": int(stream["fps"])}
     xr_params = {
         "enabled": bool(xr["enabled"]),
         "ffmpeg": xr["ffmpeg"],
@@ -368,7 +438,43 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
         "camera.yaml": camera,
         "xr_bridge.yaml": {"flexiv_inspire_xr_bridge": {"ros__parameters": xr_params}},
         "isaac_camera_receiver.yaml": receiver,
-        "dftp.yaml": {"flexiv_inspire_dftp_driver": {"ros__parameters": {"left_host": inspire["left_host"], "right_host": inspire["right_host"], "port": inspire["port"], "state_hz": sampling["hand_state_hz"], "tactile_hz": sampling["tactile_hz"], "hardware_write_enabled": bool(inspire["hardware_write_enabled"]), "local_session_id": session["id"], "local_write_confirmation": ""}}},
+        "dftp.yaml": {
+            "flexiv_inspire_dftp_driver": {
+                "ros__parameters": {
+                    "left_host": inspire["left_host"],
+                    "right_host": inspire["right_host"],
+                    "port": inspire["port"],
+                    "state_hz": sampling["hand_state_hz"],
+                    "tactile_hz": sampling["tactile_hz"],
+                    "hardware_write_enabled": bool(
+                        inspire["hardware_write_enabled"]
+                    ),
+                    "local_session_id": session["id"],
+                    "local_write_confirmation": (
+                        "DFTP-LOCAL-CONTROL-AUTHORIZED"
+                        if bool(inspire["hardware_write_enabled"])
+                        else ""
+                    ),
+                    "hand_reset_enabled": bool(inspire["reset"]["enabled"]),
+                    "hand_reset_open_angle": int(
+                        inspire["reset"]["open_angle"]
+                    ),
+                    "hand_reset_closed_angle": int(
+                        inspire["reset"]["closed_angle"]
+                    ),
+                    "hand_reset_pause_s": float(inspire["reset"]["pause_s"]),
+                    "hand_reset_command_timeout_s": float(
+                        inspire["reset"]["command_timeout_s"]
+                    ),
+                    "hand_reset_open_tolerance": int(
+                        inspire["reset"]["open_tolerance"]
+                    ),
+                    "hand_reset_open_timeout_s": float(
+                        inspire["reset"]["open_timeout_s"]
+                    ),
+                }
+            }
+        },
         "control_bridge.yaml": {
             "/**": {
                 "ros__parameters": {
@@ -409,15 +515,22 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     ],
                     "enable_key_code": pedal["enable_key_code"],
                     "cartesian_control_mode": flexiv["cartesian_control"]["mode"],
-                    "cartesian_position_stiffness": flexiv[
-                        "cartesian_control"
-                    ]["position_stiffness"],
-                    "cartesian_impedance_stiffness": flexiv[
-                        "cartesian_control"
-                    ]["impedance_stiffness"],
-                    "cartesian_damping_ratio": flexiv[
-                        "cartesian_control"
-                    ]["damping_ratio"],
+                    "cartesian_position_stiffness": [
+                        float(value)
+                        for value in flexiv["cartesian_control"][
+                            "position_stiffness"
+                        ]
+                    ],
+                    "cartesian_impedance_stiffness": [
+                        float(value)
+                        for value in flexiv["cartesian_control"][
+                            "impedance_stiffness"
+                        ]
+                    ],
+                    "cartesian_damping_ratio": [
+                        float(value)
+                        for value in flexiv["cartesian_control"]["damping_ratio"]
+                    ],
                     "home_left_joints_rad": flexiv["home"]["left_joints_rad"],
                     "home_right_joints_rad": flexiv["home"][
                         "right_joints_rad"
@@ -433,7 +546,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                 }
             }
         },
-        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/episode/control"}}},
+        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "deadman_source": teleop["deadman_source"], "foot_pedal": pedal["device"], "enable_key_code": pedal["enable_key_code"], "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/episode/control"}}},
         "pedal.yaml": {"/**": {"ros__parameters": {"foot_pedal": pedal["device"], "rerecord_key_code": pedal["rerecord_key_code"], "enable_key_code": pedal["enable_key_code"], "record_toggle_key_code": pedal["record_toggle_key_code"]}}},
         "lerobot_export.yaml": root["lerobot_export"],
     }

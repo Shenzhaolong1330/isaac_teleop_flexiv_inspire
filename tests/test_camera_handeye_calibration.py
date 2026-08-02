@@ -1,6 +1,12 @@
 import numpy as np
 
-from flexiv_inspire_isaac.cameras.calibration import _inverse, _matrix, _pose, solve_samples
+from flexiv_inspire_isaac.cameras.calibration import (
+    _inverse,
+    _matrix,
+    _pose,
+    _rotation_distance_deg,
+    solve_samples,
+)
 
 
 def _rotated_pose(xyz, quaternion):
@@ -33,3 +39,12 @@ def test_eye_to_hand_recovers_world_to_camera_transform():
     samples = [{"world_T_tcp": _pose(gripper), "camera_T_target": _pose(_inverse(world_camera) @ gripper @ tcp_target)} for gripper in grippers]
     solved = solve_samples("eye_to_hand", samples)
     np.testing.assert_allclose(solved["world_T_camera"]["xyz"], [0.4, -0.2, 0.7], atol=1e-6)
+
+
+def test_rotation_diversity_accepts_in_place_camera_calibration_motion():
+    identity = _pose(_matrix([0, 0, 0], [0, 0, 0, 1]))
+    quarter_turn = _pose(
+        _matrix([0, 0, 0], [0, 0, 0.38268343, 0.92387953])
+    )
+
+    assert np.isclose(_rotation_distance_deg(identity, quarter_turn), 45.0)

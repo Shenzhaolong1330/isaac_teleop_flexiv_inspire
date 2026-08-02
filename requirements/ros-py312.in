@@ -1,5 +1,7 @@
 grpcio==1.71.0
 grpcio-tools==1.71.0
+setuptools>=68,<80
+cffi>=1.17,<2
 protobuf==5.29.5
 mcap>=1.2,<2
 mcap-ros2-support>=0.5,<1

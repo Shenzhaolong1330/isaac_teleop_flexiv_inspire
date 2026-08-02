@@ -117,6 +117,16 @@ def test_config_and_latest_episode_selection(tmp_path: Path) -> None:
     assert spec.replay.enabled is False
 
 
+def test_latest_selection_skips_newer_incomplete_attempt(tmp_path: Path) -> None:
+    spec = load_playback_config(_config(tmp_path))
+    completed = _episode(tmp_path, "complete", index=1)
+    _episode(tmp_path, "interrupted", index=2, completed=False)
+
+    result = resolve_episode(spec)
+
+    assert result.directory == completed
+
+
 def test_hardware_selection_rejects_incomplete_or_mid_episode_home(tmp_path: Path) -> None:
     _episode(tmp_path, "paused", index=1, pause_count=2)
     spec = load_playback_config(_config(tmp_path, episode="paused"))

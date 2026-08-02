@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
+from types import SimpleNamespace
 import time
 
 import numpy as np
@@ -10,7 +12,11 @@ pytest.importorskip("flexiv_inspire_interfaces")
 
 from flexiv_inspire_control.node import ControlBridge
 from flexiv_inspire_control.frames import BaseTransform
-from flexiv_inspire_control.teleop_input_node import _validated_squeezes
+from flexiv_inspire_control.teleop_input_node import (
+    TeleopInput,
+    _validated_button,
+    _validated_squeezes,
+)
 from isaac_teleop_core.command import (
     CommandPoint,
     ControlRepresentation,
@@ -32,6 +38,32 @@ def test_quest_squeeze_accepts_only_normalized_values() -> None:
     ) == {"left": 0.25, "right": 1.0}
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    ((False, False), (True, True), (0, False), (1, True), (0.0, False), (1.0, True)),
+)
+def test_quest_button_accepts_boolean_and_normalized_transport_values(
+    raw: object, expected: bool
+) -> None:
+    assert _validated_button(raw) is expected
+
+
+@pytest.mark.parametrize("raw", (-1, 0.5, 2, math.nan, "true", None))
+def test_quest_button_rejects_ambiguous_values(raw: object) -> None:
+    with pytest.raises(ValueError, match="Quest home button"):
+        _validated_button(raw)
+
+
+def test_middle_pedal_directly_gates_teleop_mapping() -> None:
+    node = TeleopInput.__new__(TeleopInput)
+    node._pedal_pressed = False
+    node.get_parameter = lambda name: Parameter("pedal")
+    assert node._deadman(time.monotonic_ns()) is False
+
+    node._pedal_pressed = True
+    assert node._deadman(time.monotonic_ns()) is True
+
+
 class Parameter:
     def __init__(self, value):
         self.value = value
@@ -40,6 +72,95 @@ class Parameter:
 class Command:
     valid_mask = ValidMask.LEFT_ARM | ValidMask.RIGHT_ARM
     representation = ControlRepresentation.CARTESIAN_ROT6D
+
+
+class EpochClient:
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    def close(self) -> None:
+        self.close_count += 1
+
+
+class EpochArbiter:
+    def __init__(self) -> None:
+        self.reconnect_count = 0
+
+    def on_rdk_reconnect(self) -> None:
+        self.reconnect_count += 1
+
+
+class EpochMapper:
+    def __init__(self) -> None:
+        self.reset_count = 0
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+
+def test_daemon_instance_change_closes_every_other_persistent_ipc_client() -> None:
+    import threading
+
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._daemon_instance_id = "daemon-old"
+    bridge._arbiter = EpochArbiter()
+    bridge._safe_pose_rdk = {"left": np.ones(7), "right": np.ones(7)}
+    bridge._pending_arm_token = "arm-token"
+    bridge._pending_arm_token_expiry_ns = 1
+    bridge._rdk_control_lease_active = True
+    bridge._pending_home_token = "home-token"
+    bridge._pending_home_token_expiry_ns = 1
+    bridge._home_authorization_lease_active = True
+    bridge._clock_mappers = {"left": EpochMapper(), "right": EpochMapper()}
+    bridge._ipc_command = EpochClient()
+    bridge._ipc_maintenance = EpochClient()
+    bridge._ipc_hand = EpochClient()
+
+    assert bridge._accept_daemon_instance("daemon-new") is True
+    assert bridge._daemon_instance_id == "daemon-new"
+    assert bridge._arbiter.reconnect_count == 1
+    assert bridge._safe_pose_rdk == {}
+    assert bridge._pending_arm_token is None
+    assert bridge._pending_home_token is None
+    assert bridge._rdk_control_lease_active is False
+    assert bridge._home_authorization_lease_active is False
+    assert all(mapper.reset_count == 1 for mapper in bridge._clock_mappers.values())
+    assert bridge._ipc_command.close_count == 1
+    assert bridge._ipc_maintenance.close_count == 1
+    assert bridge._ipc_hand.close_count == 1
+
+    # Repeated observations from the same daemon must keep live clients open.
+    assert bridge._accept_daemon_instance("daemon-new") is False
+    assert bridge._ipc_command.close_count == 1
+
+
+def test_fresh_home_token_forces_next_request_to_refresh_daemon_lease() -> None:
+    import threading
+
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._session_id = "session"
+    bridge._home_inflight = False
+    bridge._home_authorization_lease_active = True
+    bridge._pending_home_token = None
+    bridge._pending_home_token_expiry_ns = 0
+
+    ControlBridge._on_home_authorization(
+        bridge,
+        SimpleNamespace(
+            data=json.dumps(
+                {
+                    "session_id": "session",
+                    "one_time_token": "fresh-token",
+                    "expires_monotonic_ns": time.monotonic_ns() + 1_000_000_000,
+                }
+            )
+        ),
+    )
+
+    assert bridge._pending_home_token == "fresh-token"
+    assert bridge._home_authorization_lease_active is False
 
 
 def test_candidate_targets_do_not_advance_safe_pose_before_ack() -> None:

@@ -10,12 +10,23 @@ XR_JSON="${XR_RUNTIME_JSON:-$CXR_ROOT/openxr_cloudxr.json}"
 CXR_RUN="${NV_CXR_RUNTIME_DIR:-$CXR_ROOT/run}"
 if [[ ! -f "$CONFIG_PATH" ]]; then echo "receiver config not found: $CONFIG_PATH" >&2; exit 2; fi
 if [[ ! -x "$CAMERA_ROOT/camera_streamer.sh" ]]; then echo "IsaacTeleop camera streamer missing" >&2; exit 2; fi
-if [[ ! -f "$XR_JSON" || ! -f "$CXR_RUN/cloudxr.env" ]]; then
-  echo "CloudXR environment is not initialized. Run orchestration/run_cloudxr_runtime.sh in a separate local terminal first." >&2
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
+  if [[ -f "$XR_JSON" && -f "$CXR_RUN/cloudxr.env" && -f "$CXR_RUN/cloudxr.pid" ]]; then
+    runtime_pid="$(tr -dc '0-9' < "$CXR_RUN/cloudxr.pid")"
+    if [[ -n "$runtime_pid" ]] && kill -0 "$runtime_pid" 2>/dev/null; then
+      break
+    fi
+  fi
+  sleep 0.2
+done
+if [[ ! -f "$XR_JSON" || ! -f "$CXR_RUN/cloudxr.env" || ! -f "$CXR_RUN/cloudxr.pid" ]]; then
+  echo "CloudXR runtime did not become ready within 60 seconds." >&2
   exit 2
 fi
-if ! pgrep -f 'isaacteleop\.cloudxr' >/dev/null 2>&1; then
-  echo "CloudXR runtime is not running. Start orchestration/run_cloudxr_runtime.sh in a separate local terminal." >&2
+runtime_pid="$(tr -dc '0-9' < "$CXR_RUN/cloudxr.pid")"
+if [[ -z "$runtime_pid" ]] || ! kill -0 "$runtime_pid" 2>/dev/null; then
+  echo "CloudXR runtime process is not alive after 60 seconds." >&2
   exit 2
 fi
 if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then

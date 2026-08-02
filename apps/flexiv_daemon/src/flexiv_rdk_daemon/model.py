@@ -188,13 +188,20 @@ def residual_within_limits(
     max_force_n: float,
     max_torque_nm: float,
 ) -> tuple[bool, str]:
+    """Check the compensated TCP wrench after an F/T zero operation.
+
+    ``raw_ft`` is the direct sensor reading in the flange frame and therefore
+    still contains the installed tool's gravitational wrench.  It is checked
+    for finite values and stability when the observation window is built, but
+    it must not be expected to converge to zero.  Flexiv's ZeroFTSensor example
+    likewise assesses the estimated external TCP wrench before and after the
+    primitive.
+    """
+
     reasons: list[str] = []
-    for label, vector in (
-        ("raw_ft", stats.raw_ft.mean),
-        ("external_wrench", stats.external_wrench.mean),
-    ):
-        if math.sqrt(sum(v * v for v in vector[:3])) > max_force_n:
-            reasons.append(f"{label}_force_residual")
-        if math.sqrt(sum(v * v for v in vector[3:])) > max_torque_nm:
-            reasons.append(f"{label}_torque_residual")
+    vector = stats.external_wrench.mean
+    if math.sqrt(sum(v * v for v in vector[:3])) > max_force_n:
+        reasons.append("external_wrench_force_residual")
+    if math.sqrt(sum(v * v for v in vector[3:])) > max_torque_nm:
+        reasons.append("external_wrench_torque_residual")
     return not reasons, ",".join(reasons)

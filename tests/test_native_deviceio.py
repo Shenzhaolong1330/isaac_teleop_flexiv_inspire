@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import socket
 import stat
+import struct
 import time
 
 from mcap.reader import make_reader
 
-from isaac_teleop_core.deviceio import AsyncDeviceIOEmitter, record_envelope
+from isaac_teleop_core.deviceio import (
+    AsyncDeviceIOEmitter,
+    FRAME_HEADER,
+    record_envelope,
+)
 from flexiv_inspire_isaac.data_pipeline.episode_manager import EpisodeSession
-from flexiv_inspire_isaac.data_pipeline.manifest import canonical_yaml_sha256
+from flexiv_inspire_isaac.data_pipeline.manifest import (
+    canonical_yaml_sha256,
+    local_minute_timestamp,
+)
 from flexiv_inspire_isaac.data_pipeline.native_deviceio import NativeDeviceIOIngress
 
 
@@ -21,6 +31,11 @@ def _wait(predicate, timeout_s: float = 2.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("condition did not become true")
+
+
+def test_local_collection_timestamp_contains_date_hour_and_minute():
+    instant = datetime(2026, 7, 31, 23, 59, 42, tzinfo=timezone.utc)
+    assert local_minute_timestamp(instant) == "20260731_2359"
 
 
 def _envelope(sequence: int, topic: str = "/robot/left_arm/state"):
@@ -70,11 +85,46 @@ def test_invalid_datagram_is_counted_without_stopping_ingress(tmp_path):
     received = []
     ingress = NativeDeviceIOIngress(endpoint, received.append)
     ingress.start()
-    sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    sender.sendto(b"{}", str(endpoint))
-    sender.sendto(json.dumps(_envelope(2)).encode(), str(endpoint))
+    sender = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sender.connect(str(endpoint))
+    invalid = b"{}"
+    valid = json.dumps(_envelope(2)).encode()
+    sender.sendall(
+        FRAME_HEADER.pack(len(invalid)) + invalid
+        + FRAME_HEADER.pack(len(valid)) + valid
+    )
     _wait(lambda: ingress.stats().invalid == 1 and len(received) == 1)
     sender.close()
+    ingress.close()
+
+
+def test_large_camera_record_exceeding_unix_datagram_limit_is_delivered(tmp_path):
+    endpoint = tmp_path / "large.sock"
+    received = []
+    ingress = NativeDeviceIOIngress(endpoint, received.append)
+    ingress.start()
+    emitter = AsyncDeviceIOEmitter("camera", endpoint)
+    envelope = record_envelope(
+        producer="camera",
+        topic="/camera/head/color/image_raw/compressed",
+        source_time_ns=1,
+        host_receive_time_ns=2,
+        sequence=1,
+        payload={"combined_modalities": "x" * 750_000},
+    )
+    emitter.emit(envelope)
+    _wait(
+        lambda: any(
+            item["topic"] == "/camera/head/color/image_raw/compressed"
+            for item in received
+        )
+    )
+    delivered = next(
+        item for item in received
+        if item["topic"] == "/camera/head/color/image_raw/compressed"
+    )
+    assert delivered["payload"] == envelope["payload"]
+    emitter.close()
     ingress.close()
 
 
@@ -119,6 +169,12 @@ def test_native_ingress_writes_actual_deviceio_mcap_and_source_stats(tmp_path):
             topics.append(channel.topic)
     assert "/robot/left_arm/state" in topics
     manifest = json.loads(episode.manifest_path.read_text())
+    assert re.fullmatch(
+        r"\d{8}_\d{4}", manifest["collection_timestamp_local"]
+    )
+    assert episode.directory.name == (
+        "episode_" + manifest["collection_timestamp_local"]
+    )
     assert manifest["deviceio_capture_layer"] == "native-pre-dds"
     assert manifest["streams"]["robot/left_arm/state"]["samples"] == 1
 

@@ -61,3 +61,19 @@ def test_relative_bone_rotation_produces_named_flexion() -> None:
     hand[proximal, 3:] = quaternion_x(0.4)
     features = hand_features(hand)
     assert features["index_mcp_flexion"] == pytest.approx(0.4)
+
+
+def test_thumb_abduction_uses_moving_metacarpal_bone_direction() -> None:
+    hand = valid_hand()
+    metacarpal = TRANSPORT_JOINT_NAMES.index("thumb_metacarpal")
+    proximal = TRANSPORT_JOINT_NAMES.index("thumb_proximal")
+    hand[metacarpal, :3] = [0.10, 0.10, 0.10]
+    hand[proximal, :3] = [0.20, 0.10, 0.10]
+    assert hand_features(hand)["thumb_cmc_abduction"] == pytest.approx(0.0)
+
+    # The CMC joint location is unchanged; rotating the metacarpal bone by
+    # 90 degrees must change the extracted abduction by 90 degrees.
+    hand[proximal, :3] = [0.10, 0.20, 0.10]
+    assert hand_features(hand)["thumb_cmc_abduction"] == pytest.approx(
+        math.pi / 2
+    )

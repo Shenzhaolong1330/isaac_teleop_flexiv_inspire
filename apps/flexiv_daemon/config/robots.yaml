@@ -37,4 +37,6 @@ ft_zero:
   max_pre_external_mean_torque_nm: 0.3
   max_pre_external_peak_force_n: 5.0
   max_pre_external_peak_torque_nm: 0.5
-  max_hand_delta: 1.0
+  # Inspire angle feedback is integer 0..1000 and exhibits about 2 counts of
+  # stationary quantization noise. Five counts still rejects real hand motion.
+  max_hand_delta: 5.0

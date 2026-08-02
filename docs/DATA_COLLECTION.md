@@ -20,11 +20,14 @@ recording:
 
 ```bash
 cd /home/hb/isaac_teleop_flexiv_inspire
-./scripts/collect.sh
+robot record
 ```
 
-该命令不接受参数。它读取 `config/site.yaml`，自动生成子配置，启动脚踏路由
-和 episode 控制器，建立本机 Home/teleop 授权，并立即开始第一条录制。
+该命令读取 `config/site.yaml`，自动生成子配置，启动所需服务、建立本机
+Home/teleop 授权，并立即开始第一条录制。它以前台方式占用终端；完成配置的
+episode 数量会自动退出，`Ctrl-C` 会保存当前条、等待 MCAP/DeviceIO 落盘并
+停止本次录制，不需要再执行 `robot stop`。`./scripts/collect.sh` 仅保留为兼容
+入口，用于支持服务已经单独运行时只启动脚踏和 episode 控制器。
 
 录制期间的行为固定如下：
 
@@ -43,13 +46,30 @@ cd /home/hb/isaac_teleop_flexiv_inspire
 
 ```text
 sessions/pick_place_demo/
-  episode_000001_attempt_01_ab12cd34/
+  episode_000001_attempt_01_20260731_2359/
     manifest.json
     deviceio.mcap
     ros_mcap/
-  episode_000002_attempt_01_ef56ab78/
+  episode_000002_attempt_01_20260801_0004/
     ...
 ```
+
+目录名中的 `YYYYMMDD_HHMM` 是该 episode 创建时的本机日期、小时和分钟；
+同一值也写入 `manifest.json` 的 `collection_timestamp_local` 字段。目录内文件
+保持固定名称，确保可视化、回放和 LeRobot 导出继续按 manifest 稳定读取。
+如果同一分钟内再次创建完全相同的 episode/attempt，录制会拒绝覆盖已有目录。
+
+转换默认选择当前数据集最新的已完成 episode，并自动使用隔离的 data 环境：
+
+```bash
+robot convert
+robot convert --action-view absolute_joint_position
+robot convert --action-view absolute_cartesian_pose
+```
+
+默认动作视图来自 `config/recording.yaml`；三种视图分别是 30 维实际下发命令、
+14 维双臂绝对关节位置和 18 维 world 下双臂绝对 EE 位姿。输出写入
+`artifacts/lerobot/<dataset>/<episode>/<action-view>/`，已有非空目录不会被覆盖。
 
 `config/site.yaml` 现在只是组合入口，不再堆全部参数：
 

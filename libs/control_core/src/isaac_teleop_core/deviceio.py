@@ -1,10 +1,13 @@
 """Non-blocking native DeviceIO transport used before the ROS/DDS boundary.
 
 Producers enqueue JSON-compatible RecordEnvelope dictionaries. A background
-thread sends Unix datagrams to the episode collector, so recorder outages never
-block robot, Modbus, or camera I/O loops. Sensor data is bounded/drop-oldest;
-critical control and maintenance events are retained and close() fails if they
-cannot be delivered.
+thread sends length-framed records over a local Unix stream to the episode
+collector, so recorder outages never block robot, Modbus, or camera I/O loops.
+The stream framing is required for RGB + depth + point-cloud records: AF_UNIX
+datagrams are limited by the kernel socket buffer even when the application
+advertises a larger limit. Sensor data is bounded/drop-oldest; critical control
+and maintenance events are retained and close() fails if they cannot be
+delivered.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import threading
 import time
 from typing import Any, Mapping
@@ -22,6 +26,7 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = 1
 DEFAULT_MAX_DATAGRAM = 2 * 1024 * 1024
+FRAME_HEADER = struct.Struct("!I")
 
 
 def default_deviceio_socket() -> Path:
@@ -90,7 +95,7 @@ class DeviceIOStats:
 
 
 class AsyncDeviceIOEmitter:
-    """Bounded priority-aware Unix datagram sender."""
+    """Bounded priority-aware, length-framed Unix stream sender."""
 
     def __init__(
         self,
@@ -201,9 +206,7 @@ class AsyncDeviceIOEmitter:
             self._critical.appendleft(envelope)
 
     def _run(self) -> None:
-        sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        sender.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, self.max_datagram_bytes * 2)
-        sender.setblocking(False)
+        sender: socket.socket | None = None
         try:
             while True:
                 envelope, critical = self._next()
@@ -218,7 +221,7 @@ class AsyncDeviceIOEmitter:
                     ).encode("utf-8")
                     if len(encoded) > self.max_datagram_bytes:
                         raise ValueError(
-                            f"DeviceIO datagram is {len(encoded)} bytes; limit is "
+                            f"DeviceIO frame is {len(encoded)} bytes; limit is "
                             f"{self.max_datagram_bytes}"
                         )
                 except Exception as exc:
@@ -230,8 +233,15 @@ class AsyncDeviceIOEmitter:
                             return
                     continue
                 try:
-                    sender.sendto(encoded, str(self.socket_path))
+                    if sender is None:
+                        sender = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        sender.settimeout(0.25)
+                        sender.connect(str(self.socket_path))
+                    sender.sendall(FRAME_HEADER.pack(len(encoded)) + encoded)
                 except OSError:
+                    if sender is not None:
+                        sender.close()
+                        sender = None
                     with self._condition:
                         self._counters["reconnect_failures"] += 1
                     if critical:
@@ -243,9 +253,16 @@ class AsyncDeviceIOEmitter:
                     continue
                 with self._condition:
                     self._counters["sent"] += 1
-                self._maybe_send_stats(sender)
+                try:
+                    self._maybe_send_stats(sender)
+                except OSError:
+                    sender.close()
+                    sender = None
+                    with self._condition:
+                        self._counters["reconnect_failures"] += 1
         finally:
-            sender.close()
+            if sender is not None:
+                sender.close()
 
     def _maybe_send_stats(self, sender: socket.socket) -> None:
         now = time.monotonic_ns()
@@ -262,12 +279,7 @@ class AsyncDeviceIOEmitter:
             sequence=self._stats_sequence,
             payload=stats.__dict__,
         )
-        try:
-            sender.sendto(
-                json.dumps(
-                    envelope, separators=(",", ":"), allow_nan=False
-                ).encode(),
-                str(self.socket_path),
-            )
-        except OSError:
-            pass
+        encoded = json.dumps(
+            envelope, separators=(",", ":"), allow_nan=False
+        ).encode()
+        sender.sendall(FRAME_HEADER.pack(len(encoded)) + encoded)

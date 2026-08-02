@@ -8,10 +8,11 @@ import os
 from pathlib import Path
 import socket
 import stat
+import struct
 import threading
 from typing import Any, Callable, Mapping
 
-from isaac_teleop_core.deviceio import DEFAULT_MAX_DATAGRAM
+from isaac_teleop_core.deviceio import DEFAULT_MAX_DATAGRAM, FRAME_HEADER
 
 
 REQUIRED_FIELDS = {
@@ -40,7 +41,7 @@ class NativeIngressStats:
 
 def validate_native_envelope(document: Any) -> dict[str, Any]:
     if not isinstance(document, dict):
-        raise ValueError("native DeviceIO datagram must be a JSON object")
+        raise ValueError("native DeviceIO frame must be a JSON object")
     missing = REQUIRED_FIELDS.difference(document)
     if missing:
         raise ValueError(f"native DeviceIO envelope missing {sorted(missing)}")
@@ -60,7 +61,7 @@ def validate_native_envelope(document: Any) -> dict[str, Any]:
 
 
 class NativeDeviceIOIngress:
-    """AF_UNIX/SOCK_DGRAM receiver with mode-0600 endpoint ownership."""
+    """Length-framed AF_UNIX stream receiver with a private endpoint."""
 
     def __init__(
         self,
@@ -76,6 +77,9 @@ class NativeDeviceIOIngress:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._peer_lock = threading.Lock()
+        self._peers: set[socket.socket] = set()
+        self._workers: set[threading.Thread] = set()
         self._received = 0
         self._invalid = 0
         self._oversized = 0
@@ -98,11 +102,30 @@ class NativeDeviceIOIngress:
                 )
             if info.st_uid != os.getuid():
                 raise RuntimeError("existing DeviceIO socket is owned by another user")
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe.settimeout(0.2)
+            try:
+                probe.connect(str(self.socket_path))
+            except ConnectionRefusedError:
+                pass
+            except OSError as exc:
+                raise RuntimeError(
+                    f"cannot safely replace existing DeviceIO socket {self.socket_path}: {exc}"
+                ) from exc
+            else:
+                raise RuntimeError(
+                    f"an active DeviceIO collector already owns {self.socket_path}"
+                )
+            finally:
+                probe.close()
+            after = self.socket_path.lstat()
+            if after.st_dev != info.st_dev or after.st_ino != info.st_ino:
+                raise RuntimeError("DeviceIO socket changed during stale-path probe")
             self.socket_path.unlink()
-        receiver = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        receiver.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+        receiver = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         receiver.bind(str(self.socket_path))
         os.chmod(self.socket_path, 0o600)
+        receiver.listen(16)
         receiver.settimeout(0.1)
         self._socket = receiver
         self._thread = threading.Thread(
@@ -126,12 +149,27 @@ class NativeDeviceIOIngress:
 
     def close(self, timeout_s: float = 2.0) -> None:
         self._stop.set()
+        if self._socket is not None:
+            self._socket.close()
+        with self._peer_lock:
+            peers = tuple(self._peers)
+        for peer in peers:
+            try:
+                peer.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            peer.close()
         if self._thread is not None:
             self._thread.join(timeout_s)
             if self._thread.is_alive():
                 raise TimeoutError("native DeviceIO ingress did not stop")
+        with self._peer_lock:
+            deadline_workers = tuple(self._workers)
+        for worker in deadline_workers:
+            worker.join(timeout_s)
+        if any(worker.is_alive() for worker in deadline_workers):
+            raise TimeoutError("native DeviceIO peer worker did not stop")
         if self._socket is not None:
-            self._socket.close()
             self._socket = None
         if self.socket_path.exists() and not self.socket_path.is_symlink():
             info = self.socket_path.lstat()
@@ -144,30 +182,85 @@ class NativeDeviceIOIngress:
         assert self._socket is not None
         while not self._stop.is_set():
             try:
-                payload, _ = self._socket.recvfrom(self.max_datagram_bytes + 1)
+                connection, _ = self._socket.accept()
             except socket.timeout:
                 continue
             except OSError:
                 if self._stop.is_set():
                     return
                 raise
-            if len(payload) > self.max_datagram_bytes:
-                with self._lock:
-                    self._oversized += 1
+            credentials = connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+            )
+            _pid, uid, _gid = struct.unpack("3i", credentials)
+            if uid != os.getuid():
+                connection.close()
                 continue
+            connection.settimeout(0.1)
+            worker = threading.Thread(
+                target=self._serve_peer,
+                args=(connection,),
+                name="native-deviceio-peer",
+                daemon=True,
+            )
+            with self._peer_lock:
+                self._peers.add(connection)
+                self._workers.add(worker)
+            worker.start()
+
+    def _serve_peer(self, connection: socket.socket) -> None:
+        try:
+            while not self._stop.is_set():
+                header = self._receive_exact(connection, FRAME_HEADER.size)
+                if header is None:
+                    return
+                length = FRAME_HEADER.unpack(header)[0]
+                if length > self.max_datagram_bytes:
+                    with self._lock:
+                        self._oversized += 1
+                    return
+                payload = self._receive_exact(connection, length)
+                if payload is None:
+                    with self._lock:
+                        self._invalid += 1
+                    return
+                self._accept_payload(payload)
+        finally:
+            with self._peer_lock:
+                self._peers.discard(connection)
+                self._workers.discard(threading.current_thread())
+            connection.close()
+
+    def _receive_exact(
+        self, connection: socket.socket, size: int
+    ) -> bytes | None:
+        chunks = bytearray()
+        while len(chunks) < size and not self._stop.is_set():
             try:
-                document = validate_native_envelope(json.loads(payload))
-            except Exception:
-                with self._lock:
-                    self._invalid += 1
+                block = connection.recv(size - len(chunks))
+            except socket.timeout:
                 continue
-            try:
-                self.callback(document)
-            except Exception as exc:
-                with self._lock:
-                    self._callback_failures += 1
-                    self._fatal = exc
-                self._stop.set()
-                return
+            except OSError:
+                return None
+            if not block:
+                return None
+            chunks.extend(block)
+        return bytes(chunks) if len(chunks) == size else None
+
+    def _accept_payload(self, payload: bytes) -> None:
+        try:
+            document = validate_native_envelope(json.loads(payload))
+        except Exception:
             with self._lock:
-                self._received += 1
+                self._invalid += 1
+            return
+        try:
+            self.callback(document)
+        except Exception as exc:
+            with self._lock:
+                self._callback_failures += 1
+                self._fatal = exc
+            self._stop.set()
+            return
+        with self._lock:
+            self._received += 1

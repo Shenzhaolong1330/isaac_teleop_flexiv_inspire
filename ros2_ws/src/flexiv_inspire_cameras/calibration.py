@@ -8,7 +8,9 @@ control boundary while still collecting synchronized robot/camera samples.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from collections import deque
+import hashlib
+import math
 from pathlib import Path
 import threading
 from typing import Any
@@ -55,6 +57,19 @@ def _inverse(transform: np.ndarray) -> np.ndarray:
     result[:3, :3] = transform[:3, :3].T
     result[:3, 3] = -result[:3, :3] @ transform[:3, 3]
     return result
+
+
+def _stamp_ns(stamp: Any) -> int:
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+
+def _rotation_distance_deg(first: dict[str, Any], second: dict[str, Any]) -> float:
+    first_q = np.asarray(first["quaternion_xyzw"], dtype=float)
+    second_q = np.asarray(second["quaternion_xyzw"], dtype=float)
+    first_q /= np.linalg.norm(first_q)
+    second_q /= np.linalg.norm(second_q)
+    cosine = min(1.0, max(-1.0, abs(float(np.dot(first_q, second_q)))))
+    return math.degrees(2.0 * math.acos(cosine))
 
 
 def _left_quaternion(quaternion: np.ndarray) -> np.ndarray:
@@ -140,6 +155,7 @@ def capture_samples(args) -> None:
     import cv2
     import rclpy
     from rclpy.node import Node
+    from rclpy.qos import qos_profile_sensor_data
     from geometry_msgs.msg import PoseStamped
     from sensor_msgs.msg import CompressedImage
 
@@ -150,29 +166,60 @@ def capture_samples(args) -> None:
     class Collector(Node):
         def __init__(self):
             super().__init__("camera_handeye_calibration")
-            self.latest_pose = None
+            self.pose_history: deque[tuple[int, dict[str, Any]]] = deque(maxlen=256)
             self.samples: list[dict[str, Any]] = []
             self.lock = threading.Lock()
             self.create_subscription(PoseStamped, f"/robot/{args.arm}_arm/tcp_pose", self.pose, 10)
-            self.create_subscription(CompressedImage, f"/camera/{args.camera}/color/image_raw/compressed", self.image, 10)
+            self.create_subscription(
+                CompressedImage,
+                f"/camera/{args.camera}/color/image_raw/compressed",
+                self.image,
+                qos_profile_sensor_data,
+            )
 
         def pose(self, message):
             with self.lock:
-                self.latest_pose = _pose(_matrix([message.pose.position.x, message.pose.position.y, message.pose.position.z], [message.pose.orientation.x, message.pose.orientation.y, message.pose.orientation.z, message.pose.orientation.w]))
+                pose = _pose(_matrix([message.pose.position.x, message.pose.position.y, message.pose.position.z], [message.pose.orientation.x, message.pose.orientation.y, message.pose.orientation.z, message.pose.orientation.w]))
+                self.pose_history.append((_stamp_ns(message.header.stamp), pose))
 
         def image(self, message):
             with self.lock:
-                if self.latest_pose is None or len(self.samples) >= args.samples:
+                if not self.pose_history or len(self.samples) >= args.samples:
+                    return
+                image_stamp_ns = _stamp_ns(message.header.stamp)
+                pose_stamp_ns, pose = min(
+                    self.pose_history,
+                    key=lambda item: abs(item[0] - image_stamp_ns),
+                )
+                sync_delta_ns = abs(pose_stamp_ns - image_stamp_ns)
+                if sync_delta_ns > int(args.max_sync_ms * 1e6):
                     return
                 image = cv2.imdecode(np.frombuffer(bytes(message.data), np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    return
                 target = _detect_marker(image, matrix, distortion, args.marker_id, args.marker_size_m)
                 if target is None:
                     return
-                # Require motion between retained views; otherwise a stationary
-                # camera frame burst would make AX=XB rank deficient.
-                if self.samples and np.linalg.norm(np.asarray(self.latest_pose["xyz"]) - np.asarray(self.samples[-1]["world_T_tcp"]["xyz"])) < args.min_translation_m:
-                    return
-                self.samples.append({"world_T_tcp": self.latest_pose, "camera_T_target": _pose(target)})
+                if self.samples:
+                    previous = self.samples[-1]["world_T_tcp"]
+                    translation = np.linalg.norm(
+                        np.asarray(pose["xyz"]) - np.asarray(previous["xyz"])
+                    )
+                    rotation = _rotation_distance_deg(pose, previous)
+                    # Retain translation or rotation diversity. Requiring only
+                    # translation wrongly rejects useful in-place rotations.
+                    if (
+                        translation < args.min_translation_m
+                        and rotation < args.min_rotation_deg
+                    ):
+                        return
+                self.samples.append({
+                    "world_T_tcp": pose,
+                    "camera_T_target": _pose(target),
+                    "image_stamp_ns": image_stamp_ns,
+                    "pose_stamp_ns": pose_stamp_ns,
+                    "sync_delta_ns": sync_delta_ns,
+                })
                 self.get_logger().info(f"captured calibration view {len(self.samples)}/{args.samples}")
 
     rclpy.init()
@@ -183,7 +230,19 @@ def capture_samples(args) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        Path(args.output).write_text(yaml.safe_dump({"schema_version": 1, "camera": args.camera, "mode": args.mode, "samples": node.samples}, sort_keys=False), encoding="utf-8")
+        intrinsics_path = Path(args.intrinsics).expanduser().resolve()
+        Path(args.output).write_text(yaml.safe_dump({
+            "schema_version": 1,
+            "camera": args.camera,
+            "arm": args.arm,
+            "mode": args.mode,
+            "marker": {"dictionary": "DICT_4X4_100", "id": args.marker_id, "size_m": args.marker_size_m},
+            "intrinsics": intrinsics,
+            "intrinsics_source": str(intrinsics_path),
+            "intrinsics_sha256": hashlib.sha256(intrinsics_path.read_bytes()).hexdigest(),
+            "max_sync_ms": args.max_sync_ms,
+            "samples": node.samples,
+        }, sort_keys=False), encoding="utf-8")
         node.destroy_node()
         rclpy.shutdown()
 
@@ -200,14 +259,38 @@ def main(argv=None) -> int:
     capture.add_argument("--marker-size-m", type=float, required=True)
     capture.add_argument("--samples", type=int, default=15)
     capture.add_argument("--min-translation-m", type=float, default=0.03)
+    capture.add_argument("--min-rotation-deg", type=float, default=10.0)
+    capture.add_argument("--max-sync-ms", type=float, default=50.0)
     capture.add_argument("--output", required=True)
     solve = commands.add_parser("solve", help="solve captured samples and write camera extrinsic")
     solve.add_argument("--samples", required=True)
     solve.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     if args.command == "capture":
+        if args.samples < 4:
+            parser.error("capture --samples must be at least 4")
+        if args.marker_size_m <= 0.0:
+            parser.error("--marker-size-m must be positive")
+        if args.min_translation_m < 0.0 or args.min_rotation_deg < 0.0:
+            parser.error("motion diversity thresholds cannot be negative")
+        if not 0.0 < args.max_sync_ms <= 500.0:
+            parser.error("--max-sync-ms must be in (0,500]")
         capture_samples(args)
         return 0
     document = yaml.safe_load(Path(args.samples).read_text(encoding="utf-8"))
-    Path(args.output).write_text(yaml.safe_dump(solve_samples(document["mode"], document["samples"]), sort_keys=False), encoding="utf-8")
+    result = solve_samples(document["mode"], document["samples"])
+    for key in (
+        "camera",
+        "arm",
+        "marker",
+        "intrinsics",
+        "intrinsics_source",
+        "intrinsics_sha256",
+        "max_sync_ms",
+    ):
+        if key in document:
+            result[key] = document[key]
+    Path(args.output).write_text(
+        yaml.safe_dump(result, sort_keys=False), encoding="utf-8"
+    )
     return 0

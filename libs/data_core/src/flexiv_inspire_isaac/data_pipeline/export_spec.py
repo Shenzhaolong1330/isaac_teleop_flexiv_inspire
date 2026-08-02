@@ -11,6 +11,33 @@ class ExportSpecError(ValueError):
     pass
 
 
+def _find_export_sections(path: Path, stack: tuple[Path, ...] = ()) -> list[object]:
+    path = path.expanduser().resolve()
+    if path in stack:
+        chain = " -> ".join(str(item) for item in (*stack, path))
+        raise ExportSpecError(f"export config include cycle: {chain}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ExportSpecError(f"export config must be a mapping: {path}")
+    found: list[object] = []
+    if "lerobot_export" in raw:
+        found.append(raw["lerobot_export"])
+    includes = raw.get("includes", [])
+    if includes:
+        if not isinstance(includes, list) or not all(
+            isinstance(item, str) and item.strip() for item in includes
+        ):
+            raise ExportSpecError("export config includes must be non-empty paths")
+        for include in includes:
+            found.extend(
+                _find_export_sections(path.parent / include, (*stack, path))
+            )
+    # Also accept a standalone export document rather than a system fragment.
+    if not found and not includes and ("timeline" in raw or "action" in raw):
+        found.append(raw)
+    return found
+
+
 @dataclass(frozen=True)
 class ActionView:
     name: str = "sent_command"
@@ -47,9 +74,12 @@ class ExportSpec:
 def load_export_spec(path: str | Path | None) -> ExportSpec:
     if path is None:
         return ExportSpec()
-    raw = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8"))
-    if isinstance(raw, dict) and "lerobot_export" in raw:
-        raw = raw["lerobot_export"]
+    sections = _find_export_sections(Path(path))
+    if not sections:
+        raise ExportSpecError("config does not define lerobot_export")
+    if len(sections) != 1:
+        raise ExportSpecError("config defines lerobot_export more than once")
+    raw = sections[0]
     if not isinstance(raw, dict) or int(raw.get("schema_version", 0)) != 1:
         raise ExportSpecError("export config must be schema_version: 1")
     timeline = raw.get("timeline", {})
@@ -59,7 +89,7 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
     source = str(timeline.get("source", "")).lstrip("/")
     fps = float(timeline.get("fps", 0.0))
     view = str(action.get("view", ""))
-    if not source or not 0.0 < fps <= 1000.0:
+    if not source or not 0.0 < fps <= 1000.0 or not fps.is_integer():
         raise ExportSpecError("timeline.source and timeline.fps are required")
     if view not in {"sent_command", "absolute_joint_position", "absolute_cartesian_pose"}:
         raise ExportSpecError("action.view is unsupported")

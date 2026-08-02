@@ -1,6 +1,18 @@
 # 现场运行手册：双臂 + DFTP-2 + Quest/MANUS
 
-本文档是 `/home/hb/isaac_teleop_flexiv_inspire` 的唯一推荐启动顺序。所有
+日常使用只执行下面三个顶层命令；daemon、内部许可及各 ROS 服务由启动器
+自动管理。后面的分阶段流程保留给首次验收和故障排查。
+
+```bash
+cd /home/hb/isaac_teleop_flexiv_inspire
+source scripts/env/activate_ros.sh
+robot reset
+robot record
+# robot record 达到目标条数或按 Ctrl-C 后会自行结束
+```
+
+`robot stop` 只用于终端/主机异常退出后回收遗留进程，不是正常录制流程的一步。
+
 命令均在机器人主机本地执行；不要 source 其他机器人工作空间。
 
 ## 0. 先读：默认状态与尚未完成的现场条件
@@ -11,7 +23,8 @@
   才能执行任何写操作。
 - 控制桥从 `MAINTENANCE` 启动；当前硬件会话完成双臂 F/T 清零前不能
   进入 `READY`。
-- DFTP 驱动默认只读。超时、掉线和松脚踏不会自动回零、张手或回家。
+- DFTP 可执行程序默认只读；本站 `config/hardware.yaml` 已显式开启同一驱动的
+  写通道供 MANUS 和 Reset 使用。超时、掉线和松脚踏不会自动回零或回家。
 - 遥操作输入默认以 `command_enabled:=false` 启动。
 - gRPC 不能执行 `Enable`、F/T 清零或本地控制授权。
 
@@ -200,8 +213,9 @@ flexiv-inspire-camera-node --ros-args \
   -p config:="$CAMERA_CONFIG"
 ```
 
-必须看到三台正确序列号、librealsense 2.57.7、`424x240@30`、JPEG90、
-RGB-only。不要混入 2.58 或默认开启深度。
+必须看到三台正确序列号、librealsense 2.57.7、`424x240@30`、JPEG90，
+并确认报告中的模态与配置一致：头部 RGB + 深度 + 点云，两个腕部仅 RGB。
+不要混入 2.58，也不要在腕部相机上误开不需要的深度/点云。
 
 ### 4.3 DFTP-2 只读
 
@@ -389,27 +403,26 @@ flexiv-rdk-daemon \
 任一名称、质量、质心、惯量或 TCP 不一致都会拒绝。重启会使旧 F/T 状态
 失效，桥必须仍显示 `MAINTENANCE`。
 
-先在另一个本地 ROS TTY 做不执行的预览：
+正常使用不再分别执行清零和 Home。在另一个本地 ROS TTY 直接运行：
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-flexiv-inspire-zero-ft-local \
-  --rdk-socket "$RDK_SOCKET" \
-  --tool-payload-config "$TOOL_CONFIG"
+robot reset
 ```
 
-核对输出的 session、配置 SHA-256、双手姿态和两秒稳定性。确认无人接触、
-机器人及线缆静止后，才重新执行：
+该命令自动从 `config/site.yaml` 读取 daemon socket、工具/负载配置、session
+和 Home/Inspire Reset 参数，一次完成“两秒静止检查 -> 双臂 F/T 清零 ->
+双臂 Home -> 双手张开/闭合/张开（最终张开）”。手部动作沿用旧工程的
+`1000 -> 0 -> 1000` 和 0.35 秒间隔，且发生在 F/T 清零之后。无需设置
+`RDK_SOCKET`/`TOOL_CONFIG`，也无需输入确认字符串。也可使用等价入口
+`flexiv-inspire-reset`。
 
-```bash
-flexiv-inspire-zero-ft-local \
-  --rdk-socket "$RDK_SOCKET" \
-  --tool-payload-config "$TOOL_CONFIG" \
-  --confirm-ft-unloaded FLEXIV-FT-UNLOADED
-```
+该命令可在同一会话内重复执行。处于 `MAINTENANCE` 时会执行 F/T 清零；若
+已经处于 `READY` 且 `/control/state.ft_zeroed_for_session=true`，则复用本次
+清零结果，直接执行 Home 和双手开合。其他状态仍会拒绝动作。
 
-该确认只能从机器人本机交互 TTY 发出。过程中 teleop/policy/replay 都无权
+命令只能从机器人本机交互 TTY 发出。过程中 teleop/policy/replay 都无权
 控制；任一臂运动、接触、超时、primitive 失败、残差超限或 daemon/RDK
 重连都会失败并保持 `MAINTENANCE`/`FAULT`。成功后检查：
 
@@ -426,6 +439,9 @@ test -s "$RDK_EVENTS"
 正式动作前，保持双手松开 Quest deadman，并确认机械区域无人。只有真实
 安全系统/现场人员确认后，才发布本地许可和碰撞许可：
 
+`robot reset` 会把本机执行该命令视为本次 Reset/Home 的许可，
+并自动发布这两个门控；下面的手工命令只用于后续单独恢复门控。
+
 ```bash
 ros2 topic pub --once /control/local_permission std_msgs/msg/Bool \
   '{data: true}'
@@ -436,7 +452,10 @@ ros2 topic pub --once /safety/collision_clear std_msgs/msg/Bool \
 物理脚踏必须由配置的 `/dev/input/by-id/...` 设备产生；不要用 ROS 话题或
 软件脚本模拟脚踏。
 
-### 6.1 执行配置的双臂 Home/Reset
+### 6.1 单独执行配置的双臂 Home
+
+通常不需要本节：`robot reset` 已在清零成功后执行 Home。下面的
+命令仅用于同一硬件会话中不重新清零、只回 Home。
 
 Home 只允许从 `READY` 执行，且遥操作、策略和回放均未占用控制权。它使用
 `NRT_JOINT_POSITION + SendJointPosition` 移动到 `flexiv.home` 的左右
@@ -480,19 +499,17 @@ Home 首次真机验收应先把 `home_max_velocity_rad_s` 和
 
 ### 6.2 遥操作与笛卡尔阻抗
 
-若要控制灵巧手，先停止只读 DFTP 节点，再以本会话的显式写门禁重启：
+本站配置已经启用灵巧手写通道，`robot reset` 和 `robot record` 会自动生成并
+启动带本会话确认的 DFTP 参数，无需手动停止或重启节点。可检查运行时快照：
 
 ```bash
-test -n "$MANUS_CONFIG"
-test -f "$MANUS_CONFIG"
-flexiv-inspire-dftp-node --ros-args \
-  --params-file "$DFTP_CONFIG" \
-  -p hardware_write_enabled:=true \
-  -p local_session_id:="$SESSION_ID" \
-  -p local_write_confirmation:=DFTP-LOCAL-CONTROL-AUTHORIZED
+robot render
+sed -n '1,80p' /run/user/1000/isaac_teleop/launcher/<config-hash>/dftp.yaml
 ```
 
-它仍只接受 supervisor 发布的 `/control/sent_command`；超时不会自动张手。
+正常遥操作仍只接受 supervisor 发布的 `/control/sent_command`；另有本机
+`/maintenance/cycle_hands` 服务，只允许 `READY` 状态下执行 Reset 的
+张开/闭合/张开动作。
 
 在终端 G 用 `Ctrl-C` 只停止 shadow `teleop_input`，不要停止控制桥。然后
 在本地交互 TTY 授权 teleop：
@@ -555,7 +572,7 @@ flexiv-inspire-authorize-control \
 
 ```bash
 cd "$ROOT"
-./scripts/collect.sh
+robot record
 ```
 
 它会立即开始第一条，自动管理脚踏路由、episode 生命周期以及 Home/控制

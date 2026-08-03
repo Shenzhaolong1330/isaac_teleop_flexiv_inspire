@@ -339,6 +339,17 @@ def test_fault_reason_never_marks_episode_complete(tmp_path):
     assert manifest["completion_reason"].startswith("fault:")
 
 
+def test_rerecord_without_sent_command_is_retained_but_not_an_error(tmp_path):
+    episode = _episode_session(tmp_path)
+    bag = SimpleNamespace(started=True, stop_and_validate=lambda: None)
+
+    episode.finish(bag, reason="rerecord-requested")
+
+    manifest = json.loads(episode.manifest_path.read_text())
+    assert manifest["completed"] is False
+    assert manifest["completion_reason"] == "rerecord-requested"
+
+
 def test_startup_abort_closes_recorder_and_writes_failed_manifest(tmp_path):
     episode = _episode_session(tmp_path)
     episode.abort(reason="fault:rosbag-start")

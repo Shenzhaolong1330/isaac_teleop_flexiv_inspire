@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import signal
 import stat
 from types import ModuleType, SimpleNamespace
@@ -70,10 +71,54 @@ def test_reset_composes_zero_ft_then_home_without_operator_tokens(
     assert argv[argv.index("--rdk-socket") + 1] == str(tmp_path / "rdk.sock")
     assert argv[argv.index("--tool-payload-config") + 1] == str(tool_config)
     assert "--confirm-ft-unloaded" in argv
+    assert "--skip-hand-preview" in argv
+    assert argv[argv.index("--max-hand-delta") + 1] == "150"
     assert "--skip-preview-if-ft-zeroed" in argv
     assert "--home-after-zero" in argv
     assert "--cycle-hands-after-home" in argv
     assert "--clear-home-hold-latched" in argv
+
+
+def test_reset_recovers_fault_by_restarting_bridge_then_retrying(tmp_path, monkeypatch):
+    tool_config = tmp_path / "tool_payload.yaml"
+    tool_config.write_text("schema_version: 1\n", encoding="utf-8")
+    calls = 0
+    module = ModuleType("flexiv_inspire_control.zero_ft_local")
+
+    def fake_main(_argv: list[str]) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError(
+                "Reset requires MAINTENANCE, or READY with valid zero; got FAULT"
+            )
+        return 0
+
+    module.main = fake_main
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(cli.sys, "stdin", _InteractiveInput())
+    monkeypatch.setattr(
+        cli, "_ensure_rdk_daemon", lambda config: tmp_path / "rdk.sock"
+    )
+    service_starts = []
+    monkeypatch.setattr(
+        cli, "_ensure_reset_ros_services", lambda config: service_starts.append(config)
+    )
+    restarts = []
+    monkeypatch.setattr(
+        cli, "_restart_reset_ros_processes", lambda: restarts.append(True)
+    )
+    config = _Config(tmp_path, tool_config)
+
+    result = cli._run_reset(
+        config,
+        SimpleNamespace(preview_seconds=0.0),
+    )
+
+    assert result == 0
+    assert calls == 2
+    assert restarts == [True]
+    assert service_starts == [config, config]
 
 
 def test_reset_parser_needs_no_confirmation_argument():
@@ -83,17 +128,155 @@ def test_reset_parser_needs_no_confirmation_argument():
     assert args.preview_seconds == 2.0
 
 
+def test_manus_startup_reports_valid_bimanual_retargeting(tmp_path):
+    log = tmp_path / "teleop.log"
+    log.write_text(
+        "[INFO] MANUS_HANDS_READY: both gloves are valid\n",
+        encoding="utf-8",
+    )
+    process = SimpleNamespace(poll=lambda: None, returncode=None)
+
+    assert cli._report_manus_status(
+        [[sys.executable, "-m", "flexiv_inspire_control.teleop_input_node"]],
+        [process],
+        [log],
+    ) is True
+
+
+def test_service_group_start_is_atomic_and_closes_parent_logs(
+    tmp_path, monkeypatch
+):
+    class Process:
+        pid = 321
+
+        @staticmethod
+        def poll():
+            return None
+
+    first = Process()
+    calls = 0
+    observed_logs = []
+
+    def popen(_command, **kwargs):
+        nonlocal calls
+        calls += 1
+        observed_logs.append(kwargs["stdout"])
+        if calls == 2:
+            raise OSError("missing executable")
+        return first
+
+    stopped = []
+    monkeypatch.setattr(cli.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        cli, "_stop_started_processes", lambda processes: stopped.append(processes)
+    )
+
+    with pytest.raises(OSError, match="missing executable"):
+        cli._start([["one"], ["two"]], tmp_path, log_prefix="atomic")
+
+    assert stopped == [[first]]
+    assert len(observed_logs) == 2
+    assert all(log.closed for log in observed_logs)
+
+
+def test_manus_not_ready_never_stops_record(tmp_path, monkeypatch, capsys):
+    log = tmp_path / "teleop.log"
+    log.write_text("teleop input started in COMMAND mode\n", encoding="utf-8")
+    process = SimpleNamespace(poll=lambda: None, returncode=None)
+    monkeypatch.setattr(
+        cli,
+        "_stop_started_processes",
+        lambda _processes: pytest.fail("MANUS readiness must not stop record"),
+    )
+
+    ready = cli._report_manus_status(
+        [[sys.executable, "-m", "flexiv_inspire_control.teleop_input_node"]],
+        [process],
+        [log],
+    )
+
+    assert ready is False
+    assert "record 继续运行" in capsys.readouterr().out
+
+
+def test_record_failure_still_stops_all_managed_services(tmp_path, monkeypatch):
+    config = SimpleNamespace(
+        document={"session": {"runtime_root": str(tmp_path / "runtime")}}
+    )
+    cleanup_calls = []
+    monkeypatch.setattr(cli, "load_system_config", lambda path: config)
+
+    def fail_record(args, selected_config):
+        assert selected_config is config
+        raise RuntimeError("recorder failed")
+
+    monkeypatch.setattr(cli, "_main", fail_record)
+    monkeypatch.setattr(
+        cli,
+        "_stop_managed_services",
+        lambda selected_config, require_existing: cleanup_calls.append(
+            (selected_config, require_existing)
+        )
+        or 7,
+    )
+
+    with pytest.raises(RuntimeError, match="recorder failed"):
+        cli.main(["record"])
+
+    assert cleanup_calls == [(config, False), (config, False)]
+
+
+def test_managed_service_cleanup_escalates_after_graceful_timeout(
+    tmp_path, monkeypatch
+):
+    runtime = tmp_path / "runtime"
+    launcher = runtime / "launcher"
+    launcher.mkdir(parents=True)
+    managed_pid = 424242
+    (launcher / "processes.json").write_text(
+        json.dumps({"pids": [managed_pid]}),
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(
+        root=tmp_path,
+        document={"session": {"runtime_root": str(runtime)}},
+    )
+    monkeypatch.setattr(
+        cli, "_matching_managed_process_ids", lambda selected: [managed_pid]
+    )
+    times = iter((0.0, 6.0, 6.0, 7.0))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+    signals = []
+    killed = False
+
+    def fake_killpg(pid, requested_signal):
+        nonlocal killed
+        signals.append((pid, requested_signal))
+        if requested_signal == signal.SIGKILL:
+            killed = True
+
+    monkeypatch.setattr(cli.os, "killpg", fake_killpg)
+    monkeypatch.setattr(cli, "_pid_is_running", lambda pid: not killed)
+
+    assert cli._stop_managed_services(config, require_existing=False) == 1
+    assert signals == [
+        (managed_pid, signal.SIGTERM),
+        (managed_pid, signal.SIGKILL),
+    ]
+
+
 def test_reset_reuses_valid_ft_zero_when_session_is_already_ready():
     assert _ft_zero_mode("MAINTENANCE", False) == "execute"
     assert _ft_zero_mode("READY", True) == "reuse"
     assert _ft_zero_mode("TELEOP_ARMED", True) == "reuse"
     assert _ft_zero_mode("POLICY_ARMED", True) == "reuse"
     assert _ft_zero_mode("REPLAY_ARMED", True) == "reuse"
+    assert _ft_zero_mode("HOLD_LATCHED", True) == "reuse"
     with pytest.raises(RuntimeError, match="valid session F/T zero"):
         _ft_zero_mode("READY", False)
     with pytest.raises(RuntimeError, match="valid session F/T zero"):
         _ft_zero_mode("TELEOP_ARMED", False)
-    with pytest.raises(RuntimeError, match="READY/ARMED"):
+    with pytest.raises(RuntimeError, match="READY/ARMED/HOLD_LATCHED"):
         _ft_zero_mode("ACTIVE", True)
 
 
@@ -130,6 +313,16 @@ def test_reset_reuses_running_ros_services_without_restart_or_fixed_wait(
     tool_config.write_text("schema_version: 1\n", encoding="utf-8")
     config = _Config(tmp_path, tool_config)
     (tmp_path / "launcher").mkdir()
+    (tmp_path / "launcher" / "reset-services.json").write_text(
+        '{"config_sha256": "test-config-sha256", '
+        '"runtime_sha256": "test-runtime-sha256"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        cli,
+        "_reset_ros_runtime_fingerprint",
+        lambda _config: "test-runtime-sha256",
+    )
     running = iter((True, True))
     monkeypatch.setattr(cli, "_process_running", lambda *markers: next(running))
     monkeypatch.setattr(
@@ -141,6 +334,11 @@ def test_reset_reuses_running_ros_services_without_restart_or_fixed_wait(
         cli,
         "_restart_dftp_processes",
         lambda: pytest.fail("a running DFTP process must not be restarted"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_restart_reset_ros_processes",
+        lambda: pytest.fail("matching Reset services must not be restarted"),
     )
     monkeypatch.setattr(
         cli,
@@ -252,6 +450,195 @@ def test_record_keeps_collection_processes_out_of_background_launcher():
     )
 
 
+def test_record_waits_for_rdk_socket_before_collection_preflight(
+    tmp_path, monkeypatch
+):
+    class Process:
+        def poll(self):
+            return None
+
+    attempts = iter((False, True))
+    monkeypatch.setattr(cli, "_rdk_socket_live", lambda _path: next(attempts))
+    monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+    cli._wait_for_rdk_socket(
+        tmp_path / "rdk.sock",
+        [Process()],
+        [tmp_path / "rdk.log"],
+        timeout_s=1.0,
+    )
+
+
+def test_record_waits_for_all_camera_streams(tmp_path, monkeypatch):
+    camera_log = tmp_path / "camera.log"
+    camera_log.write_text(
+        "\n".join(
+            f"camera {name} (serial): streaming"
+            for name in ("head", "left_wrist", "right_wrist")
+        ),
+        encoding="utf-8",
+    )
+
+    class Process:
+        def poll(self):
+            return None
+
+    cli._wait_for_camera_streams(
+        [["flexiv-inspire-camera-node"]],
+        [Process()],
+        [camera_log],
+        ("head", "left_wrist", "right_wrist"),
+        timeout_s=1.0,
+    )
+
+
+def test_record_waits_for_openxr_and_first_decoded_frame(tmp_path):
+    receiver_log = tmp_path / "receiver.log"
+    receiver_log.write_text(
+        "OpenXR session is ready\nSession Initialization Time: 20 ms\n",
+        encoding="utf-8",
+    )
+
+    class Process:
+        def poll(self):
+            return None
+
+    assert cli._wait_for_xr_receiver_ready(
+        Process(), receiver_log, expected_streams=1, timeout_s=1.0
+    ) is True
+
+
+def test_record_keeps_running_when_quest_handshake_is_late(
+    tmp_path, capsys
+):
+    receiver_log = tmp_path / "receiver.log"
+    receiver_log.write_text(
+        "No XR headset connected, retrying in 2s\n",
+        encoding="utf-8",
+    )
+
+    class Process:
+        def poll(self):
+            return None
+
+    assert cli._wait_for_xr_receiver_ready(
+        Process(), receiver_log, expected_streams=1, timeout_s=0.01
+    ) is False
+    output = capsys.readouterr().out
+    assert "record 继续运行" in output
+    assert "自动重连" in output
+
+
+def test_record_keeps_running_when_quest_receiver_exits(tmp_path, capsys):
+    receiver_log = tmp_path / "receiver.log"
+    receiver_log.write_text("OpenXR unavailable\n", encoding="utf-8")
+
+    class Process:
+        def poll(self):
+            return 2
+
+    assert cli._wait_for_xr_receiver_ready(
+        Process(), receiver_log, expected_streams=1, timeout_s=1.0
+    ) is False
+    output = capsys.readouterr().out
+    assert "record 继续运行" in output
+    assert "自动重试" in output
+
+
+def test_record_waits_for_encoded_rtp_before_starting_receiver(tmp_path):
+    bridge_log = tmp_path / "bridge.log"
+    bridge_log.write_text(
+        "XR_VIDEO_STREAM_READY: head encoder=h264_nvenc sent=1\n",
+        encoding="utf-8",
+    )
+
+    class Process:
+        returncode = None
+
+        def poll(self):
+            return None
+
+    assert cli._wait_for_xr_bridge_streams(
+        [["flexiv-inspire-xr-bridge"]],
+        [Process()],
+        [bridge_log],
+        ("head",),
+        timeout_s=1.0,
+    ) is True
+
+
+def test_record_keeps_running_when_rtp_bridge_has_no_frame(tmp_path, capsys):
+    bridge_log = tmp_path / "bridge.log"
+    bridge_log.write_text("encoder starting\n", encoding="utf-8")
+
+    class Process:
+        def poll(self):
+            return None
+
+    assert cli._wait_for_xr_bridge_streams(
+        [["flexiv-inspire-xr-bridge"]],
+        [Process()],
+        [bridge_log],
+        ("head",),
+        timeout_s=0.01,
+    ) is False
+    assert "record 和遥操继续" in capsys.readouterr().out
+
+
+def test_xr_control_gate_requires_encoded_and_displayed_frame(tmp_path):
+    bridge_log = tmp_path / "bridge.log"
+    receiver_log = tmp_path / "receiver.log"
+    bridge_log.write_text(
+        "XR_VIDEO_STREAM_READY: head encoder=h264 sent=1\n",
+        encoding="utf-8",
+    )
+    receiver_log.write_text(
+        "OpenXR session is ready\nSession Initialization Time: 20 ms\n",
+        encoding="utf-8",
+    )
+
+    class Process:
+        def poll(self):
+            return None
+
+    assert cli._wait_for_xr_video_control_gate(
+        [
+            ["flexiv-inspire-xr-bridge"],
+            ["run_isaac_camera_receiver.sh"],
+        ],
+        [Process(), Process()],
+        [bridge_log, receiver_log],
+        ("head",),
+        timeout_s=0.1,
+    ) is True
+
+
+def test_xr_control_gate_times_out_without_display(tmp_path, capsys):
+    bridge_log = tmp_path / "bridge.log"
+    receiver_log = tmp_path / "receiver.log"
+    bridge_log.write_text(
+        "XR_VIDEO_STREAM_READY: head encoder=h264 sent=1\n",
+        encoding="utf-8",
+    )
+    receiver_log.write_text("waiting for headset\n", encoding="utf-8")
+
+    class Process:
+        def poll(self):
+            return None
+
+    assert cli._wait_for_xr_video_control_gate(
+        [
+            ["flexiv-inspire-xr-bridge"],
+            ["run_isaac_camera_receiver.sh"],
+        ],
+        [Process(), Process()],
+        [bridge_log, receiver_log],
+        ("head",),
+        timeout_s=0.01,
+    ) is False
+    assert "机械臂遥操作尚未启用" in capsys.readouterr().out
+
+
 def test_foreground_collection_ctrl_c_finalizes_controller_and_stops_pedal(
     tmp_path, monkeypatch
 ):
@@ -310,6 +697,11 @@ def test_foreground_collection_ctrl_c_finalizes_controller_and_stops_pedal(
     monkeypatch.setattr(cli, "_episode_command", lambda *_args: ["controller"])
     monkeypatch.setattr(cli.subprocess, "Popen", lambda *_args, **_kwargs: next(pending))
     monkeypatch.setattr(
+        cli,
+        "_wait_for_collection_processes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+    monkeypatch.setattr(
         cli, "_write_state", lambda _directory, _config, processes: written.append(processes)
     )
     monkeypatch.setattr(
@@ -325,6 +717,26 @@ def test_foreground_collection_ctrl_c_finalizes_controller_and_stops_pedal(
     assert pedal.terminated is True
     assert written == [[pedal, controller]]
     assert removed == [{501, 502}]
+
+
+def test_pedal_router_exit_stops_collection(monkeypatch):
+    class Process:
+        def __init__(self, statuses):
+            self._statuses = iter(statuses)
+
+        def poll(self):
+            return next(self._statuses)
+
+    controller = Process((None,))
+    pedal = Process((7,))
+    monkeypatch.setattr(
+        cli.time,
+        "sleep",
+        lambda _seconds: pytest.fail("pedal exit should be detected immediately"),
+    )
+
+    with pytest.raises(RuntimeError, match="脚踏输入进程意外退出.*退出码 7"):
+        cli._wait_for_collection_processes(controller, pedal)
 
 
 def test_orphaned_managed_process_discovery_is_scoped_to_project(

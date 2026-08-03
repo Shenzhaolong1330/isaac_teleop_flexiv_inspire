@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import sys
+from types import ModuleType
 import threading
 import time
 
@@ -13,7 +15,10 @@ from flexiv_inspire_isaac.rerun_viz.runtime import (
     TACTILE_ATLAS_SHAPE,
     command_action_vector,
     tactile_atlas,
+    tactile_heatmap,
+    tactile_sensor_mask,
 )
+from flexiv_inspire_isaac.rerun_viz.ros_node import VisualizationRateLimiter
 
 
 def _surfaces() -> list[dict]:
@@ -57,6 +62,33 @@ def test_right_tactile_atlas_mirrors_left_palm_view() -> None:
     left = tactile_atlas(_surfaces(), side="left")
     right = tactile_atlas(_surfaces(), side="right")
     np.testing.assert_array_equal(right, np.fliplr(left))
+
+
+def test_tactile_heatmap_makes_low_uint16_range_visible() -> None:
+    surfaces = _surfaces()
+    atlas = tactile_atlas(surfaces)
+    mask = tactile_sensor_mask(surfaces)
+    heatmap = tactile_heatmap(atlas, mask)
+
+    assert heatmap.shape == (*TACTILE_ATLAS_SHAPE, 3)
+    assert heatmap.dtype == np.uint8
+    assert int(heatmap.max()) == 255
+    assert np.count_nonzero(heatmap) > 0
+    assert np.any(heatmap[mask & (atlas == 0)] > 0)
+    assert np.all(heatmap[~mask] == 0)
+
+
+def test_zero_tactile_frame_still_shows_sensor_outline() -> None:
+    surfaces = _surfaces()
+    for surface in surfaces:
+        surface["taxels"] = [0] * (surface["rows"] * surface["columns"])
+    atlas = tactile_atlas(surfaces)
+    mask = tactile_sensor_mask(surfaces)
+
+    heatmap = tactile_heatmap(atlas, mask)
+
+    assert np.all(heatmap[~mask] == 0)
+    assert np.all(np.any(heatmap[mask] > 0, axis=1))
 
 
 def test_tactile_atlas_rejects_unknown_side() -> None:
@@ -112,6 +144,15 @@ def test_dispatcher_contains_visualization_exception() -> None:
     assert "bad frame" in dispatcher.last_error
 
 
+def test_visualization_rate_limiter_downsamples_without_delaying_latest() -> None:
+    limiter = VisualizationRateLimiter()
+
+    assert limiter.allow("arm:left", 5.0, now_monotonic_ns=1_000_000_000)
+    assert not limiter.allow("arm:left", 5.0, now_monotonic_ns=1_100_000_000)
+    assert limiter.allow("arm:left", 5.0, now_monotonic_ns=1_200_000_000)
+    assert limiter.allow("camera:head", 10.0, now_monotonic_ns=1_100_000_000)
+
+
 def _bare_visualizer():
     visualizer = object.__new__(RerunVisualizer)
     visualizer._set_time = lambda *args, **kwargs: None
@@ -140,6 +181,62 @@ def test_control_hold_and_rejection_text_are_cleared_on_recovery() -> None:
     visualizer.log_trace({"stamp_ns": 3, "trace_sequence": 1, "rejection_reason": "bad"})
     visualizer.log_trace({"stamp_ns": 4, "trace_sequence": 2, "rejection_reason": ""})
     assert ("control/trace/rejection_reason", "", "WARN") in messages
+
+
+def test_default_blueprint_keeps_other_live_modalities_visible(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Blueprint:
+        def __init__(self, *parts, **kwargs) -> None:
+            captured["parts"] = parts
+            captured.update(kwargs)
+
+    class _Horizontal:
+        def __init__(self, *parts, **kwargs) -> None:
+            self.parts = parts
+            self.kwargs = kwargs
+
+    class _Tabs(_Horizontal):
+        pass
+
+    class _Spatial2DView:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    class _Spatial3DView(_Spatial2DView):
+        pass
+
+    class _TimeSeriesView(_Spatial2DView):
+        pass
+
+    fake_blueprint = ModuleType("rerun.blueprint")
+    fake_blueprint.Blueprint = _Blueprint
+    fake_blueprint.Horizontal = _Horizontal
+    fake_blueprint.Vertical = _Horizontal
+    fake_blueprint.Tabs = _Tabs
+    fake_blueprint.Spatial2DView = _Spatial2DView
+    fake_blueprint.Spatial3DView = _Spatial3DView
+    fake_blueprint.TimeSeriesView = _TimeSeriesView
+    import rerun
+
+    monkeypatch.setitem(sys.modules, "rerun.blueprint", fake_blueprint)
+    monkeypatch.setattr(rerun, "blueprint", fake_blueprint)
+
+    class _Stream:
+        def send_blueprint(self, blueprint, **kwargs) -> None:
+            captured["sent"] = blueprint
+            captured["send_kwargs"] = kwargs
+
+    visualizer = object.__new__(RerunVisualizer)
+    visualizer.stream = _Stream()
+    visualizer._send_default_blueprint()
+
+    assert captured["auto_views"] is False
+    assert captured["collapse_panels"] is True
+    assert captured["send_kwargs"] == {
+        "make_active": True,
+        "make_default": True,
+    }
 
 
 def test_visualizer_disconnects_even_when_flush_fails() -> None:
@@ -213,6 +310,57 @@ def test_offline_deviceio_logs_images_depth_points_and_curves() -> None:
     assert "camera/head/depth_m" in visualizer.stream.paths
     assert "camera/head/pointcloud" in visualizer.stream.paths
     assert "camera/head/color/image_raw/compressed/temperature_c" in visualizer.stream.paths
+
+
+def test_live_depth_and_pointcloud_are_decoded_without_ros_helpers() -> None:
+    class Stream:
+        def __init__(self):
+            self.paths = []
+
+        def log(self, path, _value):
+            self.paths.append(path)
+
+    class RR:
+        DepthImage = staticmethod(lambda value, **kwargs: ("depth", value, kwargs))
+        Points3D = staticmethod(lambda value: ("points", value))
+
+    visualizer = object.__new__(RerunVisualizer)
+    visualizer.stream = Stream()
+    visualizer.rr = RR()
+    visualizer._set_time = lambda *args, **kwargs: None
+    visualizer._text_if_changed = lambda *args, **kwargs: None
+    visualizer.log_depth(
+        {
+            "camera": "head",
+            "stamp_ns": 1,
+            "width": 2,
+            "height": 1,
+            "step": 4,
+            "encoding": "16UC1",
+            "is_bigendian": False,
+            "data": np.asarray([1000, 2000], dtype="<u2").tobytes(),
+            "meter_per_unit": 0.001,
+        }
+    )
+    visualizer.log_pointcloud(
+        {
+            "camera": "head",
+            "stamp_ns": 2,
+            "frame_id": "head_color_optical_frame",
+            "width": 1,
+            "height": 1,
+            "point_step": 12,
+            "row_step": 12,
+            "is_bigendian": False,
+            "fields": {
+                axis: {"offset": index * 4, "datatype": 7, "count": 1}
+                for index, axis in enumerate(("x", "y", "z"))
+            },
+            "data": np.asarray([[1.0, 2.0, 3.0]], dtype="<f4").tobytes(),
+        }
+    )
+    assert "camera/head/depth_m" in visualizer.stream.paths
+    assert "camera/head/pointcloud" in visualizer.stream.paths
 
 
 def test_offline_deviceio_writes_a_real_rerun_recording(tmp_path) -> None:

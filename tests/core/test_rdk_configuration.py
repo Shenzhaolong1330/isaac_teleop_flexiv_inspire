@@ -12,7 +12,10 @@ import pytest
 import yaml
 
 from flexiv_rdk_daemon.backend import FlexivRDKBackend, RobotSpec
-from flexiv_rdk_daemon.configuration import read_tool_payload_identity
+from flexiv_rdk_daemon.configuration import (
+    load_daemon_configuration,
+    read_tool_payload_identity,
+)
 from flexiv_rdk_daemon.guard import (
     HardwareWriteGuard,
     HardwareWriteRejected,
@@ -38,6 +41,20 @@ def tool_document():
         "schema_version": 1,
         "arms": {"left": arm, "right": copy.deepcopy(arm)},
     }
+
+
+def test_site_daemon_configuration_exposes_cartesian_command_ceiling():
+    path = (
+        Path(__file__).parents[2]
+        / "apps/flexiv_daemon/config/robots.yaml"
+    )
+
+    config = load_daemon_configuration(path)
+
+    assert config.cartesian_limits == (0.35, 1.0, 1.0, 2.0)
+    assert config.ft_zero["enable_settle_timeout_s"] == 10.0
+    assert config.ft_zero["enable_settle_window_s"] == 0.5
+    assert config.ft_zero["external_contact_check_enabled"] is False
 
 
 def test_tool_payload_sha_is_canonical_but_touch_changes_fingerprint(tmp_path):
@@ -98,6 +115,7 @@ class _Robot:
     def __init__(self, serial):
         self.serial = serial
         self.calls = []
+        self.faulted = False
 
     def info(self):
         value = _Info()
@@ -106,6 +124,20 @@ class _Robot:
 
     def SwitchMode(self, mode):
         self.calls.append(("SwitchMode", mode))
+
+    def Stop(self):
+        self.calls.append(("Stop",))
+
+    def fault(self):
+        return self.faulted
+
+    def ClearFault(self):
+        self.calls.append(("ClearFault",))
+        self.faulted = False
+        return True
+
+    def Enable(self):
+        self.calls.append(("Enable",))
 
     def SetCartesianImpedance(self, stiffness, damping_ratio):
         self.calls.append(
@@ -178,14 +210,37 @@ def test_connect_runs_read_only_robot_info_compatibility(monkeypatch):
         max_acceleration=1.0,
         local_authorized=True,
     )
+    backend.stop("left", local_console=True)
     calls = backend._robots["left"].calls
     assert ("SwitchMode", "cartesian") in calls
     assert any(call[0] == "SetCartesianImpedance" for call in calls)
     assert ("SwitchMode", "joint") in calls
+    assert ("Stop",) in calls
     joint_call = next(call for call in calls if call[0] == "SendJointPosition")
     assert joint_call[2] == [0.0] * 7
     assert joint_call[3] == [0.5] * 7
     assert joint_call[4] == [1.0] * 7
+
+
+def test_reset_clear_fault_and_enable_use_rdk_recovery_order(monkeypatch):
+    module = types.SimpleNamespace(
+        __version__="1.9.0",
+        Robot=_Robot,
+        Tool=_Tool,
+    )
+    monkeypatch.setitem(sys.modules, "flexivrdk", module)
+    backend = FlexivRDKBackend(
+        (RobotSpec("left", "left"), RobotSpec("right", "right")),
+        write_guard=HardwareWriteGuard(test_backend=True),
+    )
+    backend.connect()
+    robot = backend._robots["right"]
+    robot.faulted = True
+
+    assert backend.clear_fault("right", local_console=True) is True
+    backend.enable("right", local_console=True)
+
+    assert robot.calls[-2:] == [("ClearFault",), ("Enable",)]
 
 
 def test_connect_rejects_configured_serial_mismatch(monkeypatch):

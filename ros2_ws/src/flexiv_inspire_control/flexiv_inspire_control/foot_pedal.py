@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -59,13 +59,25 @@ class FootPedalMonitor:
         on_status: Callable[[str], None] | None = None,
         *,
         enable_key_code: int = KEY_DOWN,
+        enable_key_codes: Iterable[int] | None = None,
         grab: bool = False,
     ) -> None:
         self._path = path
         self._on_enable = on_enable
         self._on_event = on_event
         self._on_status = on_status
-        self._enable_key_code = int(enable_key_code)
+        # Some installations expose the middle switch through Input Remapper
+        # as KEY_SPACE while the same physical switch is KEY_DOWN on the
+        # forwarded/raw evdev device.  Treat explicitly supplied aliases as
+        # the same momentary clutch, rather than silently dropping the press.
+        configured_codes = (
+            (int(enable_key_code),)
+            if enable_key_codes is None
+            else tuple(int(code) for code in enable_key_codes)
+        )
+        if not configured_codes:
+            raise ValueError("at least one pedal enable key code is required")
+        self._enable_key_codes = frozenset(configured_codes)
         self._grab = bool(grab)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -127,7 +139,7 @@ class FootPedalMonitor:
                         _, _, event_type, key_code, value = _INPUT_EVENT.unpack_from(data, offset)
                         if event_type != _EV_KEY or value not in (0, 1, 2):
                             continue
-                        if key_code == self._enable_key_code:
+                        if key_code in self._enable_key_codes:
                             if value in (0, 1):
                                 self._set_enable(value == 1)
                         elif value == 1:

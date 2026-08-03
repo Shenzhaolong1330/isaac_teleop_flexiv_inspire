@@ -34,13 +34,34 @@ if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
   "$CAMERA_ROOT/camera_streamer.sh" build
 fi
 NAME="flexiv-inspire-xr-receiver"
-cleanup() { docker stop "$NAME" >/dev/null 2>&1 || true; }
-trap cleanup EXIT INT TERM
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+stopping=0
+cleanup() { docker stop --time 1 "$NAME" >/dev/null 2>&1 || true; }
+request_stop() { stopping=1; cleanup; }
+trap cleanup EXIT
+trap request_stop INT TERM
 ARGS=(--rm --name "$NAME" --runtime nvidia --privileged --network host --ulimit stack=33554432
       -e "XR_RUNTIME_JSON=$XR_JSON" -e "NV_CXR_RUNTIME_DIR=$CXR_RUN"
       -v /dev:/dev -v /run/udev:/run/udev:rw
       -v "$CXR_ROOT:$CXR_ROOT:ro" -v "$CAMERA_ROOT:/camera_streamer:ro"
       -v "$CONFIG_PATH:/runtime/receiver.yaml:ro")
 if [[ -n "${DISPLAY:-}" ]]; then ARGS+=(-e "DISPLAY=$DISPLAY" -v /tmp/.X11-unix:/tmp/.X11-unix); fi
-docker run "${ARGS[@]}" "$IMAGE_NAME" python3 /camera_streamer/teleop_camera_app.py   --config /runtime/receiver.yaml --source rtp --mode "$DISPLAY_MODE"
+attempt=0
+while (( ! stopping )); do
+  if ! kill -0 "$runtime_pid" 2>/dev/null; then
+    echo "CloudXR runtime stopped; Quest video receiver is exiting." >&2
+    break
+  fi
+  attempt=$((attempt + 1))
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  echo "Starting Quest XR video receiver (attempt $attempt)..." >&2
+  if docker run "${ARGS[@]}" "$IMAGE_NAME" \
+      python3 /camera_streamer/teleop_camera_app.py \
+      --config /runtime/receiver.yaml --source rtp --mode "$DISPLAY_MODE"; then
+    status=0
+  else
+    status=$?
+  fi
+  if (( stopping )); then break; fi
+  echo "Quest XR video receiver exited with status $status; retrying in 2 seconds without affecting teleoperation." >&2
+  sleep 2
+done

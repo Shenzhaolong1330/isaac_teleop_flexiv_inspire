@@ -65,6 +65,8 @@ def test_ft_failure_best_effort_idles_and_keeps_available_statistics() -> None:
             min_samples=2,
             operational_timeout_s=0.01,
             primitive_timeout_s=0.01,
+            enable_settle_timeout_s=0.01,
+            enable_settle_window_s=0.002,
             poll_interval_s=0.0,
         ),
         sleep=lambda duration: None,

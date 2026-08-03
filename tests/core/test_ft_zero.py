@@ -46,6 +46,8 @@ def config() -> FTZeroConfig:
         min_samples=3,
         operational_timeout_s=0.01,
         primitive_timeout_s=0.01,
+        enable_settle_timeout_s=0.02,
+        enable_settle_window_s=0.003,
         poll_interval_s=0.002,
         max_joint_velocity_norm=0.01,
         max_tcp_velocity_norm=0.01,
@@ -99,6 +101,24 @@ def test_success_is_left_then_right_and_records_statistics() -> None:
     assert events[-1]["event_type"] == "ft_zero_completed"
 
 
+def test_reset_clears_both_controller_faults_before_zeroing() -> None:
+    backend = MockBackend()
+    backend.is_faulted = {"left": True, "right": True}
+    value, _, _, _ = manager(backend)
+
+    result = value.zero(request())
+
+    assert result.success
+    assert backend.is_faulted == {"left": False, "right": False}
+    assert backend.events[:2] == [
+        ("left", "clear_fault"),
+        ("right", "clear_fault"),
+    ]
+    assert backend.events.index(("right", "clear_fault")) < backend.events.index(
+        ("left", "zero_ft")
+    )
+
+
 def test_operational_timeout_fails_and_never_becomes_ready() -> None:
     backend = MockBackend()
     backend.is_operational["left"] = False
@@ -137,6 +157,40 @@ def test_joint_or_tcp_motion_rejects_preflight() -> None:
     result = value.zero(request())
     assert not result.success
     assert "stability" in result.failure_reason
+
+
+def test_short_dual_arm_rebound_after_enable_is_waited_out() -> None:
+    class EnableReboundBackend(MockBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rebound_samples = 0
+
+        def enable(self, side: str, *, local_console: bool) -> None:
+            super().enable(side, local_console=local_console)
+            self.rebound_samples = 3
+
+        def observe_both(self):
+            sample = super().observe_both()
+            if self.rebound_samples <= 0:
+                return sample
+            self.rebound_samples -= 1
+            return replace(
+                sample,
+                right=replace(
+                    sample.right,
+                    dq=np.full(7, 0.02),
+                    tcp_velocity=np.full(6, 0.02),
+                ),
+            )
+
+    backend = EnableReboundBackend()
+    value, _, _, _ = manager(backend)
+
+    result = value.zero(request())
+
+    assert result.success
+    assert ("left", "zero_ft") in backend.events
+    assert ("right", "zero_ft") in backend.events
 
 
 def test_hand_motion_rejects_transaction() -> None:

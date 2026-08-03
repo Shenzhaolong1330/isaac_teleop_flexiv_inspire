@@ -143,11 +143,28 @@ def test_typed_codec_roundtrips_home_and_cartesian_impedance_fields() -> None:
         "physical_pedal": True,
         "collision_clear": True,
         "local_authorization_token": "token",
+        "lift_enabled": True,
+        "left_lift_safe_z_m": -0.377676,
+        "right_lift_safe_z_m": -0.413296,
+        "lift_max_linear_velocity": 0.12,
+        "lift_max_angular_velocity": 0.5,
+        "lift_max_linear_acceleration": 0.5,
+        "lift_max_angular_acceleration": 1.0,
+        "lift_tolerance_m": 0.005,
+        "lift_timeout_s": 12.0,
+        "lift_parallel": False,
+        "lift_cartesian_stiffness": [3000.0, 3000.0, 3000.0, 200.0, 200.0, 200.0],
+        "lift_cartesian_damping_ratio": [0.7] * 6,
     }
     kind, _, decoded_home = codec.decode(codec.encode("home_command", 3, home))
     assert kind == "home_command"
     assert decoded_home["request_sequence"] == "42"
     assert decoded_home["right_joint_positions"] == [0.1] * 7
+    assert decoded_home["lift_enabled"] is True
+    assert decoded_home["left_lift_safe_z_m"] == pytest.approx(-0.377676)
+    assert decoded_home["lift_cartesian_stiffness"] == [
+        3000.0, 3000.0, 3000.0, 200.0, 200.0, 200.0
+    ]
     target = {
         "tcp_pose_rdk": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
         "max_linear_velocity": 0.05,

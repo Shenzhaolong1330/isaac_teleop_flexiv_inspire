@@ -92,11 +92,21 @@ def cartesian_target_from_point(
     max_rotation_step_rad: float,
     previous_output_quaternion_xyzw: np.ndarray | None,
     world_from_base: BaseTransform | None = None,
+    enforce_step_limits: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     if side not in {"left", "right"}:
         raise ValueError("side must be left or right")
     delta_xyz = point.left_delta_xyz if side == "left" else point.right_delta_xyz
-    if float(np.linalg.norm(delta_xyz)) > max_translation_step_m:
+    # The Quest mapper clamps a long-but-valid sample to this exact boundary.
+    # Floating-point normalization can produce e.g. 0.010000000000000002 for a
+    # configured 0.01 m limit.  Treat only a materially larger value as an
+    # over-step; otherwise the first clamped frame permanently latches the
+    # control bridge in ``invalid_command``.
+    translation_tolerance = max(1.0e-12, abs(max_translation_step_m) * 1.0e-12)
+    if enforce_step_limits and (
+        float(np.linalg.norm(delta_xyz))
+        > max_translation_step_m + translation_tolerance
+    ):
         raise ValueError(f"{side} translation step exceeds safety limit")
     position, previous_quaternion = rdk_pose_to_ros_pose(previous_safe_pose_rdk)
     previous_rotation = quaternion_xyzw_to_matrix(previous_quaternion)
@@ -116,7 +126,11 @@ def cartesian_target_from_point(
         new_rotation = quaternion_xyzw_to_matrix(delta_quaternion) @ previous_rotation
     else:
         raise ValueError("initial hardware controller supports Cartesian modes only")
-    if geodesic_distance_rad(previous_rotation, new_rotation) > max_rotation_step_rad:
+    rotation_tolerance = max(1.0e-12, abs(max_rotation_step_rad) * 1.0e-12)
+    if enforce_step_limits and (
+        geodesic_distance_rad(previous_rotation, new_rotation)
+        > max_rotation_step_rad + rotation_tolerance
+    ):
         raise ValueError(f"{side} rotation step exceeds safety limit")
     output_quaternion = matrix_to_quaternion_xyzw(
         new_rotation,

@@ -35,9 +35,14 @@ def test_rendered_bridge_and_receiver_use_identical_ports_and_rates(tmp_path):
     assert receiver["source"] == "rtp"
     for name, camera in config.document["cameras"]["streams"].items():
         assert bridge[f"streams.{name}.fps"] == float(camera["fps"])
-        assert bridge[f"streams.{name}.port"] == receiver["cameras"][name]["streams"]["mono"]["port"]
-        assert receiver["cameras"][name]["width"] == camera["width"]
-        assert receiver["cameras"][name]["height"] == camera["height"]
+        enabled = bool(config.document["xr_video"]["streams"][name]["enabled"])
+        assert bridge[f"streams.{name}.enabled"] is enabled
+        if enabled:
+            assert bridge[f"streams.{name}.port"] == receiver["cameras"][name]["streams"]["mono"]["port"]
+            assert receiver["cameras"][name]["width"] == camera["width"]
+            assert receiver["cameras"][name]["height"] == camera["height"]
+        else:
+            assert name not in receiver["cameras"]
 
 
 def test_encoder_stop_joins_worker_and_rejects_late_frames():

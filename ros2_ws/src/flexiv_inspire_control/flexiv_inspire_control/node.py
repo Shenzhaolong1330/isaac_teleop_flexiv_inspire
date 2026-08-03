@@ -44,6 +44,7 @@ from isaac_teleop_core.control import (
     ControlArbiter,
     ControlState,
     GateInputs,
+    HoldReason,
     TransitionError,
 )
 
@@ -52,6 +53,13 @@ from .conversion import cartesian_target_from_point, command_from_ros
 from .frames import load_base_transforms, rdk_pose_base_to_world
 from .foot_pedal import KEY_DOWN
 from .ipc_client import RDKIPCClient
+
+
+# The daemon rejects Home packets whose wire TTL exceeds 250 ms.  Use nearly
+# the full allowance so a loaded XR/camera host still has time to schedule and
+# dispatch the next keepalive, while the daemon's independent 250 ms watchdog
+# remains the final motion-stop deadline.
+_HOME_KEEPALIVE_WIRE_TTL_NS = 240_000_000
 
 
 def _time_from_ns(value: int) -> Time:
@@ -99,6 +107,9 @@ class ControlBridge(Node):
         )
         self.declare_parameter("enable_key_code", KEY_DOWN)
         self.declare_parameter("observation_rate_hz", 200.0)
+        # Site default: Flexiv remains the motion-safety authority. The bridge
+        # only requires fresh, connected and finite observations.
+        self.declare_parameter("software_safety_limits_enabled", False)
         self.declare_parameter("max_translation_step_m", 0.01)
         self.declare_parameter("max_rotation_step_rad", 0.10)
         self.declare_parameter("max_linear_velocity_m_s", 0.20)
@@ -128,13 +139,23 @@ class ControlBridge(Node):
         self.declare_parameter("home_max_acceleration_rad_s2", 1.0)
         self.declare_parameter("home_tolerance_rad", 0.01)
         self.declare_parameter("home_timeout_s", 20.0)
+        self.declare_parameter("home_lift_enabled", True)
+        self.declare_parameter("home_lift_left_safe_z_m", -0.377676)
+        self.declare_parameter("home_lift_right_safe_z_m", -0.413296)
+        self.declare_parameter("home_lift_max_linear_velocity_m_s", 0.12)
+        self.declare_parameter("home_lift_max_angular_velocity_rad_s", 0.50)
+        self.declare_parameter("home_lift_max_linear_acceleration_m_s2", 0.50)
+        self.declare_parameter("home_lift_max_angular_acceleration_rad_s2", 1.0)
+        self.declare_parameter("home_lift_tolerance_m", 0.005)
+        self.declare_parameter("home_lift_timeout_s", 12.0)
+        self.declare_parameter("home_lift_parallel", False)
         self.declare_parameter(
             "joint_lower_limits_rad", Parameter.Type.DOUBLE_ARRAY
         )
         self.declare_parameter(
             "joint_upper_limits_rad", Parameter.Type.DOUBLE_ARRAY
         )
-        self.declare_parameter("max_joint_velocity_rad_s", 0.75)
+        self.declare_parameter("max_joint_velocity_rad_s", 2.0)
         self.declare_parameter("max_tcp_linear_speed_m_s", 0.35)
         self.declare_parameter("max_tcp_angular_speed_rad_s", 1.0)
         self.declare_parameter("max_external_force_n", 60.0)
@@ -161,6 +182,12 @@ class ControlBridge(Node):
         self._poll_thread: threading.Thread | None = None
         self._chunk_generation = 0
         self._chunk_lock = threading.Lock()
+        # Serialize the final hardware send with a clutch Stop.  The IPC
+        # client also has a lock, but a command waiting on that lock has
+        # already passed its freshness checks and can expire before it reaches
+        # the daemon.  Rechecking under this lock prevents that stale command
+        # from turning a normal pedal release into FAULT.
+        self._hardware_command_lock = threading.Lock()
         self._latest_wire: dict[str, dict] = {}
         self._safe_pose_rdk: dict[str, np.ndarray] = {}
         self._previous_output_quaternion: dict[str, np.ndarray | None] = {
@@ -187,6 +214,7 @@ class ControlBridge(Node):
         self._pending_arm_token_expiry_ns = 0
         self._pending_arm_source: CommandSource | None = None
         self._rdk_control_lease_active = False
+        self._last_gate_inputs = GateInputs()
         self._hold_sent_for_latch = False
         self._hold_request_inflight = False
         self._zero_goal_reserved = False
@@ -344,6 +372,51 @@ class ControlBridge(Node):
             raise RuntimeError(
                 "cartesian_damping_ratio must be a finite 6-vector in [0.3,0.8]"
             )
+        for side in ("left", "right"):
+            safe_z = float(
+                self.get_parameter(f"home_lift_{side}_safe_z_m").value
+            )
+            if not np.isfinite(safe_z) or not -2.0 <= safe_z <= 2.0:
+                raise RuntimeError(
+                    f"home_lift_{side}_safe_z_m must be finite and in [-2,2]"
+                )
+        lift_limits = (
+            (
+                "home_lift_max_linear_velocity_m_s",
+                "max_tcp_linear_speed_m_s",
+            ),
+            (
+                "home_lift_max_angular_velocity_rad_s",
+                "max_tcp_angular_speed_rad_s",
+            ),
+            (
+                "home_lift_max_linear_acceleration_m_s2",
+                "max_linear_acceleration_m_s2",
+            ),
+            (
+                "home_lift_max_angular_acceleration_rad_s2",
+                "max_angular_acceleration_rad_s2",
+            ),
+        )
+        for lift_name, safety_name in lift_limits:
+            lift_value = float(self.get_parameter(lift_name).value)
+            safety_value = float(self.get_parameter(safety_name).value)
+            if (
+                not np.isfinite(lift_value)
+                or lift_value <= 0.0
+                or lift_value > safety_value
+            ):
+                raise RuntimeError(
+                    f"{lift_name} must be positive and no greater than {safety_name}"
+                )
+        lift_tolerance = float(
+            self.get_parameter("home_lift_tolerance_m").value
+        )
+        lift_timeout = float(self.get_parameter("home_lift_timeout_s").value)
+        if not 0.0 < lift_tolerance <= 0.05:
+            raise RuntimeError("home_lift_tolerance_m must be in (0,0.05]")
+        if not 1.0 <= lift_timeout <= 30.0:
+            raise RuntimeError("home_lift_timeout_s must be in [1,30]")
         lower = np.asarray(
             self.get_parameter("joint_lower_limits_rad").value,
             dtype=np.float64,
@@ -406,12 +479,15 @@ class ControlBridge(Node):
                 for side in ("left", "right"):
                     self._publish_arm(side, payload[side], now)
             except Exception as exc:
-                with self._state_lock:
-                    self._last_arm_observation_ns = {"left": 0, "right": 0}
-                    self._limits_ok = False
-                    self._arm_safety_ok["left"] = False
-                    self._arm_safety_ok["right"] = False
-                self.get_logger().error(f"RDK observation failed: {exc}", throttle_duration_sec=1.0)
+                # A single local IPC timeout is common while Robot.Stop or a
+                # mode switch is completing.  Keep the last good sample and
+                # let the normal freshness window decide whether feedback is
+                # actually offline.  Clearing it immediately used to turn one
+                # 50 ms scheduling hiccup into a clutch latch.
+                self.get_logger().warning(
+                    f"RDK observation temporarily unavailable: {exc}",
+                    throttle_duration_sec=1.0,
+                )
             deadline += period
             delay = deadline - time.monotonic()
             if delay > 0:
@@ -490,6 +566,11 @@ class ControlBridge(Node):
         stamp = _time_from_ns(mapped_unix_ns)
         source_stamp = _time_from_ns(robot_time_ns)
         safe, safety_reason = self._arm_wire_safe(wire)
+        if not safe:
+            self.get_logger().warning(
+                f"{side} arm safety gate: {safety_reason}",
+                throttle_duration_sec=1.0,
+            )
         with self._state_lock:
             self._arm_safety_ok[side] = safe
             self._limits_ok = all(self._arm_safety_ok.values())
@@ -588,8 +669,6 @@ class ControlBridge(Node):
         try:
             if not bool(wire.get("connected", False)):
                 return False, "arm_disconnected"
-            if str(wire.get("fault", "")):
-                return False, f"arm_fault:{wire['fault']}"
             q = np.asarray(wire["q"], dtype=np.float64)
             dq = np.asarray(wire["dq"], dtype=np.float64)
             tcp = np.asarray(wire["tcp_velocity"], dtype=np.float64)
@@ -607,6 +686,12 @@ class ControlBridge(Node):
                 )
             ):
                 return False, "nonfinite_or_malformed_arm_observation"
+            if not bool(
+                self.get_parameter("software_safety_limits_enabled").value
+            ):
+                return True, ""
+            if str(wire.get("fault", "")):
+                return False, f"arm_fault:{wire['fault']}"
             lower = np.asarray(
                 self.get_parameter("joint_lower_limits_rad").value,
                 dtype=np.float64,
@@ -618,40 +703,57 @@ class ControlBridge(Node):
             if lower.shape != (7,) or upper.shape != (7,) or np.any(lower >= upper):
                 return False, "audited_joint_limits_not_configured"
             if np.any(q < lower) or np.any(q > upper):
-                return False, "joint_position_limit"
-            if np.max(np.abs(dq)) > float(
-                self.get_parameter("max_joint_velocity_rad_s").value
-            ):
-                return False, "joint_velocity_limit"
-            if np.linalg.norm(tcp[:3]) > float(
-                self.get_parameter("max_tcp_linear_speed_m_s").value
-            ):
-                return False, "tcp_linear_speed_limit"
-            if np.linalg.norm(tcp[3:]) > float(
-                self.get_parameter("max_tcp_angular_speed_rad_s").value
-            ):
-                return False, "tcp_angular_speed_limit"
-            if np.linalg.norm(wrench[:3]) > float(
-                self.get_parameter("max_external_force_n").value
-            ):
-                return False, "external_force_limit"
-            if np.linalg.norm(wrench[3:]) > float(
-                self.get_parameter("max_external_torque_nm").value
-            ):
-                return False, "external_torque_limit"
-            if np.max(temperature) > float(
-                self.get_parameter("max_joint_temperature_c").value
-            ):
-                return False, "joint_temperature_limit"
+                joint = int(np.flatnonzero((q < lower) | (q > upper))[0]) + 1
+                return False, f"joint_position_limit:j{joint}={q[joint - 1]:.3f}"
+            checks = (
+                (
+                    "joint_velocity_limit",
+                    float(np.max(np.abs(dq))),
+                    float(self.get_parameter("max_joint_velocity_rad_s").value),
+                ),
+                (
+                    "tcp_linear_speed_limit",
+                    float(np.linalg.norm(tcp[:3])),
+                    float(self.get_parameter("max_tcp_linear_speed_m_s").value),
+                ),
+                (
+                    "tcp_angular_speed_limit",
+                    float(np.linalg.norm(tcp[3:])),
+                    float(self.get_parameter("max_tcp_angular_speed_rad_s").value),
+                ),
+                (
+                    "external_force_limit",
+                    float(np.linalg.norm(wrench[:3])),
+                    float(self.get_parameter("max_external_force_n").value),
+                ),
+                (
+                    "external_torque_limit",
+                    float(np.linalg.norm(wrench[3:])),
+                    float(self.get_parameter("max_external_torque_nm").value),
+                ),
+                (
+                    "joint_temperature_limit",
+                    float(np.max(temperature)),
+                    float(self.get_parameter("max_joint_temperature_c").value),
+                ),
+            )
+            for name, observed, limit in checks:
+                if observed > limit:
+                    return False, f"{name}:{observed:.2f}>{limit:.2f}"
             return True, ""
         except Exception as exc:
             return False, f"arm_safety_check_failed:{type(exc).__name__}"
 
     def _on_command(self, source: CommandSource, message: BimanualCommandMsg) -> None:
         receive_ns = time.monotonic_ns()
-        if not self._emit_deviceio(
-            "/control/requested_command", message, receive_ns, critical=True
-        ):
+        capture_is_critical = self._command_may_actuate(message)
+        captured = self._emit_deviceio(
+            "/control/requested_command",
+            message,
+            receive_ns,
+            critical=capture_is_critical,
+        )
+        if capture_is_critical and not captured:
             self._arbiter.reject_invalid_command(source, now_monotonic_ns=receive_ns)
             self._send_hold_once("deviceio_requested_command_not_recorded")
             self._publish_control_state()
@@ -751,7 +853,29 @@ class ControlBridge(Node):
                         token_expiry = self._pending_arm_token_expiry_ns
                         lease_active = self._rdk_control_lease_active
                     if not lease_active and (not token or now >= token_expiry):
-                        raise RuntimeError("local control authorization is absent or expired")
+                        # The token may have expired while the operator was
+                        # preparing the headset.  Hold without classifying the
+                        # command as malformed; EpisodeController will mint a
+                        # fresh local token and re-arm the same source.
+                        self._arbiter.require_reauthorization(
+                            command.source, now_monotonic_ns=now
+                        )
+                        with self._state_lock:
+                            self._pending_arm_token = None
+                            self._pending_arm_token_expiry_ns = 0
+                            self._rdk_control_lease_active = False
+                        self._send_hold_once(
+                            HoldReason.AUTHORIZATION_EXPIRED.value
+                        )
+                        self._publish_trace(
+                            message,
+                            None,
+                            None,
+                            "local control authorization is absent or expired",
+                            receive_ns,
+                        )
+                        self._publish_control_state()
+                        return
                     payload = {
                         "session_id": command.session_id,
                         "source": command.source.value,
@@ -774,7 +898,29 @@ class ControlBridge(Node):
                 self._safe_pub.publish(point_message)
                 safe_message = point_message
                 if targets:
-                    kind, response = self._ipc_command.request("cartesian_command", payload)
+                    with self._hardware_command_lock:
+                        with self._chunk_lock:
+                            cancelled = generation != self._chunk_generation
+                        cancelled = (
+                            cancelled
+                            or self._arbiter.snapshot.state
+                            is not ControlState.ACTIVE
+                            or not self._physical_pedal
+                            or time.monotonic_ns()
+                            >= command.expires_monotonic_ns
+                        )
+                        if cancelled:
+                            self._publish_trace(
+                                message,
+                                safe_message,
+                                None,
+                                "clutch released before hardware send",
+                                receive_ns,
+                            )
+                            return
+                        kind, response = self._ipc_command.request(
+                            "cartesian_command", payload
+                        )
                     if kind != "command_ack" or not response.get("accepted", False):
                         raise RuntimeError(f"RDK rejected command: {response.get('reason', kind)}")
                     # The token establishes a daemon lease. Later points remain
@@ -797,7 +943,43 @@ class ControlBridge(Node):
                 self._sent_pub.publish(point_message)
                 self._publish_trace(point_message, point_message, point_message, "", receive_ns)
             except Exception as exc:
-                if safe_message is None:
+                if self._is_expired_control_authorization(exc):
+                    # A token can expire in the few microseconds between the
+                    # local preflight and daemon-side consume.  It is an
+                    # expected one-shot-authorization race, not a failed RDK
+                    # send or a robot fault.  Keep the hold routine so Home
+                    # and the episode controller can recover normally.
+                    self._arbiter.require_reauthorization(
+                        command.source,
+                        now_monotonic_ns=time.monotonic_ns(),
+                    )
+                    with self._state_lock:
+                        self._safe_pose_rdk.clear()
+                        self._previous_output_quaternion = {
+                            "left": None, "right": None
+                        }
+                        self._rdk_control_lease_active = False
+                        self._pending_arm_source = None
+                        self._pending_arm_token = None
+                        self._pending_arm_token_expiry_ns = 0
+                    self._send_hold_once(HoldReason.AUTHORIZATION_EXPIRED.value)
+                    self._publish_trace(
+                        message, safe_message, None, str(exc), receive_ns
+                    )
+                    self._publish_control_state()
+                    return
+                routine_daemon_hold = self._routine_daemon_hold_reason(exc)
+                if routine_daemon_hold is not None and safe_message is not None:
+                    # The daemon says the robot is already stopped for the
+                    # preceding clutch release. Mirror that recoverable latch
+                    # locally; do not turn a harmless release/press race into
+                    # FAULT merely because the point crossed the safe topic.
+                    self._arbiter.observe_hardware_hold(
+                        command.source,
+                        routine_daemon_hold,
+                        now_monotonic_ns=time.monotonic_ns(),
+                    )
+                elif safe_message is None:
                     # A point rejected before the hardware boundary is an
                     # invalid active-chain command and enters recoverable,
                     # latched hold. A point rejected after publication as safe
@@ -807,7 +989,14 @@ class ControlBridge(Node):
                         now_monotonic_ns=time.monotonic_ns(),
                     )
                 else:
-                    self._arbiter.fault()
+                    # In practical mode, command IPC timeouts and RDK
+                    # rejections are recoverable. Flexiv itself owns the
+                    # hardware fault/stop behavior; the bridge must not add a
+                    # permanent FAULT latch on top of it.
+                    self._arbiter.require_reauthorization(
+                        command.source,
+                        now_monotonic_ns=time.monotonic_ns(),
+                    )
                 with self._state_lock:
                     # Never retain an unacknowledged target as the next delta
                     # origin. Observation polling will rebase from measurement.
@@ -819,10 +1008,34 @@ class ControlBridge(Node):
                     self._pending_arm_source = None
                     self._pending_arm_token = None
                     self._pending_arm_token_expiry_ns = 0
-                self._send_hold_once(f"send_failure:{exc}")
-                self._publish_trace(message, safe_message, None, str(exc), receive_ns)
+                hold_reason = (
+                    routine_daemon_hold.value
+                    if routine_daemon_hold is not None
+                    else f"send_failure:{exc}"
+                )
+                self._send_hold_once(hold_reason)
+                self._publish_trace(
+                    message, safe_message, None, str(exc), receive_ns
+                )
                 self._publish_control_state()
                 return
+
+    @staticmethod
+    def _is_expired_control_authorization(exc: Exception) -> bool:
+        reason = str(exc).lower()
+        return (
+            "authorization is missing, expired or consumed" in reason
+            or "authorization expired" in reason
+        )
+
+    @staticmethod
+    def _routine_daemon_hold_reason(exc: Exception) -> HoldReason | None:
+        reason = str(exc).lower()
+        if "hold_latched:physical_pedal_released" in reason:
+            return HoldReason.PEDAL_RELEASED
+        if "hold_latched:source_deadman_released" in reason:
+            return HoldReason.DEADMAN_RELEASED
+        return None
 
     @staticmethod
     def _single_point_message(
@@ -884,6 +1097,11 @@ class ControlBridge(Node):
                 max_rotation_step_rad=float(self.get_parameter("max_rotation_step_rad").value),
                 previous_output_quaternion_xyzw=previous_quaternion,
                 world_from_base=self._world_from_base[side],
+                enforce_step_limits=bool(
+                    self.get_parameter(
+                        "software_safety_limits_enabled"
+                    ).value
+                ),
             )
             candidate_poses[side] = target.copy()
             candidate_quaternions[side] = output_quaternion.copy()
@@ -950,9 +1168,13 @@ class ControlBridge(Node):
             if kind != "command_ack" or not response.get("accepted", False):
                 raise RuntimeError(response.get("reason", kind))
         except Exception as exc:
-            with self._state_lock:
-                self._hand_connected[side] = False
-            self.get_logger().error(f"hand observation IPC failed: {exc}")
+            # The ROS hand observation itself is still valid.  This IPC copy
+            # is used by the daemon's maintenance monitor and must not make a
+            # healthy Inspire hand appear offline during normal teleop.
+            self.get_logger().warning(
+                f"hand observation IPC temporarily unavailable: {exc}",
+                throttle_duration_sec=1.0,
+            )
         self._update_gates(now)
 
     def _current_hand_angles(self, side: str) -> np.ndarray:
@@ -973,6 +1195,12 @@ class ControlBridge(Node):
 
     def _on_pedal_state(self, pressed: bool) -> None:
         self._physical_pedal = pressed
+        if not pressed:
+            # Cancel every scheduled/in-flight chunk before issuing the
+            # measured hardware hold. A fresh press will rebase from the
+            # latest observation and start a new command generation.
+            with self._chunk_lock:
+                self._chunk_generation += 1
         self._update_gates(time.monotonic_ns())
         snapshot = self._arbiter.snapshot
         if not pressed and snapshot.state is ControlState.HOLD_LATCHED:
@@ -993,17 +1221,75 @@ class ControlBridge(Node):
                 raise ValueError("empty authorization token")
             if expires <= time.monotonic_ns():
                 raise ValueError("authorization token is already expired")
-            if self._arbiter.snapshot.state is ControlState.HOLD_LATCHED:
+            snapshot = self._arbiter.snapshot
+            if snapshot.state is ControlState.HOLD_LATCHED:
                 self._arbiter.clear_hold(local_acknowledged=True)
-            self._arbiter.arm(source)
-            self._pending_arm_source = source
-            self._pending_arm_token = token
-            self._pending_arm_token_expiry_ns = expires
-            self._rdk_control_lease_active = False
+                snapshot = self._arbiter.snapshot
+            if snapshot.state is ControlState.READY:
+                with self._state_lock:
+                    self._rdk_control_lease_active = False
+            elif (
+                snapshot.active_source is not source
+                or snapshot.state
+                not in {
+                    ControlState.TELEOP_ARMED,
+                    ControlState.POLICY_ARMED,
+                    ControlState.REPLAY_ARMED,
+                    ControlState.ACTIVE,
+                }
+            ):
+                raise RuntimeError(
+                    "authorization refresh does not match the armed source"
+                )
+            # A periodic refresh is valid while the same source is armed or
+            # active. It must not tear down the daemon lease mid-teleop.
+            with self._state_lock:
+                self._pending_arm_source = source
+                self._pending_arm_token = token
+                self._pending_arm_token_expiry_ns = expires
             self._hold_sent_for_latch = False
+            self._try_arm_pending_authorization(time.monotonic_ns())
         except Exception as exc:
             self.get_logger().error(f"control authorization rejected: {exc}")
         self._publish_control_state()
+
+    @staticmethod
+    def _gates_allow_arm(gates: GateInputs) -> bool:
+        return bool(
+            gates.local_permission
+            and gates.physical_pedal
+            and gates.arms_online
+            and gates.hands_online
+            and gates.limits_ok
+            and gates.collision_clear
+            and not gates.hardware_fault
+        )
+
+    def _try_arm_pending_authorization(self, now: int) -> bool:
+        """Arm only after observations recover from the blocking RDK Stop.
+
+        A routine Stop/mode transition can briefly make the 100/200 ms
+        observation freshness gates false. Keeping the bridge in READY during
+        that interval avoids immediately latching arm_offline/hand_offline on
+        the first packet after a pedal press.
+        """
+
+        with self._state_lock:
+            source = self._pending_arm_source
+            token = self._pending_arm_token
+            expires = self._pending_arm_token_expiry_ns
+            if self._arbiter.snapshot.state is not ControlState.READY:
+                return False
+            gates = self._last_gate_inputs
+            if (
+                source is None
+                or not token
+                or now >= expires
+                or not self._gates_allow_arm(gates)
+            ):
+                return False
+            self._arbiter.arm(source)
+            return True
 
     def _on_home_authorization(self, message: String) -> None:
         try:
@@ -1016,6 +1302,10 @@ class ControlBridge(Node):
                 raise ValueError("empty Home authorization token")
             if expires <= time.monotonic_ns():
                 raise ValueError("Home authorization token is already expired")
+            if bool(payload.get("clear_hold_latched", False)):
+                snapshot = self._arbiter.snapshot
+                if snapshot.state is ControlState.HOLD_LATCHED:
+                    self._arbiter.clear_hold(local_acknowledged=True)
             with self._state_lock:
                 if self._home_inflight:
                     raise RuntimeError("Home is already active")
@@ -1141,12 +1431,11 @@ class ControlBridge(Node):
             for side in ("left", "right")
         ):
             return "arm_observation_stale"
-        if not all(
-            self._hand_connected[side]
-            and now - self._last_hand_observation_ns[side] <= 200_000_000
-            for side in ("left", "right")
-        ):
-            return "hand_observation_stale"
+        # Arm Home has no hand target and the post-Home hand open/close/open
+        # sequence is supervised independently by the DFTP driver.  A delayed
+        # Inspire observation must therefore not strand the arms away from
+        # Home.  Hand freshness remains mandatory for F/T-zero preview and for
+        # any command carrying LEFT_HAND/RIGHT_HAND targets.
         return ""
 
     def _run_home(self, request_id: str, clear_routine_hold: bool = False) -> None:
@@ -1154,7 +1443,19 @@ class ControlBridge(Node):
         failure = ""
         try:
             timeout_s = float(self.get_parameter("home_timeout_s").value)
-            local_deadline = time.monotonic() + timeout_s + 5.0
+            lift_budget_s = 0.0
+            if bool(self.get_parameter("home_lift_enabled").value):
+                lift_count = (
+                    1
+                    if bool(self.get_parameter("home_lift_parallel").value)
+                    else 2
+                )
+                lift_budget_s = lift_count * float(
+                    self.get_parameter("home_lift_timeout_s").value
+                )
+            local_deadline = (
+                time.monotonic() + timeout_s + lift_budget_s + 5.0
+            )
             first = True
             while not self._stop.is_set():
                 now = time.monotonic_ns()
@@ -1169,7 +1470,9 @@ class ControlBridge(Node):
                 payload = {
                     "session_id": self._session_id,
                     "request_sequence": str(self._home_sequence),
-                    "expires_monotonic_ns": str(now + 150_000_000),
+                    "expires_monotonic_ns": str(
+                        now + _HOME_KEEPALIVE_WIRE_TTL_NS
+                    ),
                     "left_joint_positions": list(
                         self.get_parameter("home_left_joints_rad").value
                     ),
@@ -1188,6 +1491,56 @@ class ControlBridge(Node):
                         self.get_parameter("home_tolerance_rad").value
                     ),
                     "timeout_s": timeout_s,
+                    "lift_enabled": bool(
+                        self.get_parameter("home_lift_enabled").value
+                    ),
+                    "left_lift_safe_z_m": float(
+                        self.get_parameter("home_lift_left_safe_z_m").value
+                    ),
+                    "right_lift_safe_z_m": float(
+                        self.get_parameter("home_lift_right_safe_z_m").value
+                    ),
+                    "lift_max_linear_velocity": float(
+                        self.get_parameter(
+                            "home_lift_max_linear_velocity_m_s"
+                        ).value
+                    ),
+                    "lift_max_angular_velocity": float(
+                        self.get_parameter(
+                            "home_lift_max_angular_velocity_rad_s"
+                        ).value
+                    ),
+                    "lift_max_linear_acceleration": float(
+                        self.get_parameter(
+                            "home_lift_max_linear_acceleration_m_s2"
+                        ).value
+                    ),
+                    "lift_max_angular_acceleration": float(
+                        self.get_parameter(
+                            "home_lift_max_angular_acceleration_rad_s2"
+                        ).value
+                    ),
+                    "lift_tolerance_m": float(
+                        self.get_parameter("home_lift_tolerance_m").value
+                    ),
+                    "lift_timeout_s": float(
+                        self.get_parameter("home_lift_timeout_s").value
+                    ),
+                    "lift_parallel": bool(
+                        self.get_parameter("home_lift_parallel").value
+                    ),
+                    "lift_cartesian_stiffness": [
+                        float(value)
+                        for value in self.get_parameter(
+                            "cartesian_position_stiffness"
+                        ).value
+                    ],
+                    "lift_cartesian_damping_ratio": [
+                        float(value)
+                        for value in self.get_parameter(
+                            "cartesian_damping_ratio"
+                        ).value
+                    ],
                     "safety_validated": True,
                     "local_permission": self._local_permission,
                     "collision_clear": self._collision_clear,
@@ -1201,7 +1554,14 @@ class ControlBridge(Node):
                 kind, response = self._ipc_maintenance.request(
                     "home_command",
                     payload,
-                    timeout_s=20.0 if first else 0.10,
+                    # A keepalive can also advance the daemon from one lift
+                    # arm to the other, or from Cartesian lift to joint Home.
+                    # Flexiv mode changes are synchronous and take several
+                    # seconds on hardware.  The old 100 ms receive timeout
+                    # closed the IPC socket while that valid transition was
+                    # still executing, aborting Reset immediately after the
+                    # "safe height reached" progress message.
+                    timeout_s=20.0 if first else 10.0,
                 )
                 if kind != "home_result" or not response.get("accepted", False):
                     raise RuntimeError(response.get("reason", kind))
@@ -1212,13 +1572,14 @@ class ControlBridge(Node):
                     self._pending_home_token = None
                     self._pending_home_token_expiry_ns = 0
                 error = float(response.get("max_position_error_rad", 0.0))
+                completed = bool(response.get("completed", False))
                 self._publish_home_status(
-                    "complete" if response.get("completed", False) else "moving",
-                    "",
+                    "complete" if completed else "moving",
+                    "" if completed else str(response.get("reason", "")),
                     max_position_error_rad=error,
                     request_id=request_id,
                 )
-                if response.get("completed", False):
+                if completed:
                     self.get_logger().info("dual-arm Home completed")
                     return
                 if self._stop.wait(0.04):
@@ -1272,6 +1633,9 @@ class ControlBridge(Node):
         publisher.publish(message)
 
     def _update_gates(self, now: int) -> None:
+        practical_mode = not bool(
+            self.get_parameter("software_safety_limits_enabled").value
+        )
         hands_online = all(
             self._hand_connected[side]
             and now - self._last_hand_observation_ns[side] <= 200_000_000
@@ -1281,25 +1645,29 @@ class ControlBridge(Node):
             self._last_arm_observation_ns[side] > 0
             and now - self._last_arm_observation_ns[side] <= 100_000_000
             and bool(self._latest_wire.get(side, {}).get("connected", False))
-            and not str(self._latest_wire.get(side, {}).get("fault", ""))
+            and (
+                practical_mode
+                or not str(self._latest_wire.get(side, {}).get("fault", ""))
+            )
             for side in ("left", "right")
         )
-        hardware_fault = any(
+        hardware_fault = False if practical_mode else any(
             bool(str(self._latest_wire.get(side, {}).get("fault", "")))
             for side in ("left", "right")
         )
-        self._arbiter.update_gates(
-            GateInputs(
-                local_permission=self._local_permission,
-                physical_pedal=self._physical_pedal,
-                arms_online=arms_online,
-                hands_online=hands_online,
-                limits_ok=self._limits_ok,
-                collision_clear=self._collision_clear,
-                hardware_fault=hardware_fault,
-            ),
-            now_monotonic_ns=now,
+        gates = GateInputs(
+            local_permission=self._local_permission,
+            physical_pedal=self._physical_pedal,
+            arms_online=arms_online,
+            hands_online=hands_online,
+            limits_ok=True if practical_mode else self._limits_ok,
+            collision_clear=True if practical_mode else self._collision_clear,
+            hardware_fault=hardware_fault,
         )
+        with self._state_lock:
+            self._last_gate_inputs = gates
+        self._arbiter.update_gates(gates, now_monotonic_ns=now)
+        self._try_arm_pending_authorization(now)
 
     def _watchdog_tick(self) -> None:
         now = time.monotonic_ns()
@@ -1315,18 +1683,41 @@ class ControlBridge(Node):
                 return
             self._hold_request_inflight = True
         try:
-            kind, response = self._ipc_command.request(
-                "hold", {"reason": reason, "latch": True}
-            )
+            with self._hardware_command_lock:
+                kind, response = self._ipc_command.request(
+                    "hold",
+                    {"reason": reason, "latch": True},
+                    # Flexiv Robot.Stop is synchronous and commonly exceeds
+                    # the 50 ms observation IPC timeout. Waiting for its one
+                    # response prevents watchdog retries from stacking more
+                    # Stop calls and starving every observation channel.
+                    timeout_s=5.0,
+                )
             if kind != "command_ack" or not response.get("accepted", False):
                 raise RuntimeError(response.get("reason", kind))
             with self._state_lock:
                 self._hold_sent_for_latch = True
         except Exception as exc:
-            self.get_logger().error(
-                f"RDK hold request failed (watchdog will retry): {exc}",
-                throttle_duration_sec=1.0,
-            )
+            reason = str(exc)
+            if any(
+                marker in reason.lower()
+                for marker in ("minor fault", "not operational")
+            ):
+                # A non-operational controller is already unable to execute
+                # motion. Robot.Stop cannot succeed until Reset/ClearFault, so
+                # retrying it every watchdog tick only starves observation IPC.
+                with self._state_lock:
+                    self._hold_sent_for_latch = True
+                self.get_logger().error(
+                    "Flexiv 控制器故障；已停止重复发送 Stop，请执行 robot reset。"
+                    f"详情：{reason}",
+                    throttle_duration_sec=5.0,
+                )
+            else:
+                self.get_logger().error(
+                    f"RDK hold request failed (watchdog will retry): {exc}",
+                    throttle_duration_sec=1.0,
+                )
         finally:
             with self._state_lock:
                 self._hold_request_inflight = False
@@ -1507,8 +1898,27 @@ class ControlBridge(Node):
             )
             return True
         except (BufferError, RuntimeError, ValueError) as exc:
-            self.get_logger().error(f"critical DeviceIO capture failed for {topic}: {exc}")
+            priority = "critical" if critical else "best-effort"
+            self.get_logger().error(
+                f"{priority} DeviceIO capture failed for {topic}: {exc}"
+            )
             return False
+
+    @staticmethod
+    def _command_may_actuate(message) -> bool:
+        """Return whether a requested command can cross a hardware boundary.
+
+        Teleop intentionally publishes neutral packets continuously while the
+        middle pedal is released.  Those packets are useful observations, but
+        retaining them as critical DeviceIO records before an episode ingress
+        exists fills the protected queue and incorrectly latches control.  A
+        deadman-authorized command with at least one valid target remains
+        critical and therefore fail-closed.
+        """
+
+        return bool(getattr(message, "deadman", False)) and bool(
+            int(getattr(message, "valid_mask", 0))
+        )
 
     def _publish_trace(self, requested, safe, sent, rejection: str, started_ns: int) -> None:
         trace = CommandTrace()
@@ -1526,7 +1936,14 @@ class ControlBridge(Node):
         trace.rejection_reason = rejection
         trace.validation_latency = _duration_from_ns(max(0, time.monotonic_ns() - started_ns))
         self._emit_deviceio(
-            "/control/command_trace", trace, time.monotonic_ns(), critical=True
+            "/control/command_trace",
+            trace,
+            time.monotonic_ns(),
+            critical=(
+                safe is not None
+                or sent is not None
+                or self._command_may_actuate(requested)
+            ),
         )
         self._trace_pub.publish(trace)
 

@@ -277,6 +277,12 @@ class RDKRequestDispatcher:
         control_authorizations: LocalControlAuthorization | None = None,
         home_authorizations: LocalHomeAuthorization | None = None,
         deviceio_emitter: Any | None = None,
+        cartesian_limits: tuple[float, float, float, float] = (
+            0.10,
+            0.25,
+            0.50,
+            1.0,
+        ),
         watchdog_period_s: float = 0.005,
     ) -> None:
         self._backend = backend
@@ -288,6 +294,20 @@ class RDKRequestDispatcher:
         self._control_authorizations = control_authorizations or LocalControlAuthorization()
         self._home_authorizations = home_authorizations or LocalHomeAuthorization()
         self._deviceio_emitter = deviceio_emitter
+        configured_limits = np.asarray(
+            cartesian_limits, dtype=np.float64
+        ).reshape(-1)
+        if (
+            configured_limits.shape != (4,)
+            or not np.all(np.isfinite(configured_limits))
+            or np.any(configured_limits <= 0.0)
+        ):
+            raise ValueError(
+                "cartesian_limits must contain four positive finite values"
+            )
+        self._cartesian_limits = tuple(
+            float(value) for value in configured_limits
+        )
         self._deviceio_sequence = {"left": 0, "right": 0}
         self._last_command_sequence: dict[str, int] = {}
         self._last_home_sequence = -1
@@ -296,6 +316,12 @@ class RDKRequestDispatcher:
         self._home_started_ns = 0
         self._home_timeout_ns = 0
         self._home_signature: tuple[object, ...] | None = None
+        self._home_phase = ""
+        self._home_phase_started_ns = 0
+        self._home_lift_timeout_ns = 0
+        self._home_lift_targets: dict[str, np.ndarray] = {}
+        self._home_lift_active: tuple[str, ...] = ()
+        self._home_lift_queue: list[str] = []
         self._home_authorized_session: str | None = None
         self._home_authorized_owner_pid: int | None = None
         self._home_authorized_generation: int | None = None
@@ -501,6 +527,37 @@ class RDKRequestDispatcher:
             with self._lock:
                 if not self._ft_zero.is_zeroed_for(session):
                     raise PermissionError("cannot clear hold before this session is F/T-zeroed")
+                if self._active:
+                    raise RuntimeError("cannot clear hold while motion is active")
+                # A latched hold leaves both controllers in IDLE via Robot.Stop.
+                # Prepare a fresh measured Cartesian anchor before allowing a
+                # new command token to cross the hardware boundary.
+                if self._hold_latched:
+                    errors: list[str] = []
+                    for side in ("left", "right"):
+                        try:
+                            self._backend.switch_cartesian_mode(
+                                side, local_console=True
+                            )
+                        except Exception as exc:
+                            errors.append(
+                                f"{side}:mode:{type(exc).__name__}:{exc}"
+                            )
+                    if not errors:
+                        for side in ("left", "right"):
+                            try:
+                                self._backend.send_hold_from_measurement(
+                                    side, local_authorized=True
+                                )
+                            except Exception as exc:
+                                errors.append(
+                                    f"{side}:anchor:{type(exc).__name__}:{exc}"
+                                )
+                    if errors:
+                        raise RuntimeError(
+                            "cannot prepare Cartesian control after hold: "
+                            + ";".join(errors)
+                        )
                 self._active = False
                 self._active_source = None
                 self._active_session = None
@@ -737,7 +794,7 @@ class RDKRequestDispatcher:
             float(target.get("max_linear_acceleration", 0.0)),
             float(target.get("max_angular_acceleration", 0.0)),
         )
-        maxima = (0.10, 0.25, 0.50, 1.0)
+        maxima = self._cartesian_limits
         if any(
             not np.isfinite(value) or value <= 0.0 or value > maximum
             for value, maximum in zip(limits, maxima, strict=True)
@@ -836,7 +893,7 @@ class RDKRequestDispatcher:
                 False, False, "home_keepalive_ttl_exceeds_250_ms"
             )
         try:
-            targets, limits, signature = self._validate_home(payload)
+            targets, limits, lift, signature = self._validate_home(payload)
         except Exception:
             with self._lock:
                 if self._home_active:
@@ -845,7 +902,6 @@ class RDKRequestDispatcher:
                     )
             raise
         with self._lock:
-            just_started = False
             generation = self._backend.connection_generation
             lease_active = (
                 session_id == self._home_authorized_session
@@ -916,34 +972,82 @@ class RDKRequestDispatcher:
                 self._active_session = session_id
                 self._owner_pid = owner_pid
                 self._home_timeout_ns = int(limits[3] * 1e9)
+                self._home_lift_timeout_ns = int(lift["timeout_s"] * 1e9)
                 self._home_signature = signature
                 # Mark active before the first arm write so partial mode/command
                 # transitions are always stopped by the same hold path.
                 try:
-                    for side in ("left", "right"):
-                        self._backend.switch_joint_position_mode(
-                            side, local_console=True
-                        )
-                    for side in ("left", "right"):
-                        self._backend.send_joint_position(
-                            side,
-                            targets[side],
-                            max_velocity=limits[0],
-                            max_acceleration=limits[1],
-                            local_authorized=True,
-                        )
+                    self._begin_home_motion_locked(
+                        sample, targets, limits, lift, now
+                    )
                 except Exception:
                     self._latch_hold_locked(
                         "home_start_failure", force_hardware_hold=True
                     )
                     raise
-                just_started = True
                 now = time.monotonic_ns()
-                self._home_started_ns = now
             self._last_home_sequence = sequence
-            self._command_deadline_ns = (
-                now + 150_000_000 if just_started else expires
-            )
+            if self._home_phase == "lift":
+                sample = self._home_observation()
+                for side in self._home_lift_active:
+                    arm = getattr(sample, side)
+                    if not arm.connected or arm.fault:
+                        self._latch_hold_locked(
+                            "home_lift_arm_unhealthy",
+                            force_hardware_hold=True,
+                        )
+                        return self._home_result(
+                            False, False, f"{side}_arm_unhealthy_during_home_lift"
+                        )
+                if now - self._home_phase_started_ns > self._home_lift_timeout_ns:
+                    self._latch_hold_locked(
+                        "home_lift_timeout", force_hardware_hold=True
+                    )
+                    return self._home_result(
+                        False, False, "home_lift_timeout"
+                    )
+                reached = all(
+                    float(getattr(sample, side).tcp_pose_rdk[2])
+                    >= float(self._home_lift_targets[side][2])
+                    - float(lift["tolerance_m"])
+                    for side in self._home_lift_active
+                )
+                if reached:
+                    try:
+                        if self._home_lift_queue:
+                            next_side = self._home_lift_queue.pop(0)
+                            self._start_home_lift_locked(
+                                (next_side,), lift, now
+                            )
+                        else:
+                            self._start_joint_home_locked(
+                                targets, limits, now
+                            )
+                    except Exception:
+                        self._latch_hold_locked(
+                            "home_phase_transition_failure",
+                            force_hardware_hold=True,
+                        )
+                        raise
+                if self._home_phase == "lift":
+                    remaining = max(
+                        max(
+                            0.0,
+                            float(self._home_lift_targets[side][2])
+                            - float(getattr(sample, side).tcp_pose_rdk[2]),
+                        )
+                        for side in self._home_lift_active
+                    )
+                    # RDK mode changes and observations above are synchronous
+                    # and may legitimately take longer than the request's
+                    # 150 ms wire TTL.  Arm the watchdog only after that
+                    # accepted work has finished; otherwise it can expire the
+                    # instant this lock is released, before the bridge has any
+                    # opportunity to send its next keepalive.
+                    self._command_deadline_ns = time.monotonic_ns() + 250_000_000
+                    return self._home_result(
+                        True, False, "home_lift_in_progress", remaining
+                    )
             if now - self._home_started_ns > self._home_timeout_ns:
                 self._latch_hold_locked("home_timeout", force_hardware_hold=True)
                 return self._home_result(False, False, "home_timeout")
@@ -969,7 +1073,10 @@ class RDKRequestDispatcher:
                 return self._home_result(
                     True, True, "home_complete", max_error
                 )
-        return self._home_result(True, False, "home_in_progress", max_error)
+            # As with the lift phase, start the keepalive grace period after
+            # the blocking RDK observation, not before it.
+            self._command_deadline_ns = time.monotonic_ns() + 250_000_000
+            return self._home_result(True, False, "home_in_progress", max_error)
 
     def _clear_home_authorization_locked(self) -> None:
         self._home_authorized_session = None
@@ -981,6 +1088,7 @@ class RDKRequestDispatcher:
     ) -> tuple[
         dict[str, np.ndarray],
         tuple[float, float, float, float],
+        dict[str, Any],
         tuple[object, ...],
     ]:
         targets: dict[str, np.ndarray] = {}
@@ -1010,12 +1118,186 @@ class RDKRequestDispatcher:
         if not 1.0 <= timeout <= 60.0:
             raise ValueError("Home timeout must be in [1,60] seconds")
         limits = (max_velocity, max_acceleration, tolerance, timeout)
+        lift_enabled_raw = payload.get("lift_enabled", False)
+        if not isinstance(lift_enabled_raw, bool):
+            raise ValueError("Home lift_enabled must be a bool")
+        lift: dict[str, Any] = {
+            "enabled": lift_enabled_raw,
+            "safe_z": {},
+            "motion_limits": (0.0, 0.0, 0.0, 0.0),
+            "tolerance_m": 0.0,
+            "timeout_s": 0.0,
+            "parallel": False,
+            "stiffness": np.zeros(6),
+            "damping_ratio": np.full(6, 0.7),
+        }
+        lift_signature: tuple[object, ...] = (False,)
+        if lift_enabled_raw:
+            safe_z = {
+                side: float(payload.get(f"{side}_lift_safe_z_m", np.nan))
+                for side in ("left", "right")
+            }
+            if any(
+                not np.isfinite(value) or not -2.0 <= value <= 2.0
+                for value in safe_z.values()
+            ):
+                raise ValueError("Home lift safe Z values must be finite in [-2,2]")
+            motion_limits = tuple(
+                float(payload.get(name, 0.0))
+                for name in (
+                    "lift_max_linear_velocity",
+                    "lift_max_angular_velocity",
+                    "lift_max_linear_acceleration",
+                    "lift_max_angular_acceleration",
+                )
+            )
+            if any(
+                not np.isfinite(value) or value <= 0.0 or value > maximum
+                for value, maximum in zip(
+                    motion_limits, self._cartesian_limits, strict=True
+                )
+            ):
+                raise ValueError("Home lift Cartesian safety limit is invalid")
+            lift_tolerance = float(payload.get("lift_tolerance_m", 0.0))
+            lift_timeout = float(payload.get("lift_timeout_s", 0.0))
+            if not 0.0 < lift_tolerance <= 0.05:
+                raise ValueError("Home lift tolerance must be in (0,0.05] m")
+            if not 1.0 <= lift_timeout <= 30.0:
+                raise ValueError("Home lift timeout must be in [1,30] seconds")
+            lift_parallel = payload.get("lift_parallel", False)
+            if not isinstance(lift_parallel, bool):
+                raise ValueError("Home lift_parallel must be a bool")
+            stiffness = np.asarray(
+                payload.get("lift_cartesian_stiffness", []),
+                dtype=np.float64,
+            ).reshape(-1)
+            damping_ratio = np.asarray(
+                payload.get("lift_cartesian_damping_ratio", []),
+                dtype=np.float64,
+            ).reshape(-1)
+            if stiffness.shape != (6,) or not np.all(np.isfinite(stiffness)):
+                raise ValueError("Home lift stiffness must be a finite 6-vector")
+            if damping_ratio.shape != (6,) or not np.all(np.isfinite(damping_ratio)):
+                raise ValueError(
+                    "Home lift damping ratio must be a finite 6-vector"
+                )
+            if np.any(stiffness < 0.0) or any(
+                np.any(stiffness > self._backend.nominal_cartesian_stiffness(side))
+                for side in ("left", "right")
+            ):
+                raise ValueError("Home lift stiffness exceeds RobotInfo.K_x_nom")
+            if np.any(damping_ratio < 0.3) or np.any(damping_ratio > 0.8):
+                raise ValueError("Home lift damping ratio must be in [0.3,0.8]")
+            lift = {
+                "enabled": True,
+                "safe_z": safe_z,
+                "motion_limits": motion_limits,
+                "tolerance_m": lift_tolerance,
+                "timeout_s": lift_timeout,
+                "parallel": lift_parallel,
+                "stiffness": stiffness,
+                "damping_ratio": damping_ratio,
+            }
+            lift_signature = (
+                True,
+                safe_z["left"],
+                safe_z["right"],
+                *motion_limits,
+                lift_tolerance,
+                lift_timeout,
+                lift_parallel,
+                tuple(float(value) for value in stiffness),
+                tuple(float(value) for value in damping_ratio),
+            )
         signature: tuple[object, ...] = (
             tuple(float(value) for value in targets["left"]),
             tuple(float(value) for value in targets["right"]),
             *limits,
+            *lift_signature,
         )
-        return targets, limits, signature
+        return targets, limits, lift, signature
+
+    def _begin_home_motion_locked(
+        self,
+        sample: Any,
+        targets: dict[str, np.ndarray],
+        limits: tuple[float, float, float, float],
+        lift: dict[str, Any],
+        now: int,
+    ) -> None:
+        self._home_lift_targets = {}
+        self._home_lift_active = ()
+        self._home_lift_queue = []
+        if lift["enabled"]:
+            needing_lift: list[str] = []
+            for side in ("left", "right"):
+                current = getattr(sample, side).tcp_pose_rdk.copy()
+                target = current.copy()
+                target[2] = max(
+                    float(current[2]), float(lift["safe_z"][side])
+                )
+                self._home_lift_targets[side] = target
+                if target[2] > current[2] + float(lift["tolerance_m"]):
+                    needing_lift.append(side)
+            if needing_lift:
+                if lift["parallel"]:
+                    active = tuple(needing_lift)
+                else:
+                    active = (needing_lift[0],)
+                    self._home_lift_queue = needing_lift[1:]
+                self._start_home_lift_locked(active, lift, now)
+                return
+        self._start_joint_home_locked(targets, limits, now)
+
+    def _start_home_lift_locked(
+        self,
+        sides: tuple[str, ...],
+        lift: dict[str, Any],
+        now: int,
+    ) -> None:
+        for side in sides:
+            self._backend.switch_cartesian_mode(side, local_console=True)
+        for side in sides:
+            self._backend.set_cartesian_impedance(
+                side,
+                lift["stiffness"],
+                lift["damping_ratio"],
+                local_authorized=True,
+            )
+            motion_limits = lift["motion_limits"]
+            self._backend.send_cartesian_target(
+                side,
+                self._home_lift_targets[side],
+                max_linear_velocity=motion_limits[0],
+                max_angular_velocity=motion_limits[1],
+                max_linear_acceleration=motion_limits[2],
+                max_angular_acceleration=motion_limits[3],
+                local_authorized=True,
+            )
+        self._home_lift_active = sides
+        self._home_phase = "lift"
+        self._home_phase_started_ns = now
+
+    def _start_joint_home_locked(
+        self,
+        targets: dict[str, np.ndarray],
+        limits: tuple[float, float, float, float],
+        now: int,
+    ) -> None:
+        for side in ("left", "right"):
+            self._backend.switch_joint_position_mode(
+                side, local_console=True
+            )
+        for side in ("left", "right"):
+            self._backend.send_joint_position(
+                side,
+                targets[side],
+                max_velocity=limits[0],
+                max_acceleration=limits[1],
+                local_authorized=True,
+            )
+        self._home_phase = "joint_home"
+        self._home_started_ns = now
 
     def _complete_home_locked(self) -> list[str]:
         errors: list[str] = []
@@ -1044,6 +1326,12 @@ class RDKRequestDispatcher:
         self._home_started_ns = 0
         self._home_timeout_ns = 0
         self._home_signature = None
+        self._home_phase = ""
+        self._home_phase_started_ns = 0
+        self._home_lift_timeout_ns = 0
+        self._home_lift_targets = {}
+        self._home_lift_active = ()
+        self._home_lift_queue = []
         self._hold_latched = bool(errors)
         self._hold_reason = "home_completion_hold_failed" if errors else ""
         return errors
@@ -1075,7 +1363,12 @@ class RDKRequestDispatcher:
                 "stop_requested",
                 "local_stop",
                 "command_ttl_expired",
+                "control_authorization_expired",
                 "episode_home_transition",
+                # The local bridge already stopped motion on the limit. Once
+                # live arm observations are healthy again, a pedal re-arm or
+                # explicit Home should not remain blocked by the old latch.
+                "safety_limit",
             }
             if (
                 reason == "episode_home_transition"
@@ -1087,7 +1380,7 @@ class RDKRequestDispatcher:
                     False,
                     f"non_routine_hold_preserved:{self._hold_reason}",
                 )
-            # Explicit retries always re-issue both measurement holds.
+            # Explicit retries always re-issue Stop to both controllers.
             errors = self._latch_hold_locked(reason, force_hardware_hold=True)
             if errors:
                 return self._ack(sequence, False, f"hold_failed:{';'.join(errors)}")
@@ -1099,29 +1392,23 @@ class RDKRequestDispatcher:
         errors: list[str] = []
         was_home = self._home_active
         if self._active or force_hardware_hold:
-            if was_home:
-                for side in ("left", "right"):
-                    try:
-                        self._backend.switch_cartesian_mode(
-                            side, local_console=True
-                        )
-                    except Exception as exc:
-                        errors.append(
-                            f"{side}:stop:{type(exc).__name__}:{exc}"
-                        )
             for side in ("left", "right"):
                 try:
                     if was_home or self._active or force_hardware_hold:
-                        self._backend.send_hold_from_measurement(
-                            side, local_authorized=True
-                        )
+                        self._backend.stop(side, local_console=True)
                 except Exception as exc:
-                    errors.append(f"{side}:hold:{type(exc).__name__}:{exc}")
+                    errors.append(f"{side}:stop:{type(exc).__name__}:{exc}")
         self._active = False
         self._home_active = False
         self._home_started_ns = 0
         self._home_timeout_ns = 0
         self._home_signature = None
+        self._home_phase = ""
+        self._home_phase_started_ns = 0
+        self._home_lift_timeout_ns = 0
+        self._home_lift_targets = {}
+        self._home_lift_active = ()
+        self._home_lift_queue = []
         self._hold_latched = True
         self._hold_reason = reason
         self._command_deadline_ns = 0

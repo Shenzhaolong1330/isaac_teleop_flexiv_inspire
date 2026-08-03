@@ -5,10 +5,19 @@ teleoperation workspace. It creates subscriptions only. It does not publish a
 robot command, request an RDK lease, enable a robot, zero an F/T sensor, or write
 Modbus registers.
 
-The ROS callbacks use `KEEP_LAST(depth=1)` and hand work to a latest-only
-background dispatcher. If Rerun or disk output is slower than the observation
-rate, old pending samples are replaced instead of blocking control or building
-latency.
+The ROS callbacks use `KEEP_LAST(depth=1)` and hand work to independent
+latest-only background lanes for telemetry, tactile, images, and point clouds.
+If Rerun or disk output is slower than the observation rate, old pending
+samples are replaced instead of blocking control or building latency. A large
+point-cloud decode therefore cannot delay arm state, tactile, or RGB. Live mode
+subscribes to RGB, Z16 depth, PointCloud2, both arm and hand
+states, both tactile frames, requested/safe/sent commands and control state.
+Only this viewer path is rate-limited (by default 5 Hz telemetry, 10 Hz tactile
+and images, and 2 Hz point clouds); rosbag and native DeviceIO retain their
+configured source frequencies unchanged.
+The viewer uses fixed modality tabs instead of auto-generated views. The
+tactile tab shows one anatomically arranged heatmap per hand; exact uint16
+taxels remain available under each hand's `atlas_raw_u16` entity.
 
 ## Live viewer
 
@@ -51,9 +60,10 @@ atlas. Finger end/tip/pad surfaces run from top to bottom, the palm is below
 the four fingers, and the thumb runs along the outside edge. The right-hand
 atlas mirrors the left. The default Rerun blueprint contains exactly two
 equal-width plots: one composite atlas for the left hand and one for the right.
-Individual surface entities remain available for diagnostics but are not
-expanded into separate default views. Values remain raw `uint16`; there is
-deliberately no division by 4096.
+The exact values remain available in the raw atlas as `uint16`; there is
+deliberately no division by 4096. The display atlas uses a dark-blue zero
+baseline and a grey-blue sensor outline, so inactive surfaces still show the
+shape of the hand, while active taxels use a blue-to-red scale.
 
 ## Hardware-free smoke
 

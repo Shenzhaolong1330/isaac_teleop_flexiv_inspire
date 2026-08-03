@@ -49,6 +49,7 @@ class _Preflight(Node):
         self.hand_seen: dict[str, HandState] = {}
         self.control_state: ControlState | None = None
         self.home_status: dict[str, object] | None = None
+        self._last_home_progress = ""
         for side in ("left", "right"):
             self.create_subscription(
                 HandState,
@@ -83,6 +84,14 @@ class _Preflight(Node):
             return
         if isinstance(payload, dict):
             self.home_status = payload
+            state = str(payload.get("state", "")).strip().lower()
+            reason = str(payload.get("reason", "")).strip()
+            if state == "moving" and reason != self._last_home_progress:
+                if reason == "home_lift_in_progress":
+                    print("Home: 正在竖直抬升 TCP 到安全高度", flush=True)
+                elif reason == "home_in_progress":
+                    print("Home: 安全高度已到达，正在执行关节 Home", flush=True)
+                self._last_home_progress = reason
 
 
 def _spin_until(node: Node, predicate, timeout_s: float) -> None:
@@ -185,6 +194,7 @@ def _publish_home_authorization_and_request(
                 "session_id": session_id,
                 "one_time_token": authorization["one_time_token"],
                 "expires_monotonic_ns": authorization["expires_monotonic_ns"],
+                "clear_hold_latched": clear_hold_latched,
             },
             separators=(",", ":"),
         )
@@ -250,10 +260,12 @@ def _ft_zero_mode(state_name: str, ft_zeroed_for_session: bool) -> str:
         "TELEOP_ARMED",
         "POLICY_ARMED",
         "REPLAY_ARMED",
+        "HOLD_LATCHED",
     }:
         return "reuse"
     raise RuntimeError(
-        "Reset requires MAINTENANCE, or READY/ARMED with a valid session F/T zero; "
+        "Reset requires MAINTENANCE, or READY/ARMED/HOLD_LATCHED with a valid "
+        "session F/T zero; "
         f"got {normalized or 'UNKNOWN'}"
     )
 
@@ -346,6 +358,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rdk-socket", type=Path, required=True)
     parser.add_argument("--tool-payload-config", type=Path, required=True)
     parser.add_argument("--preview-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--skip-hand-preview",
+        action="store_true",
+        help="use the latest valid hand state without a stationary preview window",
+    )
     parser.add_argument("--skip-preview-if-ft-zeroed", action="store_true")
     parser.add_argument(
         "--max-hand-delta",
@@ -391,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
             # state; a confirmed Reset still fails below before any write.
             if execution_confirmed:
                 raise
-        skip_preview = (
+        skip_preview = bool(args.skip_hand_preview) or (
             zero_mode is not None
             and _skip_hand_preview(
                 zero_mode,
@@ -503,7 +520,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             hands = None
             if args.cycle_hands_after_home:
+                print(
+                    "Home: 双臂已完成；正在执行双手张开/闭合/张开（最长 20 秒）",
+                    flush=True,
+                )
                 hands = _cycle_inspire_hands(node)
+                print("Hands: 双手 Reset 已完成，最终目标为张开", flush=True)
             reset_report = {
                 "reset_success": True,
                 "ft_zero": (

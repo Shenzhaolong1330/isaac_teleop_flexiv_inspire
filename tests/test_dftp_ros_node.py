@@ -5,6 +5,7 @@ from types import ModuleType, SimpleNamespace
 
 from flexiv_inspire_isaac.dftp import ros_node
 from flexiv_inspire_isaac.dftp.ros_node import (
+    _replace_fixed_tactile_surfaces,
     hand_reset_targets,
     hand_target_reached,
 )
@@ -167,3 +168,14 @@ def test_hand_target_reached_checks_every_actuator() -> None:
     assert hand_target_reached((999, 998, 1000, 997, 988, 1000), target, 30)
     assert not hand_target_reached((999, 998, 1000, 997, 969, 1000), target, 30)
     assert not hand_target_reached(None, target, 30)
+
+
+def test_fixed_tactile_array_replaces_default_blank_messages() -> None:
+    target = [SimpleNamespace(name="") for _ in range(17)]
+    surfaces = [SimpleNamespace(name=f"surface_{index}") for index in range(17)]
+
+    _replace_fixed_tactile_surfaces(target, surfaces)
+
+    assert [surface.name for surface in target] == [
+        f"surface_{index}" for index in range(17)
+    ]

@@ -37,11 +37,14 @@ class MaintenanceInterlock(Protocol):
 
 @dataclass(frozen=True)
 class FTZeroConfig:
+    external_contact_check_enabled: bool = True
     sample_window_s: float = 2.0
     sample_rate_hz: float = 200.0
     min_samples: int = 100
     operational_timeout_s: float = 30.0
     primitive_timeout_s: float = 30.0
+    enable_settle_timeout_s: float = 10.0
+    enable_settle_window_s: float = 0.5
     poll_interval_s: float = 0.02
     max_joint_velocity_norm: float = 0.01
     max_tcp_velocity_norm: float = 0.01
@@ -61,6 +64,8 @@ class FTZeroConfig:
             self.sample_rate_hz,
             self.operational_timeout_s,
             self.primitive_timeout_s,
+            self.enable_settle_timeout_s,
+            self.enable_settle_window_s,
             self.poll_interval_s,
             self.max_joint_velocity_norm,
             self.max_tcp_velocity_norm,
@@ -78,6 +83,12 @@ class FTZeroConfig:
             raise ValueError("F/T zero configuration values must be finite and non-negative")
         if self.sample_rate_hz <= 0.0 or self.min_samples <= 0:
             raise ValueError("sample_rate_hz and min_samples must be positive")
+        if self.enable_settle_window_s <= 0.0:
+            raise ValueError("enable_settle_window_s must be positive")
+        if self.enable_settle_timeout_s < self.enable_settle_window_s:
+            raise ValueError(
+                "enable_settle_timeout_s must cover enable_settle_window_s"
+            )
 
 
 @dataclass(frozen=True)
@@ -247,6 +258,13 @@ class FTZeroManager:
             self.invalidate("new_ft_zero_transaction")
             self._interlock.acquire(request.session_id)
             interlock_acquired = True
+            # Flexiv rejects Enable, mode changes and Home while a Minor fault
+            # is present.  Reset is the explicit local recovery operation, so
+            # clear both controller faults before collecting the unloaded F/T
+            # baseline.  A healthy arm is a no-op.
+            phase = "clear_robot_faults"
+            for side in ("left", "right"):
+                self._backend.clear_fault(side, local_console=True)
             phase = "hand_preflight"
             hand_before = self._read_hands()
             self._verify_hand_reference(request, hand_before)
@@ -486,7 +504,9 @@ class FTZeroManager:
             for side in ("left", "right")
         )
 
-    def _observe_dual_transaction(self, generation: int):
+    def _observe_dual_transaction(
+        self, generation: int, *, allow_motion: bool = False
+    ):
         if self._backend.connection_generation != generation:
             raise FTZeroFailure("RDK reconnected during F/T zero transaction")
         try:
@@ -506,7 +526,7 @@ class FTZeroManager:
                 )
             dq_norm = float(np.linalg.norm(sample.dq))
             tcp_norm = float(np.linalg.norm(sample.tcp_velocity))
-            if (
+            if not allow_motion and (
                 dq_norm > self._config.max_joint_velocity_norm
                 or tcp_norm > self._config.max_tcp_velocity_norm
             ):
@@ -515,7 +535,7 @@ class FTZeroManager:
                     f"F/T zero: dq={dq_norm:.6g},tcp={tcp_norm:.6g}"
                 )
             external = sample.external_wrench
-            if (
+            if self._config.external_contact_check_enabled and (
                 np.linalg.norm(external[:3])
                 > self._config.max_pre_external_peak_force_n
                 or np.linalg.norm(external[3:])
@@ -525,6 +545,67 @@ class FTZeroManager:
                     f"{sample.side} external contact detected during F/T zero"
                 )
         return dual
+
+    def _wait_for_dual_arm_settle_after_enable(
+        self,
+        generation: int,
+        hand_reference: tuple[np.ndarray, np.ndarray],
+        *,
+        enabled_side: str,
+    ) -> None:
+        """Wait out the bounded mechanical transient caused by Robot.Enable.
+
+        Enabling a Flexiv arm releases its brakes and can produce a short
+        unloaded rebound.  Motion remains continuously observed, but ZeroFT
+        is allowed to proceed only after *both* arms stay below the original
+        strict velocity limits for a complete settle window.
+        """
+
+        deadline = self._monotonic() + self._config.enable_settle_timeout_s
+        stable_since: float | None = None
+        last = {
+            "left": (math.inf, math.inf),
+            "right": (math.inf, math.inf),
+        }
+        while True:
+            dual = self._observe_dual_transaction(
+                generation, allow_motion=True
+            )
+            self._verify_hands_unchanged(
+                hand_reference, self._read_hands()
+            )
+            self._verify_hand_monitor_unchanged()
+            stable = True
+            for side in ("left", "right"):
+                sample = getattr(dual, side)
+                dq_norm = float(np.linalg.norm(sample.dq))
+                tcp_norm = float(np.linalg.norm(sample.tcp_velocity))
+                last[side] = (dq_norm, tcp_norm)
+                stable = stable and (
+                    dq_norm <= self._config.max_joint_velocity_norm
+                    and tcp_norm <= self._config.max_tcp_velocity_norm
+                )
+            now = self._monotonic()
+            if stable:
+                if stable_since is None:
+                    stable_since = now
+                if (
+                    now - stable_since
+                    >= self._config.enable_settle_window_s
+                ):
+                    return
+            else:
+                stable_since = None
+            if now >= deadline:
+                details = ",".join(
+                    f"{side}(dq={last[side][0]:.6g},tcp={last[side][1]:.6g})"
+                    for side in ("left", "right")
+                )
+                raise FTZeroFailure(
+                    f"arms did not settle after enabling {enabled_side}: "
+                    + details
+                )
+            self._sleep(self._config.poll_interval_s)
 
     def _verify_hand_monitor_unchanged(self) -> None:
         if self._hand_monitor_snapshot is None:
@@ -540,6 +621,8 @@ class FTZeroManager:
     def _reject_pre_zero_external_contact(
         self, stats: ObservationWindowStatistics
     ) -> None:
+        if not self._config.external_contact_check_enabled:
+            return
         external = stats.external_wrench
         mean_force = float(np.linalg.norm(external.mean[:3]))
         mean_torque = float(np.linalg.norm(external.mean[3:]))
@@ -570,15 +653,16 @@ class FTZeroManager:
         self._observe_dual_transaction(generation)
         self._verify_hand_monitor_unchanged()
         self._backend.enable(side, local_console=True)
-        self._observe_dual_transaction(generation)
         operational_deadline = self._monotonic() + self._config.operational_timeout_s
         while not self._backend.operational(side):
-            self._observe_dual_transaction(generation)
+            self._observe_dual_transaction(generation, allow_motion=True)
             self._verify_hands_unchanged(hand_reference, self._read_hands())
             self._verify_hand_monitor_unchanged()
             self._check_deadline(operational_deadline, f"{side} operational timeout", generation)
             self._sleep(self._config.poll_interval_s)
-        self._observe_dual_transaction(generation)
+        self._wait_for_dual_arm_settle_after_enable(
+            generation, hand_reference, enabled_side=side
+        )
         self._backend.switch_primitive_mode(side, local_console=True)
         self._observe_dual_transaction(generation)
         self._backend.execute_zero_ft(side, local_console=True)

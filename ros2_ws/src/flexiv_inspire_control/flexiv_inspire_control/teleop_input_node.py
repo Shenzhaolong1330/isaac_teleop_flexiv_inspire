@@ -26,7 +26,7 @@ from flexiv_inspire_interfaces.msg import (
 from isaac_teleop_core.command import ROTATION_ORDER
 from isaac_teleop_core.octet_sequence import decode_octet_sequence
 
-from .foot_pedal import FootPedalMonitor, KEY_SPACE
+from .foot_pedal import FootPedalMonitor, KEY_DOWN, KEY_SPACE
 from .manus_pose import (
     FEATURE_NAMES,
     pose_message_values,
@@ -43,6 +43,25 @@ ACTUATORS = (
     "thumb_bend",
     "thumb_rotate",
 )
+
+
+def _initial_command_sequence(monotonic_ns: int | None = None) -> int:
+    """Seed source ordering above packets from an earlier teleop process.
+
+    The control bridge deliberately survives between ``robot record`` runs.
+    Starting every replacement teleop publisher at sequence 1 therefore makes
+    its first actuating packet look older than the previous process.  Host
+    monotonic microseconds form a process-independent epoch while retaining
+    ample uint64 headroom for the bridge's six-bit trajectory expansion.
+    """
+
+    now = time.monotonic_ns() if monotonic_ns is None else int(monotonic_ns)
+    if now < 0:
+        raise ValueError("monotonic_ns cannot be negative")
+    sequence = now // 1_000
+    if sequence > ((1 << 64) - 1) >> 6:
+        raise OverflowError("monotonic command sequence exceeds uint64 headroom")
+    return sequence
 
 
 def _frame(value: str) -> str:
@@ -213,6 +232,9 @@ class TeleopInput(Node):
             "control_rate_hz": 60.0,
             "ttl_s": 0.10,
             "translation_gain": 1.0,
+            "rotation_gain": 1.0,
+            "max_translation_step_m": 0.01,
+            "max_rotation_step_rad": 0.10,
             "axis_rotation": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             "hand_pose_topic": "/xr_teleop/hand",
             "manus_calibration": "",
@@ -232,6 +254,13 @@ class TeleopInput(Node):
             world_frame=str(self.get_parameter("world_frame").value),
             axis_rotation=axis,
             translation_gain=float(self.get_parameter("translation_gain").value),
+            rotation_gain=float(self.get_parameter("rotation_gain").value),
+            max_translation_step_m=float(
+                self.get_parameter("max_translation_step_m").value
+            ),
+            max_rotation_step_rad=float(
+                self.get_parameter("max_rotation_step_rad").value
+            ),
         )
         self._retarget = _Retarget(
             str(self.get_parameter("manus_calibration").value)
@@ -245,9 +274,11 @@ class TeleopInput(Node):
         self._external_deadman_received = 0
         self._hands: dict[str, np.ndarray | None] = {"left": None, "right": None}
         self._hands_received = {"left": 0, "right": 0}
-        self._command_sequence = 0
+        self._manus_ready = False
+        self._command_sequence = _initial_command_sequence()
         self._home_button_down = False
         self._pedal_pressed = False
+        self._tracking_unavailable_reason = ""
 
         self.create_subscription(
             PoseArray,
@@ -290,10 +321,11 @@ class TeleopInput(Node):
         )
         self._pedal: FootPedalMonitor | None = None
         if str(self.get_parameter("deadman_source").value) == "pedal":
+            configured_enable = int(self.get_parameter("enable_key_code").value)
             self._pedal = FootPedalMonitor(
                 Path(str(self.get_parameter("foot_pedal").value)),
                 self._on_pedal_state,
-                enable_key_code=int(self.get_parameter("enable_key_code").value),
+                enable_key_codes=(configured_enable, KEY_SPACE, KEY_DOWN),
             )
             self._pedal.start()
         rate = float(self.get_parameter("control_rate_hz").value)
@@ -401,9 +433,19 @@ class TeleopInput(Node):
             }
             self._hands.update(commands)
             self._hands_received = {"left": now, "right": now}
+            if not self._manus_ready:
+                self._manus_ready = True
+                self.get_logger().info(
+                    "MANUS_HANDS_READY: both gloves are valid and retargeting is active"
+                )
         except Exception as exc:
             self._hands = {"left": None, "right": None}
             self._hands_received = {"left": 0, "right": 0}
+            if self._manus_ready:
+                self.get_logger().warning(
+                    "MANUS_HANDS_LOST: glove tracking became invalid"
+                )
+            self._manus_ready = False
             self.get_logger().error(
                 f"invalid /xr_teleop/hand PoseArray; hand command disabled: {exc}",
                 throttle_duration_sec=1.0,
@@ -430,12 +472,25 @@ class TeleopInput(Node):
 
     def _tracking_sample(self, now: int) -> TrackingSample | None:
         if not bool(self.get_parameter("require_wrist_tf").value):
+            self._tracking_unavailable_reason = (
+                "quest_pose_missing" if self._sample is None else ""
+            )
             return self._sample
         max_age = int(float(self.get_parameter("max_tf_age_s").value) * 1e9)
+        missing = []
         for parameter in ("left_wrist_frame", "right_wrist_frame"):
             frame = _frame(str(self.get_parameter(parameter).value))
             if now - self._tf_received.get(frame, 0) > max_age:
-                return None
+                missing.append(frame)
+        if missing:
+            self._tracking_unavailable_reason = (
+                "controller_tracking_missing:" + ",".join(missing)
+            )
+            return None
+        if self._sample is None:
+            self._tracking_unavailable_reason = "quest_pose_missing"
+            return None
+        self._tracking_unavailable_reason = ""
         return self._sample
 
     def _tick(self) -> None:
@@ -451,6 +506,14 @@ class TeleopInput(Node):
             for side in ("left", "right")
         )
         authority = self._enabled and deadman and delta.active and not delta.hold_latched
+        if self._enabled and deadman and not authority:
+            reason = self._tracking_unavailable_reason or delta.reason
+            self.get_logger().warning(
+                "中踏板已踩下，但机械臂未使能："
+                f"{reason}；请确认左右 Quest 控制器均被追踪，"
+                "松开中踏板后再踩下",
+                throttle_duration_sec=1.0,
+            )
         valid_mask = 0x3 if authority else 0
         if authority and hand_valid:
             valid_mask |= 0xC
@@ -487,7 +550,7 @@ class TeleopInput(Node):
         message.metadata_keys = ["teleop_mode", "mapping_reason"]
         message.metadata_values = [
             "command" if self._enabled else "shadow",
-            delta.reason,
+            self._tracking_unavailable_reason or delta.reason,
         ]
         self._command_pub.publish(message)
         heartbeat = UInt64()

@@ -2,9 +2,22 @@ import json
 import re
 import threading
 from types import SimpleNamespace
+from pathlib import Path
 
+import flexiv_inspire_isaac.episode_control as episode_control
 from flexiv_inspire_isaac.episode_control import EpisodeController
 from flexiv_inspire_isaac.pedal_router import PedalRouter
+from flexiv_inspire_control.foot_pedal import FootPedalMonitor, KEY_DOWN, KEY_SPACE
+
+
+def test_transient_stream_holds_can_be_rearmed_by_pedal_cycle() -> None:
+    assert {
+        "command_stale",
+        "source_heartbeat_stale",
+        "arm_offline",
+        "hand_offline",
+        "safety_limit",
+    } <= episode_control._ROUTINE_CONTROL_HOLD_REASONS
 
 
 class _Publisher:
@@ -15,16 +28,33 @@ class _Publisher:
         self.messages.append(message)
 
 
+def test_middle_pedal_accepts_remapped_and_native_key_codes() -> None:
+    states: list[bool] = []
+    monitor = FootPedalMonitor(
+        Path("/dev/input/event-does-not-need-to-exist"),
+        states.append,
+        enable_key_codes=(KEY_SPACE, KEY_DOWN),
+    )
+
+    assert monitor._enable_key_codes == {KEY_SPACE, KEY_DOWN}
+    monitor._set_enable(True)
+    assert states == [True]
+
+
 class _Logger:
     def __init__(self) -> None:
         self.warnings = []
         self.infos = []
+        self.errors = []
 
     def warning(self, message: str) -> None:
         self.warnings.append(message)
 
     def info(self, message: str) -> None:
         self.infos.append(message)
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
 
 
 class _FakeController:
@@ -86,6 +116,24 @@ def test_episode_command_contains_configured_identity_prompt_and_attempt() -> No
     )
 
 
+def test_episode_command_adds_suffix_when_minute_directory_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fake = _FakeController("")
+    fake.values["sessions_root"] = str(tmp_path)
+    timestamp = "20260802_1349"
+    existing = tmp_path / "pick_place" / f"episode_000003_attempt_02_{timestamp}"
+    existing.mkdir(parents=True)
+    monkeypatch.setattr(episode_control, "local_minute_timestamp", lambda: timestamp)
+
+    command = EpisodeController._command(fake)
+
+    assert command[command.index("--episode-directory-name") + 1] == (
+        f"episode_000003_attempt_02_{timestamp}_01"
+    )
+    assert command[command.index("--collection-timestamp-local") + 1] == timestamp
+
+
 def test_manus_calibration_is_recorded_when_configured() -> None:
     fake = _FakeController("/tmp/manus.yaml")
     command = EpisodeController._command(fake)
@@ -108,6 +156,8 @@ class _EpisodeWorkflow:
         self._pending_home_deadline_ns = 0
         self._pending_home_action = None
         self._awaiting_home_authorization = False
+        self._home_recovery_attempted = False
+        self._control_state_name = "TELEOP_ARMED"
         self._home_request = _Publisher()
         self._episode_index = 1
         self._attempt = 1
@@ -123,9 +173,11 @@ class _EpisodeWorkflow:
         self.stops = []
         self.starts = 0
         self.authorize_home_calls = 0
+        self.authorize_home_clear_flags = []
         self.authorize_control_calls = 0
         self.statuses = []
         self.faults = []
+        self.events = []
         self.logger = _Logger()
 
     def get_parameter(self, name: str) -> SimpleNamespace:
@@ -148,20 +200,25 @@ class _EpisodeWorkflow:
 
     def _resume(self) -> None:
         self.resumes += 1
+        self.events.append("resume")
 
     def _stop(self, *, rerecord: bool) -> bool:
         self.stops.append(rerecord)
+        self.events.append(f"stop:{rerecord}")
         return not rerecord
 
     def _start(self) -> None:
         self.starts += 1
+        self.events.append("start")
 
-    def _authorize_home(self) -> None:
+    def _authorize_home(self, *, clear_hold_latched: bool = False) -> None:
         self.authorize_home_calls += 1
+        self.authorize_home_clear_flags.append(clear_hold_latched)
         self._awaiting_home_authorization = True
 
     def _authorize_control(self) -> None:
         self.authorize_control_calls += 1
+        self.events.append("authorize")
 
     def _send_home_request(self) -> None:
         EpisodeController._send_home_request(self)
@@ -171,6 +228,10 @@ class _EpisodeWorkflow:
 
     def _fail(self, reason: str) -> None:
         self.faults.append(reason)
+
+    def _recover_from_home_failure(self, reason: str) -> None:
+        EpisodeController._recover_from_home_failure(self, reason)
+
 
 
 def _control(value: str) -> SimpleNamespace:
@@ -231,6 +292,21 @@ def test_left_pedal_discards_homes_and_restarts_same_index() -> None:
     assert fake._episode_index == 1
     assert fake._attempt == 2
     assert fake.starts == 1
+    assert fake.events[-3:] == ["stop:True", "start", "authorize"]
+
+
+def test_episode_input_during_fault_keeps_current_recorder_alive() -> None:
+    fake = _EpisodeWorkflow()
+    fake._control_state_name = "FAULT"
+
+    EpisodeController._on_control(fake, _control("rerecord"))
+
+    assert fake.pauses == 0
+    assert fake.stops == []
+    assert fake.starts == 0
+    assert fake.faults == []
+    assert fake.statuses == ["WAITING_FOR_CONTROL_RECOVERY"]
+    assert "recorder remains active" in fake.logger.errors[-1]
 
 
 def test_quest_a_pauses_homes_and_resumes_same_episode() -> None:
@@ -241,6 +317,7 @@ def test_quest_a_pauses_homes_and_resumes_same_episode() -> None:
 
     assert fake.pauses == 1
     assert fake.resumes == 1
+    assert fake.events[-2:] == ["resume", "authorize"]
     assert fake.stops == []
     assert fake.starts == 0
     assert fake._episode_index == 1
@@ -264,9 +341,41 @@ def test_home_failure_never_finalizes_or_starts_episode() -> None:
         })),
     )
 
-    assert fake.stops == []
-    assert fake.starts == 0
-    assert fake.faults == ["home:collision_not_clear"]
+    assert fake.stops == [True]
+    assert fake.starts == 1
+    assert fake._attempt == 2
+    assert fake.faults == []
+    assert fake._finished is False
+    assert fake.statuses[-1] == "RECORDING_HOME_FAILED"
+
+
+def test_invalid_command_hold_is_cleared_and_home_is_retried() -> None:
+    fake = _EpisodeWorkflow()
+    EpisodeController._on_control(fake, _control("rerecord"))
+    EpisodeController._on_home_status(
+        fake,
+        _control(json.dumps({"state": "authorized", "reason": ""})),
+    )
+    first_request = json.loads(fake._home_request.messages[-1].data)
+
+    EpisodeController._on_home_status(
+        fake,
+        _control(json.dumps({
+            "request_id": first_request["request_id"],
+            "state": "rejected",
+            "reason": "non_routine_hold_preserved:invalid_command",
+        })),
+    )
+
+    assert fake.authorize_home_clear_flags == [False, True]
+    assert fake._pending_home_action == "discard"
+    assert fake._finished is False
+
+    _authorize_and_complete_home(fake)
+    assert fake.stops == [True]
+    assert fake.starts == 1
+    assert fake._attempt == 2
+    assert fake.faults == []
 
 
 def test_pedal_router_maps_right_press_to_stop() -> None:
@@ -290,15 +399,18 @@ def test_pedal_router_maps_right_press_to_stop() -> None:
 class _ClutchRearm:
     def __init__(self) -> None:
         self._routine_control_rearm_pending = False
+        self._routine_control_rearm_pressed_attempted = False
         self._pending_home_action = None
+        self._last_announced_control_state = None
         self.calls = []
         self.errors = []
+        self.infos = []
 
     def _authorize_control(self, *, clear_hold_latched: bool = False) -> None:
         self.calls.append(clear_hold_latched)
 
     def get_logger(self):
-        return SimpleNamespace(error=self.errors.append)
+        return SimpleNamespace(error=self.errors.append, info=self.infos.append)
 
 
 def _control_state(
@@ -308,17 +420,65 @@ def _control_state(
         state_name=state,
         hold_reason=reason,
         physical_pedal=pedal,
+        local_permission=True,
+        ft_zeroed_for_session=True,
+        arms_online=True,
+        hands_online=True,
     )
 
 
-def test_routine_pedal_release_rearms_once_with_fresh_authorization() -> None:
+def test_routine_pedal_release_rearms_on_next_press_with_fresh_authorization() -> None:
     fake = _ClutchRearm()
 
     EpisodeController._on_control_state(fake, _control_state())
     EpisodeController._on_control_state(fake, _control_state())
 
-    assert fake.calls == [True]
+    assert fake.calls == []
     assert fake._routine_control_rearm_pending is True
+
+    EpisodeController._on_control_state(fake, _control_state(pedal=True))
+    EpisodeController._on_control_state(fake, _control_state(pedal=True))
+
+    assert fake.calls == [True]
+
+
+def test_minor_fault_rearm_is_attempted_once_and_points_to_reset() -> None:
+    class FaultingRearm(_ClutchRearm):
+        def _authorize_control(self, *, clear_hold_latched: bool = False) -> None:
+            self.calls.append(clear_hold_latched)
+            raise RuntimeError(
+                "right:mode: Robot is not operational: Minor fault occurred"
+            )
+
+    fake = FaultingRearm()
+
+    EpisodeController._on_control_state(fake, _control_state(pedal=True))
+    EpisodeController._on_control_state(fake, _control_state(pedal=True))
+
+    assert fake.calls == [True]
+    assert fake._routine_control_rearm_pending is False
+    assert fake._routine_control_rearm_pressed_attempted is True
+    assert len(fake.errors) == 1
+    assert "robot reset" in fake.errors[0]
+
+
+def test_expired_control_authorization_rearms_on_next_press() -> None:
+    fake = _ClutchRearm()
+
+    EpisodeController._on_control_state(
+        fake, _control_state(reason="control_authorization_expired")
+    )
+    EpisodeController._on_control_state(
+        fake, _control_state(reason="control_authorization_expired")
+    )
+
+    assert fake.calls == []
+    EpisodeController._on_control_state(
+        fake,
+        _control_state(reason="control_authorization_expired", pedal=True),
+    )
+
+    assert fake.calls == [True]
 
 
 def test_non_routine_hold_is_not_automatically_cleared() -> None:
@@ -329,3 +489,82 @@ def test_non_routine_hold_is_not_automatically_cleared() -> None:
     )
 
     assert fake.calls == []
+
+
+def test_fault_reason_is_printed_for_operator_recovery() -> None:
+    fake = _ClutchRearm()
+
+    EpisodeController._on_control_state(
+        fake,
+        _control_state(state="FAULT", reason="hardware_fault", pedal=False),
+    )
+
+    assert fake.calls == []
+    assert fake.errors == ["机械臂控制进入 FAULT：hardware_fault"]
+
+
+def test_fault_is_not_reprinted_on_every_pedal_edge() -> None:
+    fake = _ClutchRearm()
+
+    EpisodeController._on_control_state(
+        fake,
+        _control_state(state="FAULT", reason="hardware_fault", pedal=False),
+    )
+    EpisodeController._on_control_state(
+        fake,
+        _control_state(state="FAULT", reason="hardware_fault", pedal=True),
+    )
+    EpisodeController._on_control_state(
+        fake,
+        _control_state(state="FAULT", reason="hardware_fault", pedal=False),
+    )
+
+    assert fake.errors == ["机械臂控制进入 FAULT：hardware_fault"]
+
+
+class _StartupGate:
+    def __init__(self, *, ready: bool) -> None:
+        self._startup_done = False
+        self._control_ready_for_recording = ready
+        self._control_state_name = "READY" if ready else "MAINTENANCE"
+        self._next_ready_wait_log_ns = 0
+        self.events = []
+        self.statuses = []
+        self.logger = _Logger()
+
+    def get_parameter(self, _name: str) -> SimpleNamespace:
+        return SimpleNamespace(value=True)
+
+    def get_logger(self):
+        return self.logger
+
+    def _publish_progress(self, value: str) -> None:
+        self.statuses.append(value)
+
+    def _authorize_control(self) -> None:
+        self.events.append("authorize")
+
+    def _start(self) -> None:
+        self.events.append("start")
+
+    def _fail(self, reason: str) -> None:
+        self.events.append(f"fail:{reason}")
+
+
+def test_episode_does_not_record_or_authorize_while_in_maintenance() -> None:
+    fake = _StartupGate(ready=False)
+
+    EpisodeController._tick(fake)
+
+    assert fake.events == []
+    assert fake.statuses == ["WAITING_FOR_READY"]
+    assert fake._startup_done is False
+
+
+def test_episode_starts_deviceio_recorder_then_authorizes_after_ready() -> None:
+    fake = _StartupGate(ready=True)
+
+    EpisodeController._tick(fake)
+
+    assert fake.events == ["start", "authorize"]
+    assert fake._startup_done is True

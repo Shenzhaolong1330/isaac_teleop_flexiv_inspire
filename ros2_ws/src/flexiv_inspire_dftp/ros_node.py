@@ -50,6 +50,23 @@ HAND_FIELD_TIMINGS = {
 }
 
 
+def _replace_fixed_tactile_surfaces(target, surfaces) -> None:
+    """Replace every slot in the fixed ROS tactile-surface array.
+
+    ``TactileFrame.surfaces`` is ``TactileSurface[17]`` and rclpy constructs
+    all 17 default messages before publication. Appending puts real surfaces
+    after those defaults, while serialization retains the first 17 blanks.
+    """
+
+    if len(target) != len(surfaces):
+        raise ValueError(
+            f"fixed tactile surface array has {len(target)} slots, "
+            f"received {len(surfaces)} surfaces"
+        )
+    for index, surface in enumerate(surfaces):
+        target[index] = surface
+
+
 def hand_reset_targets(
     open_angle: int = 1000, closed_angle: int = 0
 ) -> tuple[tuple[int, ...], ...]:
@@ -867,6 +884,7 @@ def main(args=None) -> int:
                 reason=frame.invalid_reason,
             )
             specs = {spec.name: spec for spec in TACTILE_LAYOUT}
+            surface_messages = []
             for surface in frame.surfaces:
                 item = TactileSurfaceMsg()
                 item.name = surface.name
@@ -887,7 +905,10 @@ def main(args=None) -> int:
                     valid=surface.valid,
                     reason=surface.invalid_reason,
                 )
-                message.surfaces.append(item)
+                surface_messages.append(item)
+            _replace_fixed_tactile_surfaces(
+                message.surfaces, surface_messages
+            )
             self._native_emit(f"/robot/{frame.side}_hand/tactile_raw", message)
             self._topic_publishers[(frame.side, "tactile")].publish(message)
 

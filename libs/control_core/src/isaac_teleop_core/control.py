@@ -42,6 +42,7 @@ class HoldReason(str, Enum):
     HARDWARE_FAULT = "hardware_fault"
     STOP = "stop_requested"
     INVALID_COMMAND = "invalid_command"
+    AUTHORIZATION_EXPIRED = "control_authorization_expired"
 
 
 @dataclass(frozen=True)
@@ -295,6 +296,53 @@ class ControlArbiter:
             if source == self._active_source and self._is_armed_or_active():
                 self._latch(HoldReason.INVALID_COMMAND, now)
 
+    def require_reauthorization(
+        self,
+        source: CommandSource,
+        *,
+        now_monotonic_ns: int | None = None,
+    ) -> None:
+        """Hold safely when the local one-time arm token expired unused.
+
+        This is not a malformed motion command or a robot fault.  A local
+        episode controller may obtain a fresh token and explicitly re-arm the
+        same source without treating the interrupted demonstration as failed.
+        """
+
+        now = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
+        with self._lock:
+            if source == self._active_source and self._is_armed_or_active():
+                self._latch(HoldReason.AUTHORIZATION_EXPIRED, now)
+
+    def observe_hardware_hold(
+        self,
+        source: CommandSource,
+        reason: HoldReason,
+        *,
+        now_monotonic_ns: int | None = None,
+    ) -> None:
+        """Mirror an already-latched routine daemon hold without faulting.
+
+        A release can reach the hardware daemon just after the bridge has
+        locally cleared its copy of the latch. If the daemon rejects the next
+        point because it is *already safely held*, that is a clutch recovery
+        event rather than an execution fault.
+        """
+
+        if reason not in {
+            HoldReason.PEDAL_RELEASED,
+            HoldReason.DEADMAN_RELEASED,
+        }:
+            raise ValueError("only routine release holds may be mirrored")
+        now = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
+        with self._lock:
+            if source == self._active_source and self._is_armed_or_active():
+                self._latch(reason, now)
+                # The daemon rejection proves that the previous release was
+                # observed and completed, so local reauthorization may clear
+                # this mirrored latch even if the pedal is pressed again now.
+                self._deadman_release_seen = True
+
     def tick(self, *, now_monotonic_ns: int | None = None) -> ControlSnapshot:
         now = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
         with self._lock:
@@ -306,10 +354,33 @@ class ControlArbiter:
 
     def mark_sent(self, command: BimanualCommand) -> None:
         with self._lock:
-            if self._state is not ControlState.ACTIVE:
-                raise TransitionError("cannot mark a command sent outside ACTIVE")
-            if command is not self._last_safe:
-                raise TransitionError("only the currently approved safe command may be sent")
+            if self._state not in {ControlState.ACTIVE, ControlState.HOLD_LATCHED}:
+                raise TransitionError(
+                    "cannot mark a command sent outside ACTIVE/HOLD_LATCHED"
+                )
+            if (
+                command.session_id != self._session_id
+                or command.source != self._active_source
+                or self._last_safe is None
+                or command.sequence > self._last_safe.sequence
+            ):
+                raise TransitionError("command was not approved for the active source")
+            # Hardware acknowledgements are asynchronous.  At 60 Hz a newer
+            # command can become ``last_safe`` while the preceding approved
+            # command is waiting for its RDK acknowledgement.  That older ACK
+            # is still a real hardware write and must be recorded, not turned
+            # into a false hardware fault.
+            #
+            # The same race occurs when the operator releases the clutch: the
+            # arbiter latches HOLD while the daemon's positive ACK for the
+            # final already-approved point is in flight.  Recording that ACK
+            # must not convert a normal pedal release into HARDWARE_FAULT.
+            if (
+                self._last_sent is not None
+                and command.source == self._last_sent.source
+                and command.sequence < self._last_sent.sequence
+            ):
+                raise TransitionError("hardware acknowledgement is out of order")
             self._last_sent = command
 
     def stop(self) -> None:

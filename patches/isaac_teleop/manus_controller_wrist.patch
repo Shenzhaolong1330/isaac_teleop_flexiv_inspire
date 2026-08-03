@@ -1,0 +1,51 @@
+diff --git a/src/plugins/manus/core/manus_hand_tracking_plugin.cpp b/src/plugins/manus/core/manus_hand_tracking_plugin.cpp
+index 06212ab..6c30be0 100644
+--- a/src/plugins/manus/core/manus_hand_tracking_plugin.cpp
++++ b/src/plugins/manus/core/manus_hand_tracking_plugin.cpp
+@@ -12,6 +12,7 @@
+ #include <ManusSDKTypeInitializers.h>
+ #include <algorithm>
+ #include <chrono>
++#include <cstdlib>
+ #include <iostream>
+ #include <memory>
+ #include <mutex>
+@@ -162,6 +163,9 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+ 
+     try
+     {
++        const char* wrist_source = std::getenv("ISAAC_TELEOP_MANUS_WRIST_SOURCE");
++        const bool force_controller_wrist = wrist_source != nullptr &&
++                                             std::string(wrist_source) == "controllers";
+         // Create ControllerTracker unconditionally; HandTracker requires
+         // XR_EXT_hand_tracking which is optional — only add it when the runtime
+         // advertises support so xrCreateInstance does not fail with
+@@ -169,7 +173,8 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+         m_controller_tracker = std::make_shared<core::ControllerTracker>();
+         std::vector<std::shared_ptr<core::ITracker>> trackers = { m_controller_tracker };
+ 
+-        const bool hand_tracking_supported = is_openxr_extension_supported(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
++        const bool hand_tracking_supported = !force_controller_wrist &&
++                                             is_openxr_extension_supported(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+         if (hand_tracking_supported)
+         {
+             m_hand_tracker = std::make_shared<core::HandTracker>();
+@@ -219,11 +224,17 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+         // Only attempt XDev hand tracker setup when the extension was actually enabled.
+         // Skipping here avoids calling xrGetInstanceProcAddr for MNDX entry points that
+         // the runtime would not have loaded.
+-        if (xdev_extension_supported)
++        if (xdev_extension_supported && !force_controller_wrist)
+         {
+             initialize_xdev_hand_trackers();
+         }
+ 
++        if (force_controller_wrist)
++        {
++            std::cout << "[Manus] Controller wrist explicitly selected by "
++                         "ISAAC_TELEOP_MANUS_WRIST_SOURCE" << std::endl;
++        }
++
+         std::cout << "[Manus] Initialized with wrist source: " << (m_xdev_available ? "HandTracking" : "Controllers")
+                   << std::endl;
+ 

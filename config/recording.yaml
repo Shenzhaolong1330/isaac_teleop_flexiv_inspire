@@ -10,9 +10,23 @@ recording:
   camera_recording_mode: jpeg
   deviceio_mode: native
   snapshot_config: true
+  # One-command hardware preparation: F/T zero (or session reuse), Home, then
+  # leave both hands open before recording and teleop authorization begin.
+  auto_reset_before_record: true
   auto_start: true
   auto_authorize_home: true
   auto_authorize_control: true
+  # Start the desktop Rerun viewer alongside robot record.  It is read-only
+  # and closes its ROS subscriptions when recording stops.
+  live_rerun:
+    enabled: true
+    viewer_port: 9876
+    # Only the read-only desktop visualization is downsampled. Rosbag/MCAP
+    # still records every source at its configured native frequency.
+    telemetry_hz: 5.0
+    tactile_hz: 10.0
+    image_hz: 10.0
+    pointcloud_hz: 2.0
 
 lerobot_export:
   schema_version: 1

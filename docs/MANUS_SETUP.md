@@ -44,10 +44,16 @@ cmake -S third_party/IsaacTeleop -B build/manus-isaac -G Ninja \
   -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 \
   -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc
 
+./scripts/apply_manus_controller_wrist_patch.sh
 cmake --build build/manus-isaac \
   --target manus_hand_plugin manus_hand_tracker_printer --parallel 8
 cmake --install build/manus-isaac --component manus
 ```
+
+站点补丁使 `ISAAC_TELEOP_MANUS_WRIST_SOURCE=controllers` 可显式关闭 Quest
+光学手腕根。运行脚本会设置该变量，因此腕部始终来自 Quest Touch 控制器，
+MANUS 只提供手指关节；拿起控制器后不会因光学手跟踪消失而把手指流标成
+无效。补丁脚本可重复执行。
 
 安装产物：
 

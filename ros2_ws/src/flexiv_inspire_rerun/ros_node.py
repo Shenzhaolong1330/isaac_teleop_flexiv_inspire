@@ -2,9 +2,30 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .runtime import LatestOnlyDispatcher, RerunVisualizer
+
+
+class VisualizationRateLimiter:
+    """Monotonic per-stream limiter used only by the Rerun observer."""
+
+    def __init__(self) -> None:
+        self._last_ns: dict[str, int] = {}
+
+    def allow(
+        self, key: str, rate_hz: float, *, now_monotonic_ns: int | None = None
+    ) -> bool:
+        if not 0.1 <= float(rate_hz) <= 120.0:
+            raise ValueError("Rerun visualization rate must be in [0.1, 120] Hz")
+        now = time.monotonic_ns() if now_monotonic_ns is None else now_monotonic_ns
+        period_ns = max(1, int(1_000_000_000 / float(rate_hz)))
+        previous = self._last_ns.get(key)
+        if previous is not None and now - previous < period_ns:
+            return False
+        self._last_ns[key] = now
+        return True
 
 
 def _time_ns(value: Any) -> int:
@@ -225,12 +246,58 @@ def camera_frame_to_dict(message: Any) -> dict[str, Any]:
     }
 
 
+def depth_image_to_dict(camera: str, message: Any) -> dict[str, Any]:
+    """Copy a live Z16 depth image without trying to time-pair it later."""
+
+    return {
+        "camera": camera,
+        "stamp_ns": _time_ns(message.header.stamp),
+        "width": int(message.width),
+        "height": int(message.height),
+        "step": int(message.step),
+        "encoding": str(message.encoding),
+        "is_bigendian": bool(message.is_bigendian),
+        "data": bytes(message.data),
+        # The site RealSense camera publishes standard Z16 millimetres.  The
+        # point cloud below remains the metric/authoritative 3D modality.
+        "meter_per_unit": 0.001,
+    }
+
+
+def pointcloud_to_dict(camera: str, message: Any) -> dict[str, Any]:
+    """Copy the live PointCloud2 layout for deferred latest-only decoding."""
+
+    return {
+        "camera": camera,
+        "stamp_ns": _time_ns(message.header.stamp),
+        "frame_id": str(message.header.frame_id),
+        "width": int(message.width),
+        "height": int(message.height),
+        "point_step": int(message.point_step),
+        "row_step": int(message.row_step),
+        "is_bigendian": bool(message.is_bigendian),
+        "fields": {
+            str(field.name): {
+                "offset": int(field.offset),
+                "datatype": int(field.datatype),
+                "count": int(field.count),
+            }
+            for field in message.fields
+        },
+        "data": bytes(message.data),
+    }
+
+
 def run_ros(
     *,
     save_path: str | None,
     connect_url: str | None,
     spawn: bool,
     viewer_port: int,
+    telemetry_hz: float = 5.0,
+    tactile_hz: float = 10.0,
+    image_hz: float = 10.0,
+    pointcloud_hz: float = 2.0,
     legacy_camera_topics: bool = False,
     ros_args: list[str] | None = None,
 ) -> int:
@@ -239,7 +306,7 @@ def run_ros(
     import rclpy
     from rclpy.node import Node
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-    from sensor_msgs.msg import CompressedImage
+    from sensor_msgs.msg import CompressedImage, Image, PointCloud2
     from flexiv_inspire_interfaces.msg import (
         ArmState,
         BimanualCommand,
@@ -261,27 +328,81 @@ def run_ros(
         reliability=ReliabilityPolicy.RELIABLE,
     )
 
+    rates = {
+        "telemetry": float(telemetry_hz),
+        "tactile": float(tactile_hz),
+        "images": float(image_hz),
+        "pointcloud": float(pointcloud_hz),
+    }
+    for name, rate in rates.items():
+        if not 0.1 <= rate <= 120.0:
+            raise ValueError(f"Rerun {name} rate must be in [0.1, 120] Hz")
+
     visualizer = RerunVisualizer(
         save_path=save_path,
         connect_url=connect_url,
         spawn=spawn,
         viewer_port=viewer_port,
     )
-    dispatcher = LatestOnlyDispatcher()
+    # A large PointCloud2 decode must never queue behind (or in front of) the
+    # live robot/tactile state. Each lane remains latest-only, while expensive
+    # modalities can progress independently.
+    telemetry_dispatcher = LatestOnlyDispatcher(name="rerun-telemetry")
+    tactile_dispatcher = LatestOnlyDispatcher(name="rerun-tactile")
+    image_dispatcher = LatestOnlyDispatcher(name="rerun-images")
+    pointcloud_dispatcher = LatestOnlyDispatcher(name="rerun-pointcloud")
+    dispatchers = {
+        "telemetry": telemetry_dispatcher,
+        "tactile": tactile_dispatcher,
+        "images": image_dispatcher,
+        "pointcloud": pointcloud_dispatcher,
+    }
 
     class RerunNode(Node):
         def __init__(self) -> None:
             super().__init__("flexiv_inspire_rerun")
             self._viz_subscriptions = []
+            self._tactile_frames = {"left": 0, "right": 0}
+            self._rate_limiter = VisualizationRateLimiter()
             for camera in ("head", "left_wrist", "right_wrist"):
                 self._viz_subscriptions.append(
                     self.create_subscription(
                         CameraFrame,
                         f"/camera/{camera}/color/frame",
-                        lambda message, selected=camera: dispatcher.submit(
+                        lambda message, selected=camera: self._submit_if_due(
+                            image_dispatcher,
                             f"camera:{selected}",
+                            rates["images"],
                             visualizer.log_camera,
-                            camera_frame_to_dict(message),
+                            lambda: camera_frame_to_dict(message),
+                        ),
+                        sensor_qos,
+                    )
+                )
+                self._viz_subscriptions.append(
+                    self.create_subscription(
+                        Image,
+                        f"/camera/{camera}/depth/image_rect_raw",
+                        lambda message, selected=camera: self._submit_if_due(
+                            image_dispatcher,
+                            f"depth:{selected}",
+                            rates["images"],
+                            visualizer.log_depth,
+                            lambda: depth_image_to_dict(selected, message),
+                        ),
+                        sensor_qos,
+                    )
+                )
+                self._viz_subscriptions.append(
+                    self.create_subscription(
+                        PointCloud2,
+                        f"/camera/{camera}/depth/points",
+                        lambda message, selected=camera: self._submit_if_due(
+                            pointcloud_dispatcher,
+                            f"pointcloud:{selected}",
+                            rates["pointcloud"],
+                            visualizer.log_pointcloud,
+                            lambda: pointcloud_to_dict(selected, message),
                         ),
                         sensor_qos,
                     )
@@ -291,10 +412,12 @@ def run_ros(
                         self.create_subscription(
                             CompressedImage,
                             f"/camera/{camera}/color/image_raw/compressed",
-                            lambda message, selected=camera: dispatcher.submit(
+                            lambda message, selected=camera: self._submit_if_due(
+                                image_dispatcher,
                                 f"legacy-camera:{selected}",
+                                rates["images"],
                                 visualizer.log_camera,
-                                {
+                                lambda: {
                                     "camera": selected,
                                     "stamp_ns": _time_ns(message.header.stamp),
                                     "format": str(message.format),
@@ -310,8 +433,12 @@ def run_ros(
                     self.create_subscription(
                         ArmState,
                         f"/robot/{side}_arm/state",
-                        lambda message, selected=side: dispatcher.submit(
-                            f"arm:{selected}", visualizer.log_arm, arm_to_dict(message)
+                        lambda message, selected=side: self._submit_if_due(
+                            telemetry_dispatcher,
+                            f"arm:{selected}",
+                            rates["telemetry"],
+                            visualizer.log_arm,
+                            lambda: arm_to_dict(message),
                         ),
                         sensor_qos,
                     )
@@ -320,8 +447,12 @@ def run_ros(
                     self.create_subscription(
                         HandState,
                         f"/robot/{side}_hand/state",
-                        lambda message, selected=side: dispatcher.submit(
-                            f"hand:{selected}", visualizer.log_hand, hand_to_dict(message)
+                        lambda message, selected=side: self._submit_if_due(
+                            telemetry_dispatcher,
+                            f"hand:{selected}",
+                            rates["telemetry"],
+                            visualizer.log_hand,
+                            lambda: hand_to_dict(message),
                         ),
                         sensor_qos,
                     )
@@ -330,10 +461,8 @@ def run_ros(
                     self.create_subscription(
                         TactileFrame,
                         f"/robot/{side}_hand/tactile_raw",
-                        lambda message, selected=side: dispatcher.submit(
-                            f"tactile:{selected}",
-                            visualizer.log_tactile,
-                            tactile_to_dict(message),
+                        lambda message, selected=side: self._on_tactile(
+                            selected, message
                         ),
                         sensor_qos,
                     )
@@ -343,12 +472,14 @@ def run_ros(
                     self.create_subscription(
                         BimanualCommand,
                         f"/control/{stage}_command",
-                        lambda message, selected=stage: dispatcher.submit(
+                        lambda message, selected=stage: self._submit_if_due(
+                            telemetry_dispatcher,
                             f"command:{selected}",
+                            rates["telemetry"],
                             lambda command, stage_name=selected: visualizer.log_command(
                                 stage_name, command
                             ),
-                            command_to_dict(message),
+                            lambda: command_to_dict(message),
                         ),
                         control_qos,
                     )
@@ -357,8 +488,12 @@ def run_ros(
                 self.create_subscription(
                     CommandTrace,
                     "/control/command_trace",
-                    lambda message: dispatcher.submit(
-                        "command-trace", visualizer.log_trace, trace_to_dict(message)
+                    lambda message: self._submit_if_due(
+                        telemetry_dispatcher,
+                        "command-trace",
+                        rates["telemetry"],
+                        visualizer.log_trace,
+                        lambda: trace_to_dict(message),
                     ),
                     control_qos,
                 )
@@ -367,10 +502,12 @@ def run_ros(
                 self.create_subscription(
                     ControlState,
                     "/control/state",
-                    lambda message: dispatcher.submit(
+                    lambda message: self._submit_if_due(
+                        telemetry_dispatcher,
                         "control-state",
+                        rates["telemetry"],
                         visualizer.log_control_state,
-                        control_state_to_dict(message),
+                        lambda: control_state_to_dict(message),
                     ),
                     control_qos,
                 )
@@ -383,18 +520,58 @@ def run_ros(
             )
             self.get_logger().info(
                 f"read-only latest-only Rerun subscriber active ({sink}); "
+                f"display rates telemetry={rates['telemetry']:g}Hz "
+                f"tactile={rates['tactile']:g}Hz images={rates['images']:g}Hz "
+                f"pointcloud={rates['pointcloud']:g}Hz; "
                 "atomic CameraFrame is authoritative; "
                 "this node has no publishers or hardware access"
             )
 
-        def _report(self) -> None:
-            stats = dispatcher.stats
-            message = (
-                f"Rerun submitted={stats.submitted} processed={stats.processed} "
-                f"dropped_old={stats.dropped} failed={stats.failed}"
+        def _submit_if_due(
+            self,
+            dispatcher: LatestOnlyDispatcher,
+            key: str,
+            rate_hz: float,
+            function,
+            payload_factory,
+        ) -> bool:
+            if not self._rate_limiter.allow(key, rate_hz):
+                return False
+            return dispatcher.submit(key, function, payload_factory())
+
+        def _on_tactile(self, side: str, message: TactileFrame) -> None:
+            self._tactile_frames[side] += 1
+            self._submit_if_due(
+                tactile_dispatcher,
+                f"tactile:{side}",
+                rates["tactile"],
+                visualizer.log_tactile,
+                lambda: tactile_to_dict(message),
             )
-            if stats.failed:
-                message += f" last_error={dispatcher.last_error}"
+
+        def _report(self) -> None:
+            lane_stats = {
+                name: dispatcher.stats for name, dispatcher in dispatchers.items()
+            }
+            message = "Rerun " + " ".join(
+                f"{name}[in={stats.submitted},done={stats.processed},"
+                f"drop={stats.dropped},fail={stats.failed}]"
+                for name, stats in lane_stats.items()
+            )
+            message += (
+                " tactile_rx="
+                f"left:{self._tactile_frames['left']} "
+                f"right:{self._tactile_frames['right']}"
+            )
+            failed = [
+                (name, dispatcher.last_error)
+                for name, dispatcher in dispatchers.items()
+                if dispatcher.stats.failed
+            ]
+            if failed:
+                message += " last_error=" + ";".join(
+                    f"{name}:{error}" for name, error in failed
+                )
                 self.get_logger().warning(message)
             else:
                 self.get_logger().info(message)
@@ -407,11 +584,18 @@ def run_ros(
         pass
     finally:
         cleanup_errors: list[str] = []
-        for name, cleanup in (
+        cleanup_steps = [
             ("node", node.destroy_node),
-            ("dispatcher", lambda: dispatcher.close(drain=True)),
+            *(
+                (
+                    f"dispatcher-{name}",
+                    lambda selected=dispatcher: selected.close(drain=False),
+                )
+                for name, dispatcher in dispatchers.items()
+            ),
             ("visualizer", visualizer.close),
-        ):
+        ]
+        for name, cleanup in cleanup_steps:
             try:
                 cleanup()
             except Exception as exc:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import time
 
 import numpy as np
@@ -48,7 +49,14 @@ class HomeTokenAuthority:
         self.consumed += 1
 
 
-def dispatcher():
+def dispatcher(
+    *, cartesian_limits: tuple[float, float, float, float] = (
+        0.10,
+        0.25,
+        0.50,
+        1.0,
+    ),
+):
     backend = MockBackend()
     interlock = DaemonInterlock()
     interlock.ready_generation = 1
@@ -61,6 +69,7 @@ def dispatcher():
         interlock,
         control_authorizations=TokenAuthority(),
         home_authorizations=HomeTokenAuthority(),
+        cartesian_limits=cartesian_limits,
         watchdog_period_s=0.001,
     )
     return value, backend
@@ -115,6 +124,26 @@ def home_command(
     }
 
 
+def enable_home_lift(payload: dict) -> dict:
+    payload.update(
+        {
+            "lift_enabled": True,
+            "left_lift_safe_z_m": -0.38,
+            "right_lift_safe_z_m": -0.41,
+            "lift_max_linear_velocity": 0.10,
+            "lift_max_angular_velocity": 0.20,
+            "lift_max_linear_acceleration": 0.40,
+            "lift_max_angular_acceleration": 0.80,
+            "lift_tolerance_m": 0.005,
+            "lift_timeout_s": 12.0,
+            "lift_parallel": False,
+            "lift_cartesian_stiffness": [3000.0, 3000.0, 3000.0, 200.0, 200.0, 200.0],
+            "lift_cartesian_damping_ratio": [0.7] * 6,
+        }
+    )
+    return payload
+
+
 def test_watchdog_holds_on_ttl_expiry_and_latches() -> None:
     value, backend = dispatcher()
     value.start_watchdog()
@@ -125,7 +154,7 @@ def test_watchdog_holds_on_ttl_expiry_and_latches() -> None:
         time.sleep(0.002)
     value.close()
     assert value.hold_latched
-    assert ("left", "send_hold") in backend.events
+    assert ("left", "stop") in backend.events
     _, rejected = value("cartesian_command", 2, command("teleop", 2), (111, 0, 0))
     assert not rejected["accepted"]
     assert "hold_latched" in rejected["reason"]
@@ -136,7 +165,35 @@ def test_owner_disconnect_holds_immediately() -> None:
     value("cartesian_command", 1, command("teleop", 1), (222, 0, 0))
     value.peer_disconnected((222, 0, 0))
     assert value.hold_latched
-    assert ("right", "send_hold") in backend.events
+    assert ("right", "stop") in backend.events
+
+
+def test_clear_routine_hold_reanchors_both_stopped_arms_in_cartesian_mode() -> None:
+    value, backend = dispatcher()
+    value("cartesian_command", 1, command("teleop", 1), (223, 0, 0))
+    value("hold", 2, {"reason": "physical_pedal_released"}, (223, 0, 0))
+    assert value.hold_latched
+
+    kind, response = value(
+        "authorize_control",
+        3,
+        {
+            "session_id": "session",
+            "source": "teleop",
+            "operator_confirmation": "FLEXIV-CONTROL-ARM",
+            "clear_hold_latched": True,
+        },
+        (223, 0, 0),
+    )
+
+    assert kind == "authorize_control_result"
+    assert response["authorized"]
+    assert not value.hold_latched
+    for side in ("left", "right"):
+        stop = backend.events.index((side, "stop"))
+        mode = backend.events.index((side, "cartesian_mode"))
+        anchor = backend.events.index((side, "send_hold"))
+        assert stop < mode < anchor
 
 
 def test_different_source_conflict_holds_both_arms() -> None:
@@ -212,6 +269,70 @@ def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
     assert not value.hold_latched
 
 
+def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
+    value, backend = dispatcher()
+    for side in ("left", "right"):
+        pose = backend.samples[side].tcp_pose_rdk.copy()
+        pose[2] = -0.60
+        backend.samples[side] = replace(
+            backend.samples[side], tcp_pose_rdk=pose
+        )
+    request = enable_home_lift(home_command(1))
+
+    _, first = value("home_command", 1, request, (790, 0, 0))
+    assert first["accepted"] and not first["completed"]
+    assert ("left", "send_cartesian") in backend.events
+    np.testing.assert_allclose(
+        backend.cartesian_targets["left"],
+        [0.0, 0.0, -0.38, 1.0, 0.0, 0.0, 0.0],
+    )
+    assert ("left", "send_joint_position") not in backend.events
+    assert ("right", "send_cartesian") not in backend.events
+
+    left_pose = backend.samples["left"].tcp_pose_rdk.copy()
+    left_pose[2] = -0.38
+    backend.samples["left"] = replace(
+        backend.samples["left"], tcp_pose_rdk=left_pose
+    )
+    value("observe", 2, {}, (790, 0, 0))
+    request = enable_home_lift(home_command(2))
+    request["local_authorization_token"] = ""
+    _, second = value("home_command", 3, request, (790, 0, 0))
+    assert second["accepted"] and not second["completed"]
+    assert ("right", "send_cartesian") in backend.events
+    assert ("left", "send_joint_position") not in backend.events
+
+    right_pose = backend.samples["right"].tcp_pose_rdk.copy()
+    right_pose[2] = -0.41
+    backend.samples["right"] = replace(
+        backend.samples["right"], tcp_pose_rdk=right_pose
+    )
+    value("observe", 4, {}, (790, 0, 0))
+    request = enable_home_lift(home_command(3))
+    request["local_authorization_token"] = ""
+    _, third = value("home_command", 5, request, (790, 0, 0))
+
+    assert third["accepted"] and third["completed"]
+    for side in ("left", "right"):
+        lift_write = backend.events.index((side, "send_cartesian"))
+        joint_write = backend.events.index((side, "send_joint_position"))
+        assert lift_write < joint_write
+
+
+def test_home_lift_never_descends_an_arm_already_above_safe_z() -> None:
+    value, backend = dispatcher()
+    request = enable_home_lift(home_command(1))
+    request["left_lift_safe_z_m"] = -0.20
+    request["right_lift_safe_z_m"] = -0.20
+
+    _, response = value("home_command", 1, request, (791, 0, 0))
+
+    # Mock TCP Z is 0.0, already above -0.20. Home proceeds without issuing a
+    # Cartesian target that could lower either arm.
+    assert response["accepted"] and response["completed"]
+    assert backend.cartesian_targets == {}
+
+
 def test_home_reuses_fresh_bridge_observation_instead_of_polling_rdk_again() -> None:
     backend = MockBackend()
     interlock = DaemonInterlock()
@@ -279,8 +400,56 @@ def test_home_watchdog_stops_joint_motion_without_keepalive() -> None:
         time.sleep(0.002)
     value.close()
     assert value.hold_latched
-    assert ("left", "cartesian_mode") in backend.events
-    assert ("right", "cartesian_mode") in backend.events
+    assert ("left", "stop") in backend.events
+    assert ("right", "stop") in backend.events
+
+
+def test_home_watchdog_deadline_starts_after_blocking_observation() -> None:
+    """Slow RDK reads must not consume the bridge's entire keepalive grace."""
+
+    backend = MockBackend()
+    interlock = DaemonInterlock()
+    interlock.ready_generation = 1
+    hands = HandObservationCache()
+    hands.update(np.zeros(6), np.zeros(6))
+
+    def slow_observe_both():
+        time.sleep(0.18)
+        return backend.observe_both()
+
+    value = RDKRequestDispatcher(
+        backend,
+        FakeFT(),
+        hands,
+        interlock,
+        observe_provider=slow_observe_both,
+        home_authorizations=HomeTokenAuthority(),
+        watchdog_period_s=0.001,
+    )
+    value.start_watchdog()
+
+    _, first = value(
+        "home_command", 1, home_command(1, target=0.2), (783, 0, 0)
+    )
+    assert first["accepted"] and not first["completed"]
+    assert not value.hold_latched
+
+    # Let the cached observation age out, then make the next accepted
+    # keepalive spend longer in RDK observation than its former absolute
+    # deadline allowed.  The watchdog thread waits on the dispatcher lock and
+    # must see a fresh server-side grace period when the call returns.
+    time.sleep(0.11)
+    keepalive = home_command(2, target=0.2)
+    keepalive["expires_monotonic_ns"] = str(
+        time.monotonic_ns() + 240_000_000
+    )
+    keepalive["local_authorization_token"] = ""
+    _, second = value("home_command", 2, keepalive, (783, 0, 0))
+    assert second["accepted"] and not second["completed"]
+    time.sleep(0.02)
+    assert not value.hold_latched
+
+    value.close()
 
 
 def test_home_clears_only_episode_transition_hold() -> None:
@@ -332,6 +501,31 @@ def test_cartesian_command_applies_impedance_before_motion() -> None:
         impedance = backend.events.index((side, "set_cartesian_impedance"))
         motion = backend.events.index((side, "send_cartesian"))
         assert impedance < motion
+
+
+def test_cartesian_command_accepts_site_limits_below_daemon_ceiling() -> None:
+    value, _ = dispatcher(cartesian_limits=(0.35, 1.0, 1.0, 2.0))
+    payload = command("teleop", 1)
+    for side in ("left", "right"):
+        payload[side]["max_linear_velocity"] = 0.20
+        payload[side]["max_angular_velocity"] = 0.60
+        payload[side]["max_linear_acceleration"] = 1.0
+        payload[side]["max_angular_acceleration"] = 2.0
+
+    _, response = value(
+        "cartesian_command", 1, payload, (779, 0, 0)
+    )
+
+    assert response["accepted"]
+
+
+def test_cartesian_command_rejects_limit_above_daemon_ceiling() -> None:
+    value, _ = dispatcher(cartesian_limits=(0.35, 1.0, 1.0, 2.0))
+    payload = command("teleop", 1)
+    payload["left"]["max_linear_velocity"] = 0.36
+
+    with pytest.raises(ValueError, match="left Cartesian safety limit"):
+        value("cartesian_command", 1, payload, (779, 0, 0))
 
 
 class CaptureEmitter:

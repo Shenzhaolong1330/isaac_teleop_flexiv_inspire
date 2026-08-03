@@ -30,7 +30,7 @@ class Interlock:
         pass
 
 
-def run(backend):
+def run(backend, *, external_contact_check_enabled=True):
     clock = Clock()
     manager = FTZeroManager(
         backend,
@@ -39,9 +39,12 @@ def run(backend):
         read_hand_positions=lambda: (np.zeros(6), np.zeros(6)),
         event_sink=lambda event: None,
         config=FTZeroConfig(
+            external_contact_check_enabled=external_contact_check_enabled,
             sample_window_s=0.0,
             sample_rate_hz=1000.0,
             min_samples=3,
+            enable_settle_timeout_s=0.01,
+            enable_settle_window_s=0.002,
             max_pre_external_mean_force_n=3.0,
             max_pre_external_mean_torque_nm=0.3,
             max_pre_external_peak_force_n=5.0,
@@ -93,3 +96,22 @@ def test_pulse_external_contact_is_rejected_before_enable():
     assert not result.success
     assert "external contact" in result.failure_reason
     assert ("left", "enable") not in backend.events
+
+
+def test_external_contact_check_can_be_disabled_for_practical_site_mode():
+    class ZeroingBackend(MockBackend):
+        def execute_zero_ft(self, side, *, local_console):
+            super().execute_zero_ft(side, local_console=local_console)
+            self.samples[side] = replace(
+                self.samples[side], external_wrench=np.zeros(6)
+            )
+
+    backend = ZeroingBackend()
+    backend.samples["left"] = replace(
+        backend.samples["left"],
+        external_wrench=np.array([4.0, 0, 0, 0, 0, 0]),
+    )
+
+    result = run(backend, external_contact_check_enabled=False)
+
+    assert result.success

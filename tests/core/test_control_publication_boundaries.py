@@ -63,6 +63,11 @@ class _Arbiter:
     ) -> None:
         self.state = ControlState.HOLD_LATCHED
 
+    def require_reauthorization(
+        self, source: CommandSource, *, now_monotonic_ns: int
+    ) -> None:
+        self.state = ControlState.HOLD_LATCHED
+
     def fault(self) -> None:
         self.state = ControlState.FAULT
 
@@ -115,6 +120,7 @@ def _command(point: CommandPoint) -> BimanualCommand:
 def _bridge(*, token: str | None, rdk_accepts: bool) -> ControlBridge:
     bridge = ControlBridge.__new__(ControlBridge)
     bridge._chunk_lock = threading.Lock()
+    bridge._hardware_command_lock = threading.Lock()
     bridge._chunk_generation = 1
     bridge._state_lock = threading.RLock()
     bridge._arbiter = _Arbiter()
@@ -147,6 +153,7 @@ def _bridge(*, token: str | None, rdk_accepts: bool) -> ControlBridge:
     bridge.holds = []
     bridge.traces = []
     values = {
+        "software_safety_limits_enabled": True,
         "max_translation_step_m": 0.01,
         "max_rotation_step_rad": 0.10,
         "max_linear_velocity_m_s": 0.05,
@@ -190,10 +197,10 @@ def _bridge(*, token: str | None, rdk_accepts: bool) -> ControlBridge:
             False,
             1,
             1,
-            ControlState.FAULT,
+            ControlState.HOLD_LATCHED,
         ),
     ],
-    ids=["over-step", "no-local-token", "rdk-reject"],
+    ids=["over-step", "no-local-token", "rdk-reject-recoverable"],
 )
 def test_failed_points_preserve_requested_safe_sent_boundaries(
     point,
@@ -218,6 +225,54 @@ def test_failed_points_preserve_requested_safe_sent_boundaries(
     )
     assert bridge.traces[0][2] is None
     assert bridge.holds
+    if token is None:
+        assert bridge.holds == ["control_authorization_expired"]
+
+
+def test_mapper_clamped_boundary_survives_floating_point_roundoff() -> None:
+    bridge = _bridge(token="local-token", rdk_accepts=True)
+    # This is the exact value captured from the 2026-08-02 hardware MCAP after
+    # normalizing a Quest step to the configured 0.01 m boundary.
+    point = replace(
+        CommandPoint.identity(),
+        left_delta_xyz=np.array(
+            [0.005904499750351698, -0.007826379128638596, 0.0019709572377164704]
+        ),
+    )
+
+    bridge._execute_chunk(
+        1, _command(point), _wire_message(), time.monotonic_ns()
+    )
+
+    assert len(bridge._safe_pub.messages) == 1
+    assert len(bridge._sent_pub.messages) == 1
+    assert len(bridge._ipc_command.requests) == 1
+    assert bridge._arbiter.state is ControlState.ACTIVE
+    assert bridge.traces[0][1] is bridge._safe_pub.messages[0]
+    assert bridge.traces[0][2] is bridge._sent_pub.messages[0]
+    assert bridge.holds == []
+
+
+def test_practical_mode_does_not_reject_a_bridge_step_over_local_limit() -> None:
+    bridge = _bridge(token="local-token", rdk_accepts=True)
+    original_get_parameter = bridge.get_parameter
+    bridge.get_parameter = lambda name: (
+        _Parameter(False)
+        if name == "software_safety_limits_enabled"
+        else original_get_parameter(name)
+    )
+    point = replace(
+        CommandPoint.identity(),
+        left_delta_xyz=np.array([0.011, 0.0, 0.0]),
+    )
+
+    bridge._execute_chunk(
+        1, _command(point), _wire_message(), time.monotonic_ns()
+    )
+
+    assert len(bridge._sent_pub.messages) == 1
+    assert len(bridge._ipc_command.requests) == 1
+    assert bridge._arbiter.state is ControlState.ACTIVE
 
 
 def test_sent_is_published_only_after_positive_rdk_ack() -> None:
@@ -235,6 +290,33 @@ def test_sent_is_published_only_after_positive_rdk_ack() -> None:
     assert not bridge.holds
 
 
+def test_pedal_release_cancels_safe_point_before_hardware_send() -> None:
+    bridge = _bridge(token="local-token", rdk_accepts=True)
+
+    class ReleaseBeforeHardwareSend:
+        def __enter__(self):
+            bridge._chunk_generation += 1
+            bridge._physical_pedal = False
+
+        def __exit__(self, *_args):
+            return False
+
+    bridge._hardware_command_lock = ReleaseBeforeHardwareSend()
+
+    bridge._execute_chunk(
+        1,
+        _command(CommandPoint.identity()),
+        _wire_message(),
+        time.monotonic_ns(),
+    )
+
+    assert len(bridge._safe_pub.messages) == 1
+    assert len(bridge._ipc_command.requests) == 0
+    assert len(bridge._sent_pub.messages) == 0
+    assert bridge._arbiter.state is ControlState.ACTIVE
+    assert bridge.traces[-1][3] == "clutch released before hardware send"
+
+
 def test_neutral_teleop_packet_does_not_latch_hold() -> None:
     bridge = _bridge(token="local-token", rdk_accepts=True)
     bridge._requested_pub = _Publisher()
@@ -248,3 +330,32 @@ def test_neutral_teleop_packet_does_not_latch_hold() -> None:
     assert bridge._requested_pub.messages == [message]
     assert bridge.traces[0][3] == "teleop_clutch_released"
     assert not bridge.holds
+
+
+def test_neutral_teleop_packet_is_best_effort_before_recorder_ingress() -> None:
+    bridge = _bridge(token="local-token", rdk_accepts=True)
+    bridge._requested_pub = _Publisher()
+    priorities = []
+    bridge._emit_deviceio = lambda *args, **kwargs: priorities.append(
+        kwargs["critical"]
+    ) or False
+    message = SimpleNamespace(deadman=False, valid_mask=0)
+
+    bridge._on_command(CommandSource.TELEOP, message)
+
+    assert priorities == [False]
+    assert bridge._requested_pub.messages == [message]
+    assert bridge._arbiter.state is ControlState.ACTIVE
+    assert not bridge.holds
+
+
+def test_only_deadman_authorized_nonempty_command_requires_critical_capture() -> None:
+    assert not ControlBridge._command_may_actuate(
+        SimpleNamespace(deadman=False, valid_mask=0)
+    )
+    assert not ControlBridge._command_may_actuate(
+        SimpleNamespace(deadman=True, valid_mask=0)
+    )
+    assert ControlBridge._command_may_actuate(
+        SimpleNamespace(deadman=True, valid_mask=int(ValidMask.LEFT_ARM))
+    )

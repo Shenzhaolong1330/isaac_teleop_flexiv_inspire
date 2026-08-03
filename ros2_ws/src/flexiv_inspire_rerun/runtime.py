@@ -141,6 +141,80 @@ def tactile_atlas(
     return canvas if side == "left" else np.fliplr(canvas).copy()
 
 
+def tactile_sensor_mask(
+    surfaces: Sequence[Mapping[str, Any]], *, side: str = "left"
+) -> np.ndarray:
+    """Return the anatomical sensor footprint, including zero-value taxels."""
+
+    footprint_surfaces = []
+    for surface in surfaces:
+        rows = int(surface["rows"])
+        columns = int(surface["columns"])
+        footprint_surfaces.append(
+            {
+                **surface,
+                "taxels": np.ones(rows * columns, dtype=np.uint16),
+            }
+        )
+    return tactile_atlas(footprint_surfaces, side=side).astype(bool)
+
+
+def tactile_heatmap(
+    atlas: np.ndarray, sensor_mask: np.ndarray | None = None
+) -> np.ndarray:
+    """Make an RGB palm view with a visible zero baseline and outline.
+
+    The exact raw atlas is still logged separately. Typical tactile values use
+    only a small part of uint16, so drawing them directly can look completely
+    black even while the sensor is updating. Zero-value taxels are dark blue,
+    the sensor boundary is grey-blue, and active taxels use blue-to-red color.
+    """
+
+    raw = np.asarray(atlas)
+    if raw.shape != TACTILE_ATLAS_SHAPE or raw.dtype != np.uint16:
+        raise ValueError("tactile atlas must be a uint16 palm image")
+    mask = raw > 0 if sensor_mask is None else np.asarray(sensor_mask, dtype=bool)
+    if mask.shape != raw.shape:
+        raise ValueError("tactile sensor mask must match the atlas shape")
+
+    rgb = np.zeros((*raw.shape, 3), dtype=np.uint8)
+    rgb[mask] = (24, 58, 96)
+    padded = np.pad(mask, 1, mode="constant", constant_values=False)
+    interior = (
+        padded[1:-1, 1:-1]
+        & padded[:-2, 1:-1]
+        & padded[2:, 1:-1]
+        & padded[1:-1, :-2]
+        & padded[1:-1, 2:]
+    )
+    rgb[mask & ~interior] = (105, 135, 165)
+
+    active_mask = mask & (raw > 0)
+    active = raw[active_mask].astype(np.float32)
+    if active.size == 0:
+        return rgb
+    low = float(np.percentile(active, 2.0))
+    high = float(np.percentile(active, 99.0))
+    if high <= low:
+        high = low + 1.0
+    level = np.clip(
+        (raw[active_mask].astype(np.float32) - low) / (high - low),
+        0.0,
+        1.0,
+    )
+    low_color = np.asarray((0.0, 145.0, 255.0), dtype=np.float32)
+    mid_color = np.asarray((60.0, 235.0, 90.0), dtype=np.float32)
+    high_color = np.asarray((255.0, 55.0, 0.0), dtype=np.float32)
+    colors = np.empty((level.size, 3), dtype=np.float32)
+    lower = level <= 0.5
+    colors[lower] = low_color + (mid_color - low_color) * (level[lower, None] * 2.0)
+    colors[~lower] = mid_color + (high_color - mid_color) * (
+        (level[~lower, None] - 0.5) * 2.0
+    )
+    rgb[active_mask] = np.clip(colors, 0.0, 255.0).astype(np.uint8)
+    return rgb
+
+
 def command_action_vector(command: Mapping[str, Any]) -> np.ndarray:
     """Return the first command point in the public policy action layout.
 
@@ -317,29 +391,114 @@ class RerunVisualizer:
         self._log_static_metadata()
 
     def _send_default_blueprint(self) -> None:
-        """Make the two anatomical tactile atlases the default paired panel."""
+        """Install a deterministic live layout instead of auto-view clutter."""
 
         import rerun.blueprint as rrb
 
         tactile = rrb.Horizontal(
             rrb.Spatial2DView(
                 origin="/robot/left_hand/tactile",
-                contents="/robot/left_hand/tactile/atlas_raw_u16",
+                contents="/robot/left_hand/tactile/atlas_heatmap_u8",
                 name="Left hand tactile (palm view)",
             ),
             rrb.Spatial2DView(
                 origin="/robot/right_hand/tactile",
-                contents="/robot/right_hand/tactile/atlas_raw_u16",
+                contents="/robot/right_hand/tactile/atlas_heatmap_u8",
                 name="Right hand tactile (palm view)",
             ),
             column_shares=[1.0, 1.0],
             name="Bimanual tactile",
         )
+        cameras = rrb.Vertical(
+            rrb.Horizontal(
+                *(
+                    rrb.Spatial2DView(
+                        origin=f"/camera/{camera}",
+                        contents=f"/camera/{camera}/color",
+                        name=f"{camera} RGB",
+                    )
+                    for camera in ("head", "left_wrist", "right_wrist")
+                )
+            ),
+            rrb.Horizontal(
+                *(
+                    rrb.Spatial2DView(
+                        origin=f"/camera/{camera}",
+                        contents=f"/camera/{camera}/depth_m",
+                        name=f"{camera} depth",
+                    )
+                    for camera in ("head", "left_wrist", "right_wrist")
+                )
+            ),
+            name="RGB + depth",
+        )
+        pointclouds = rrb.Horizontal(
+            *(
+                rrb.Spatial3DView(
+                    origin=f"/camera/{camera}",
+                    contents=f"/camera/{camera}/pointcloud",
+                    name=f"{camera} point cloud",
+                )
+                for camera in ("head", "left_wrist", "right_wrist")
+            ),
+            name="Point clouds",
+        )
+        arms = rrb.Horizontal(
+            *(
+                rrb.TimeSeriesView(
+                    origin=f"/robot/{side}_arm",
+                    contents=[
+                        f"/robot/{side}_arm/q",
+                        f"/robot/{side}_arm/dq",
+                        f"/robot/{side}_arm/external_wrench",
+                    ],
+                    name=f"{side} arm",
+                )
+                for side in ("left", "right")
+            ),
+            name="Arm state",
+        )
+        hands = rrb.Horizontal(
+            *(
+                rrb.TimeSeriesView(
+                    origin=f"/robot/{side}_hand",
+                    contents=[
+                        f"/robot/{side}_hand/position",
+                        f"/robot/{side}_hand/actual_force",
+                        f"/robot/{side}_hand/current",
+                    ],
+                    name=f"{side} hand",
+                )
+                for side in ("left", "right")
+            ),
+            name="Hand state",
+        )
+        control = rrb.TimeSeriesView(
+            origin="/control",
+            contents=[
+                "/control/requested/action",
+                "/control/safe/action",
+                "/control/sent/action",
+                "/control/state/state_code",
+                "/control/state/physical_pedal",
+            ],
+            name="Control",
+        )
         self.stream.send_blueprint(
-            # The default tactile dashboard contains exactly two plots: one
-            # composite anatomical image per hand. Individual surface entities
-            # remain recorded for diagnostics but are not expanded into views.
-            rrb.Blueprint(tactile, auto_views=False),
+            rrb.Blueprint(
+                rrb.Tabs(
+                    cameras,
+                    tactile,
+                    pointclouds,
+                    arms,
+                    hands,
+                    control,
+                    active_tab=0,
+                    name="Live data",
+                ),
+                auto_views=False,
+                collapse_panels=True,
+            ),
             make_active=True,
             make_default=True,
         )
@@ -520,6 +679,79 @@ class RerunVisualizer:
                 level="WARN",
             )
 
+    def log_depth(self, payload: Mapping[str, Any]) -> None:
+        """Display the live ROS Z16 image on its own latest-only stream."""
+
+        camera = str(payload["camera"])
+        width = int(payload["width"])
+        height = int(payload["height"])
+        step = int(payload["step"])
+        if str(payload["encoding"]).lower() not in {"16uc1", "mono16"}:
+            raise ValueError(f"{camera}: unsupported live depth encoding")
+        if width <= 0 or height <= 0 or step < width * 2:
+            raise ValueError(f"{camera}: invalid live depth layout")
+        raw = bytes(payload["data"])
+        if len(raw) < step * height:
+            raise ValueError(f"{camera}: truncated live depth image")
+        dtype = np.dtype(">u2" if bool(payload.get("is_bigendian", False)) else "<u2")
+        depth = np.ndarray(
+            (height, width), dtype=dtype, buffer=raw, strides=(step, 2)
+        ).astype(np.float32)
+        self._set_time(int(payload["stamp_ns"]))
+        self.stream.log(
+            f"camera/{camera}/depth_m",
+            self.rr.DepthImage(
+                depth * float(payload.get("meter_per_unit", 0.001)), meter=1.0
+            ),
+        )
+
+    def log_pointcloud(self, payload: Mapping[str, Any]) -> None:
+        """Decode the XYZ fields of the live PointCloud2 without ROS helpers."""
+
+        camera = str(payload["camera"])
+        width = int(payload["width"])
+        height = int(payload["height"])
+        point_step = int(payload["point_step"])
+        row_step = int(payload["row_step"])
+        if width <= 0 or height <= 0 or point_step < 12 or row_step < point_step * width:
+            raise ValueError(f"{camera}: invalid live point-cloud layout")
+        fields = payload.get("fields", {})
+        if not isinstance(fields, Mapping):
+            raise ValueError(f"{camera}: point-cloud fields are invalid")
+        offsets: list[int] = []
+        for axis in ("x", "y", "z"):
+            field = fields.get(axis)
+            if not isinstance(field, Mapping):
+                raise ValueError(f"{camera}: point-cloud is missing {axis}")
+            # sensor_msgs/PointField.FLOAT32 == 7.
+            if int(field.get("datatype", 0)) != 7 or int(field.get("count", 0)) != 1:
+                raise ValueError(f"{camera}: {axis} must be one float32 field")
+            offset = int(field.get("offset", -1))
+            if offset < 0 or offset + 4 > point_step:
+                raise ValueError(f"{camera}: {axis} offset is invalid")
+            offsets.append(offset)
+        raw = bytes(payload["data"])
+        if len(raw) < row_step * height:
+            raise ValueError(f"{camera}: truncated live point cloud")
+        dtype = np.dtype(">f4" if bool(payload.get("is_bigendian", False)) else "<f4")
+        points = np.empty((height, width, 3), dtype=np.float32)
+        for index, offset in enumerate(offsets):
+            points[..., index] = np.ndarray(
+                (height, width),
+                dtype=dtype,
+                buffer=raw,
+                offset=offset,
+                strides=(row_step, point_step),
+            )
+        points = points.reshape(-1, 3)
+        points = points[np.all(np.isfinite(points), axis=1)]
+        self._set_time(int(payload["stamp_ns"]))
+        self.stream.log(f"camera/{camera}/pointcloud", self.rr.Points3D(points))
+        self._text_if_changed(
+            f"camera/{camera}/pointcloud_frame",
+            str(payload.get("frame_id", "")),
+        )
+
     def log_camera_acquisition(self, payload: Mapping[str, Any]) -> None:
         camera = str(payload["camera"])
         acquisition = payload["acquisition"]
@@ -628,7 +860,12 @@ class RerunVisualizer:
         root = f"robot/{side}_hand/tactile"
         surfaces = payload["surfaces"]
         atlas = tactile_atlas(surfaces, side=side)
+        sensor_mask = tactile_sensor_mask(surfaces, side=side)
         self.stream.log(f"{root}/atlas_raw_u16", self.rr.Image(atlas))
+        self.stream.log(
+            f"{root}/atlas_heatmap_u8",
+            self.rr.Image(tactile_heatmap(atlas, sensor_mask)),
+        )
         flattened: list[int] = []
         for surface in surfaces:
             rows = int(surface["rows"])
@@ -636,16 +873,10 @@ class RerunVisualizer:
             taxels = np.asarray(surface["taxels"], dtype=np.uint16)
             if taxels.size != rows * columns:
                 raise ValueError(f"{surface['name']}: tactile shape mismatch")
-            image = taxels.reshape(rows, columns, order="F" if surface["name"] == "palm" else "C")
             name = str(surface["name"])
-            self.stream.log(f"{root}/surfaces/{name}/raw_u16", self.rr.Image(image))
             surface_acquisition = surface.get("acquisition")
             if surface_acquisition is None:
                 raise ValueError(f"{name}: missing per-surface AcquisitionInfo")
-            self._log_acquisition(
-                f"{root}/surfaces/{name}/acquisition",
-                surface_acquisition,
-            )
             flattened.extend(int(value) for value in taxels)
         if len(flattened) != int(payload.get("taxel_count", len(flattened))):
             raise ValueError("tactile taxel_count does not match surfaces")
@@ -911,6 +1142,16 @@ class RerunVisualizer:
                 self.stream.log(
                     f"{root}/atlas_raw_u16",
                     self.rr.Image(tactile_atlas(surfaces, side=side)),
+                )
+                atlas = tactile_atlas(surfaces, side=side)
+                self.stream.log(
+                    f"{root}/atlas_heatmap_u8",
+                    self.rr.Image(
+                        tactile_heatmap(
+                            atlas,
+                            tactile_sensor_mask(surfaces, side=side),
+                        )
+                    ),
                 )
 
         command_stage = {

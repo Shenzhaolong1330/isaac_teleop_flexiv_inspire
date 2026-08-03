@@ -25,11 +25,13 @@ class ArmBackend(Protocol):
     def connection_generation(self) -> int: ...
     def observe(self, side: str) -> ArmSample: ...
     def observe_both(self) -> DualArmSample: ...
+    def clear_fault(self, side: str, *, local_console: bool) -> bool: ...
     def enable(self, side: str, *, local_console: bool) -> None: ...
     def operational(self, side: str) -> bool: ...
     def switch_primitive_mode(self, side: str, *, local_console: bool) -> None: ...
     def execute_zero_ft(self, side: str, *, local_console: bool) -> None: ...
     def primitive_state(self, side: str) -> Mapping[str, Any]: ...
+    def stop(self, side: str, *, local_console: bool) -> None: ...
     def switch_idle(self, side: str, *, local_console: bool) -> None: ...
     def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None: ...
     def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None: ...
@@ -478,9 +480,33 @@ class FlexivRDKBackend:
             return DualArmSample(
                 left=self.observe("left"), right=self.observe("right"))
 
+    def _clear_fault_locked(self, side: str) -> bool:
+        robot = self._robot(side)
+        if not bool(self._invoke(robot, "fault")):
+            return False
+        cleared = self._invoke(robot, "clear_fault", "ClearFault")
+        if not bool(cleared):
+            raise RuntimeError(f"{side} Flexiv controller fault could not be cleared")
+        self._safe_targets.pop(side, None)
+        return True
+
+    def clear_fault(self, side: str, *, local_console: bool) -> bool:
+        """Clear a controller fault as an explicit local Reset operation."""
+
+        self._guard.require("ClearFault", local_console=local_console)
+        with self._arm_locks[side]:
+            return self._clear_fault_locked(side)
+
     def enable(self, side: str, *, local_console: bool) -> None:
         self._guard.require("Enable", local_console=local_console)
         with self._arm_locks[side]:
+            # A minor controller fault makes Enable/SwitchMode fail until RDK
+            # ClearFault succeeds.  Reset owns this local write path, so make
+            # Enable resilient to a fault that appeared after its initial
+            # preflight instead of requiring a daemon restart.
+            if bool(self._invoke(self._robot(side), "fault")):
+                self._guard.require("ClearFault", local_console=local_console)
+                self._clear_fault_locked(side)
             self._invoke(self._robot(side), "enable", "Enable")
 
     def operational(self, side: str) -> bool:
@@ -519,6 +545,21 @@ class FlexivRDKBackend:
         if not isinstance(state, Mapping):
             raise RuntimeError("RDK primitive_states did not return a mapping")
         return state
+
+    def stop(self, side: str, *, local_console: bool) -> None:
+        """Stop ongoing motion and let the controller hold in IDLE.
+
+        A measured Cartesian target with a low acceleration limit is not an
+        emergency/routine stop: the RDK trajectory generator can continue the
+        previous velocity for seconds while converging to that target.  RDK
+        ``Stop`` is the controller-native transition to IDLE and is therefore
+        the correct boundary operation when a clutch or safety hold latches.
+        """
+
+        self._guard.require("Stop", local_console=local_console)
+        with self._arm_locks[side]:
+            self._invoke(self._robot(side), "stop", "Stop")
+            self._safe_targets.pop(side, None)
 
     def switch_idle(self, side: str, *, local_console: bool) -> None:
         self._switch_mode(side, "IDLE", local_console=local_console)

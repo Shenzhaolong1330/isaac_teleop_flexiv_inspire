@@ -86,8 +86,8 @@ def test_partial_dual_arm_send_failure_holds_both_arms() -> None:
     with pytest.raises(RuntimeError, match="right send failed"):
         value("cartesian_command", 1, command(), (222, 0, 0))
     assert ("left", "send_cartesian") in backend.events
-    assert ("left", "send_hold") in backend.events
-    assert ("right", "send_hold") in backend.events
+    assert ("left", "stop") in backend.events
+    assert ("right", "stop") in backend.events
     assert value.hold_latched
 
 
@@ -100,8 +100,8 @@ def test_active_lease_is_bound_to_owner_pid() -> None:
     assert not rejected["accepted"]
     assert rejected["reason"] == "command_owner_pid_changed"
     assert value.hold_latched
-    assert ("left", "send_hold") in backend.events
-    assert ("right", "send_hold") in backend.events
+    assert ("left", "stop") in backend.events
+    assert ("right", "stop") in backend.events
 
 
 def test_shutdown_synchronously_holds_both_active_arms() -> None:
@@ -109,31 +109,29 @@ def test_shutdown_synchronously_holds_both_active_arms() -> None:
     value = dispatcher(backend)
     value("cartesian_command", 1, command(), (444, 0, 0))
     value.shutdown_hold()
-    assert ("left", "send_hold") in backend.events
-    assert ("right", "send_hold") in backend.events
+    assert ("left", "stop") in backend.events
+    assert ("right", "stop") in backend.events
     assert value.hold_latched
 
 
-def test_explicit_hold_retry_reissues_hardware_hold() -> None:
-    class FailFirstLeftHold(MockBackend):
+def test_explicit_hold_retry_reissues_hardware_stop() -> None:
+    class FailFirstLeftStop(MockBackend):
         def __init__(self):
             super().__init__()
             self.failed = False
 
-        def send_hold_from_measurement(self, side: str, *, local_authorized: bool):
+        def stop(self, side: str, *, local_console: bool):
             if side == "left" and not self.failed:
                 self.failed = True
-                raise RuntimeError("transient hold failure")
-            return super().send_hold_from_measurement(
-                side, local_authorized=local_authorized
-            )
+                raise RuntimeError("transient stop failure")
+            return super().stop(side, local_console=local_console)
 
-    backend = FailFirstLeftHold()
+    backend = FailFirstLeftStop()
     value = dispatcher(backend)
     value("cartesian_command", 1, command(), (555, 0, 0))
     _, first = value("hold", 2, {"reason": "test"}, (555, 0, 0))
     assert not first["accepted"]
     _, second = value("hold", 3, {"reason": "test"}, (555, 0, 0))
     assert second["accepted"]
-    assert backend.events.count(("left", "send_hold")) == 1
-    assert backend.events.count(("right", "send_hold")) == 2
+    assert backend.events.count(("left", "stop")) == 1
+    assert backend.events.count(("right", "stop")) == 2

@@ -26,12 +26,16 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert camera["cameras"]["head"]["pointcloud_enabled"] is True
     assert camera["cameras"]["head"]["pointcloud_stride"] == 2
     assert camera["cameras"]["left_wrist"]["pointcloud_enabled"] is False
+    receiver = yaml.safe_load(rendered["isaac_camera_receiver.yaml"].read_text())
+    assert set(receiver["cameras"]) == {"head"}
+    assert set(receiver["display"]["xr"]["planes"]) == {"head"}
     control = yaml.safe_load(rendered["control_bridge.yaml"].read_text())
     parameters = control["/**"]["ros__parameters"]
     assert len(parameters["joint_lower_limits_rad"]) == 7
     assert len(parameters["joint_upper_limits_rad"]) == 7
     assert parameters["joint_lower_limits_rad"][0] < 0.0
     assert parameters["joint_upper_limits_rad"][5] > 4.5
+    assert parameters["software_safety_limits_enabled"] is False
     assert parameters["cartesian_control_mode"] == "position"
     assert parameters["cartesian_impedance_stiffness"] == [
         1200,
@@ -54,6 +58,12 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert parameters["home_max_velocity_rad_s"] <= parameters[
         "max_joint_velocity_rad_s"
     ]
+    assert parameters["max_joint_velocity_rad_s"] == 2.0
+    assert parameters["home_lift_enabled"] is True
+    assert parameters["home_lift_left_safe_z_m"] == -0.377676
+    assert parameters["home_lift_right_safe_z_m"] == -0.413296
+    assert parameters["home_lift_max_linear_velocity_m_s"] == 0.12
+    assert parameters["home_lift_parallel"] is False
     assert parameters["max_linear_velocity_m_s"] == 0.20
     assert parameters["max_angular_velocity_rad_s"] == 0.60
     assert parameters["frame_config"].endswith("/config/dual_arm_frames.yaml")
@@ -73,6 +83,17 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert teleop["deadman_source"] == "external_bool"
     assert teleop["foot_pedal"] == "name:input-remapper keyboard"
     assert teleop["enable_key_code"] == 57
+    assert teleop["max_translation_step_m"] == 0.01
+    assert teleop["max_rotation_step_rad"] == 0.10
+    assert teleop["left_pose_index"] == 0
+    assert teleop["right_pose_index"] == 1
+    assert teleop["axis_rotation"] == [
+        0.0, 0.0, -1.0,
+        -1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+    ]
+    assert teleop["translation_gain"] == 1.0
+    assert teleop["rotation_gain"] == 1.0
     pedal = yaml.safe_load(rendered["pedal.yaml"].read_text())["/**"][
         "ros__parameters"
     ]
@@ -99,12 +120,18 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     )
     assert xr_source[xr_source.index("--transport") + 1] == "lan"
     assert xr_source[xr_source.index("--wifi-connection") + 1] == "Deepybo-Prime"
+    assert xr_source[xr_source.index("--client-per-eye-width") + 1] == "1792"
+    assert xr_source[xr_source.index("--client-per-eye-height") + 1] == "1536"
+    assert xr_source[xr_source.index("--client-frame-rate") + 1] == "72"
+    assert xr_source[xr_source.index("--client-max-bitrate-mbps") + 1] == "80"
+    assert xr_source[xr_source.index("--client-codec") + 1] == "h264"
     assert any(command[0].endswith("run_manus_plugin.sh") for command in commands)
     episode = next(
         command
         for command in commands
         if "flexiv_inspire_isaac.episode_control" in command
     )
+    assert "home_result_timeout_s:=54.0" in episode
     assert any(
         item.endswith("/apps/flexiv_daemon/config/tool_payload.yaml")
         for item in episode
@@ -130,11 +157,39 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
 
     assert config.document["recording"]["dataset_name"] == "pick_place_demo"
     assert config.document["recording"]["episode_count"] == 20
+    assert config.document["recording"]["auto_reset_before_record"] is True
+    assert config.document["recording"]["live_rerun"] == {
+        "enabled": True,
+        "viewer_port": 9876,
+        "telemetry_hz": 5.0,
+        "tactile_hz": 10.0,
+        "image_hz": 10.0,
+        "pointcloud_hz": 2.0,
+    }
     assert config.document["flexiv"]["home"]["quest_button"] == (
         "right_primary_click"
     )
     assert config.document["cameras"]["streams"]["head"]["serial"]
+    assert config.document["xr_video"]["streams"]["head"]["enabled"] is True
+    assert config.document["xr_video"]["streams"]["left_wrist"]["enabled"] is False
+    assert config.document["xr_video"]["streams"]["right_wrist"]["enabled"] is False
+    assert config.document["xr_video"]["transport"] == "usb_tcp"
+    assert config.document["xr_video"]["cloudxr_client"] == {
+        "per_eye_width": 1792,
+        "per_eye_height": 1536,
+        "frame_rate": 72,
+        "max_bitrate_mbps": 80,
+        "codec": "h264",
+        "enable_tex_sub_image_2d": True,
+    }
+    assert config.document["xr_video"]["display"]["lock_mode"] == "world"
     assert "--mock" not in config.document["commands"]["rdk_daemon"]
+    assert config.document["flexiv"]["safety"][
+        "max_linear_velocity_m_s"
+    ] == 0.20
+    assert config.document["flexiv"]["safety"][
+        "software_safety_limits_enabled"
+    ] is False
 
     rendered = render_runtime_configs(config, tmp_path)
     dftp = yaml.safe_load(rendered["dftp.yaml"].read_text())[
@@ -150,6 +205,10 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     assert "--hardware" in rdk
     assert "--allow-hardware-writes" in rdk
     assert "--local-permit-file" in rdk
+    assert any(
+        "flexiv_inspire_isaac.rerun_viz.cli" in command
+        for command in _commands(config, rendered, include_xr_receiver=False)
+    )
 
 
 def test_system_config_rejects_non_executed_action_label(tmp_path):
@@ -165,6 +224,19 @@ def test_system_config_rejects_non_executed_action_label(tmp_path):
         raise AssertionError("unsafe dataset action label was accepted")
 
 
+def test_quest_input_does_not_depend_on_xr_video_branch(tmp_path):
+    config = load_system_config(_example())
+    config.document["xr_video"]["enabled"] = False
+    rendered = render_runtime_configs(config, tmp_path / "rendered")
+
+    commands = _commands(config, rendered, include_xr_receiver=True)
+    joined = [" ".join(command) for command in commands]
+    assert any("run_xr_raw_source.sh" in command for command in joined)
+    assert any("run_manus_plugin.sh" in command for command in joined)
+    assert not any("flexiv-inspire-xr-bridge" in command for command in joined)
+    assert not any("run_isaac_camera_receiver.sh" in command for command in joined)
+
+
 def test_system_config_rejects_invalid_joint_limits(tmp_path):
     data = yaml.safe_load(_example().read_text())
     data["flexiv"]["safety"]["joint_lower_limits_rad"][0] = 3.0
@@ -178,8 +250,42 @@ def test_system_config_rejects_invalid_joint_limits(tmp_path):
         raise AssertionError("invalid joint limits were accepted")
 
 
+def test_system_config_rejects_command_limit_above_daemon_ceiling(tmp_path):
+    data = yaml.safe_load(_example().read_text())
+    daemon_source = (
+        Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
+    )
+    tool_source = (
+        Path(__file__).parents[1]
+        / "apps/flexiv_daemon/config/tool_payload.yaml"
+    )
+    daemon_data = yaml.safe_load(daemon_source.read_text(encoding="utf-8"))
+    daemon_path = tmp_path / "robots.yaml"
+    daemon_path.write_text(
+        yaml.safe_dump(daemon_data), encoding="utf-8"
+    )
+    (tmp_path / "tool_payload.yaml").write_text(
+        tool_source.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    data["flexiv"]["rdk_config"] = str(daemon_path)
+    data["flexiv"]["safety"]["max_linear_velocity_m_s"] = 0.36
+    data["flexiv"]["safety"]["max_tcp_linear_speed_m_s"] = 0.50
+    path = tmp_path / "bad-daemon-limit.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    try:
+        load_system_config(path)
+    except SystemConfigError as exc:
+        assert "exceeds daemon ceiling" in str(exc)
+    else:
+        raise AssertionError("daemon Cartesian ceiling mismatch was accepted")
+
+
 def test_system_config_rejects_missing_recording_prompt(tmp_path):
     data = yaml.safe_load(_example().read_text())
+    data["flexiv"]["rdk_config"] = str(
+        Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
+    )
     data["recording"]["task_description"] = ""
     path = tmp_path / "bad-recording.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")

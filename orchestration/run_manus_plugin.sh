@@ -12,6 +12,20 @@ if [[ ! -x "$PLUGIN" ]]; then
   exit 2
 fi
 
+# Core Integrated can occasionally leave the MetaglovePro Sensor Dongle
+# enumerated by Linux while failing to discover it (Prime1 remains visible but
+# both gloves disappear).  A device-scoped USB reset restored 318DCDA6 during
+# the site diagnosis.  Record owns this fresh MANUS process, so reset only the
+# exact Metaglove vendor/product before Core opens it; never touch Prime1,
+# Quest, cameras, or unrelated USB devices.
+if command -v usbreset >/dev/null 2>&1 && lsusb -d 3325:0049 >/dev/null 2>&1; then
+  if usbreset 3325:0049; then
+    echo "MANUS Sensor Dongle 3325:0049 reset before Core startup"
+  else
+    echo "warning: MANUS Sensor Dongle reset failed; Core discovery will decide readiness" >&2
+  fi
+fi
+
 deadline=$((SECONDS + 60))
 while (( SECONDS < deadline )); do
   if [[ -f "$ENV_FILE" && -f "$PID_FILE" ]]; then
@@ -39,4 +53,9 @@ set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+# This station uses MANUS only for finger articulation. Quest Touch controllers
+# own wrist position/orientation, so optical Quest hand tracking must never
+# steal the MANUS wrist root when it appears briefly and then disappears after
+# the operator picks up the controllers.
+export ISAAC_TELEOP_MANUS_WRIST_SOURCE=controllers
 exec "$PLUGIN"

@@ -15,6 +15,7 @@ from flexiv_inspire_control.foot_pedal import (
     KEY_DOWN,
     KEY_LEFT,
     KEY_RIGHT,
+    KEY_SPACE,
     PedalEvent,
 )
 
@@ -35,12 +36,16 @@ class PedalRouter(Node):
             Bool, "/teleop/deadman", QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         )
         self._enabled = False
+        configured_enable = int(self.get_parameter("enable_key_code").value)
         self._pedal = FootPedalMonitor(
             Path(str(self.get_parameter("foot_pedal").value)),
             self._on_enable,
             self._on_event,
             self._on_status,
-            enable_key_code=int(self.get_parameter("enable_key_code").value),
+            # The current site uses Input Remapper (Space=57).  Accept the
+            # physical pedal's native Down=108 as well so a remapper profile
+            # change cannot leave the arm clutch permanently released.
+            enable_key_codes=(configured_enable, KEY_SPACE, KEY_DOWN),
             grab=True,
         )
         self._on_enable(False)

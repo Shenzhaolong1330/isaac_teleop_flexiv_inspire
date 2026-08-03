@@ -59,6 +59,8 @@ def make_manager(backend, *, hand_monitor=None) -> FTZeroManager:
             min_samples=3,
             operational_timeout_s=0.02,
             primitive_timeout_s=0.02,
+            enable_settle_timeout_s=0.01,
+            enable_settle_window_s=0.003,
             poll_interval_s=0.001,
             max_hand_delta=0.1,
         ),
@@ -81,26 +83,28 @@ def test_latched_hand_motion_is_rejected_even_after_return_to_reference() -> Non
     assert not any(event[1] == "enable" for event in result.cleanup)
 
 
-def test_opposite_arm_transient_motion_is_latched_during_left_zero() -> None:
-    class TransientRightMotion(MockBackend):
+def test_opposite_arm_motion_that_never_settles_is_rejected() -> None:
+    class PersistentRightMotion(MockBackend):
         def __init__(self):
             super().__init__()
-            self.observations = 0
+            self.left_enabled = False
+
+        def enable(self, side: str, *, local_console: bool) -> None:
+            super().enable(side, local_console=local_console)
+            if side == "left":
+                self.left_enabled = True
 
         def observe_both(self):
-            self.observations += 1
             left = self.observe("left")
             right = self.observe("right")
-            # Calls 1..3 are the simultaneous initial window, call 4 is the
-            # left immediate precheck, call 5 occurs just after left Enable.
-            if self.observations == 5:
+            if self.left_enabled:
                 right = replace(right, dq=np.ones(7))
             return DualArmSample(left, right)
 
-    backend = TransientRightMotion()
+    backend = PersistentRightMotion()
     result = make_manager(backend).zero(request())
     assert not result.success
-    assert "right stability/motion" in result.failure_reason
+    assert "did not settle after enabling left" in result.failure_reason
     assert ("right", "zero_ft") not in backend.events
 
 

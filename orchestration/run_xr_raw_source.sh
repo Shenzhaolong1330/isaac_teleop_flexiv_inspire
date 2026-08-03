@@ -5,6 +5,12 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EULA_MARKER="$HOME/.cloudxr/run/eula_accepted"
 TRANSPORT="lan"
 WIFI_CONNECTION=""
+CLIENT_PER_EYE_WIDTH="1792"
+CLIENT_PER_EYE_HEIGHT="1536"
+CLIENT_FRAME_RATE="72"
+CLIENT_MAX_BITRATE_MBPS="80"
+CLIENT_CODEC="h264"
+CLIENT_ENABLE_TEX_SUB_IMAGE_2D="true"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -14,6 +20,30 @@ while [[ $# -gt 0 ]]; do
       ;;
     --wifi-connection)
       WIFI_CONNECTION="${2:?--wifi-connection requires a NetworkManager profile}"
+      shift 2
+      ;;
+    --client-per-eye-width)
+      CLIENT_PER_EYE_WIDTH="${2:?--client-per-eye-width requires pixels}"
+      shift 2
+      ;;
+    --client-per-eye-height)
+      CLIENT_PER_EYE_HEIGHT="${2:?--client-per-eye-height requires pixels}"
+      shift 2
+      ;;
+    --client-frame-rate)
+      CLIENT_FRAME_RATE="${2:?--client-frame-rate requires FPS}"
+      shift 2
+      ;;
+    --client-max-bitrate-mbps)
+      CLIENT_MAX_BITRATE_MBPS="${2:?--client-max-bitrate-mbps requires Mbps}"
+      shift 2
+      ;;
+    --client-codec)
+      CLIENT_CODEC="${2:?--client-codec requires h264, h265, or av1}"
+      shift 2
+      ;;
+    --client-enable-tex-sub-image-2d)
+      CLIENT_ENABLE_TEX_SUB_IMAGE_2D="${2:?--client-enable-tex-sub-image-2d requires true or false}"
       shift 2
       ;;
     *)
@@ -44,7 +74,19 @@ case "$TRANSPORT" in
     ;;
   usb_tcp)
     CLOUDXR_USB_LOCAL=true
-    echo "XR 使用 USB/TCP 兼容模式；该模式延迟较高。" >&2
+    if ! command -v adb >/dev/null 2>&1; then
+      echo "USB XR requires adb, but adb is not installed." >&2
+      exit 2
+    fi
+    if ! command -v turnserver >/dev/null 2>&1; then
+      echo "USB XR requires coturn (turnserver), but it is not installed." >&2
+      exit 2
+    fi
+    if [[ "$(adb get-state 2>/dev/null || true)" != "device" ]]; then
+      echo "Quest USB 数据连接未就绪：请解锁头显并允许 USB 调试，然后重试。" >&2
+      exit 2
+    fi
+    echo "XR 使用 USB 本地链路：信令、网页和 WebRTC 媒体均经数据线。" >&2
     ;;
   *)
     echo "Unsupported XR transport '$TRANSPORT' (expected lan or usb_tcp)." >&2
@@ -71,4 +113,10 @@ exec "$PROJECT_ROOT/envs/isaac-py312/bin/flexiv-inspire-xr-raw-source" \
   --ros-args \
   -p cloudxr_accept_eula:=false \
   -p cloudxr_setup_oob:=true \
-  -p cloudxr_usb_local:="$CLOUDXR_USB_LOCAL"
+  -p cloudxr_usb_local:="$CLOUDXR_USB_LOCAL" \
+  -p cloudxr_client_per_eye_width:="$CLIENT_PER_EYE_WIDTH" \
+  -p cloudxr_client_per_eye_height:="$CLIENT_PER_EYE_HEIGHT" \
+  -p cloudxr_client_frame_rate:="$CLIENT_FRAME_RATE" \
+  -p cloudxr_client_max_bitrate_mbps:="$CLIENT_MAX_BITRATE_MBPS" \
+  -p cloudxr_client_codec:="$CLIENT_CODEC" \
+  -p cloudxr_client_enable_tex_sub_image_2d:="$CLIENT_ENABLE_TEX_SUB_IMAGE_2D"

@@ -11,36 +11,56 @@ cameras:
   streams:
     # Fill these optional extrinsics paths after running camera calibration.
     # Raw depth/point clouds remain in each camera optical frame when blank.
-    head: {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: true}}
+    head: {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
     left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
     right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
 
 xr_video:
   enabled: true
   auto_start_with_record: true
-  # Put the PC and Quest on the same AP and use direct UDP/WebRTC.  USB is
-  # retained for automatic Quest setup only; it must not carry the live stream.
-  transport: lan
-  wifi_connection: Deepybo-Prime
+  # During `robot record`, RTP + OpenXR decoded-frame readiness gates startup
+  # of the episode controller and pedal router. The arms cannot be armed until
+  # the operator has a live Quest image.
+  # This station keeps Quest on USB. Isaac Teleop usb_local routes signalling,
+  # the web client and WebRTC media through adb reverse + local TURN.
+  transport: usb_tcp
+  wifi_connection: ""
   ffmpeg: /usr/bin/ffmpeg
   encoder: auto
   receiver_host: 127.0.0.1
   bitrate_mbps: 4.0
-  keyframe_interval_frames: 15
+  # Recover a damaged view within about 0.17 s at 30 fps.
+  keyframe_interval_frames: 5
   payload_type: 96
   packet_size: 1200
   stream_timeout_s: 2.0
+  # Quest/CloudXR client settings. The head camera is only 424x240, so the
+  # former Quest 3 defaults (2048x1792 per eye, 90 Hz, 150 Mbps, AV1) added
+  # decode/queue latency without adding camera detail. These fields are sent
+  # as URL overrides on every launch and therefore also override stale browser
+  # localStorage values.
+  cloudxr_client:
+    per_eye_width: 1792
+    per_eye_height: 1536
+    frame_rate: 72
+    max_bitrate_mbps: 80
+    codec: h264
+    enable_tex_sub_image_2d: true
   streams:
     head: {enabled: true, port: 5000}
-    left_wrist: {enabled: true, port: 5002}
-    right_wrist: {enabled: true, port: 5003}
+    # Quest uses one mono head-camera plane in both eyes. Wrist RGB remains
+    # enabled for MCAP and Rerun but is omitted from XR to avoid multi-plane
+    # partial/stereo-discomfort failure modes.
+    left_wrist: {enabled: false, port: 5002}
+    right_wrist: {enabled: false, port: 5003}
   display:
     mode: xr
     cuda_device: 0
     head: {distance: 1.5, width: 1.0, offset_x: 0.0, offset_y: 0.0}
     left_wrist: {distance: 1.2, width: 0.4, offset_x: -1.0, offset_y: -0.4}
     right_wrist: {distance: 1.2, width: 0.4, offset_x: 1.0, offset_y: -0.4}
-    # Keep all three video panels fixed where they first appear in the room.
+    # Fix the mono panel in the OpenXR world. It must not rotate or translate
+    # with the operator's head; the same mono frame is still fed to both eyes.
     lock_mode: world
     look_away_angle: 45.0
     reposition_distance: 0.5
@@ -58,3 +78,12 @@ teleop:
   # independent guarded Home request and does not require this deadman.
   # One pedal router owns the evdev device and forwards the middle pedal here.
   deadman_source: external_bool
+  mapping:
+    # Same-side controllers with the fixed Quest facing the operator, matching
+    # the proven dual_arm_teleop Flexiv setup:
+    # Quest [x,y,z] -> robot [-z,-x,+y].
+    left_pose_index: 0
+    right_pose_index: 1
+    axis_rotation: [0.0, 0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    translation_gain: 1.0
+    rotation_gain: 1.0

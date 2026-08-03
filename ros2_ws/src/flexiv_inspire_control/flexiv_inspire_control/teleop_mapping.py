@@ -10,8 +10,10 @@ import numpy as np
 from isaac_teleop_core.rotation6d import (
     IDENTITY_ROT6D,
     geodesic_distance_rad,
+    matrix_to_rotvec,
     matrix_to_rotation6d,
     quaternion_xyzw_to_matrix,
+    rotvec_to_matrix,
 )
 
 
@@ -76,6 +78,7 @@ class QuestSE3Mapper:
         world_frame: str = "world",
         axis_rotation: np.ndarray | None = None,
         translation_gain: float = 1.0,
+        rotation_gain: float = 1.0,
         max_age_s: float = 0.12,
         max_translation_jump_m: float = 0.12,
         max_rotation_jump_rad: float = 0.6,
@@ -94,7 +97,10 @@ class QuestSE3Mapper:
             raise ValueError("axis_rotation must be a proper rotation")
         if not 0.0 < translation_gain <= 3.0:
             raise ValueError("translation_gain must be in (0,3]")
+        if not 0.0 < rotation_gain <= 3.0:
+            raise ValueError("rotation_gain must be in (0,3]")
         self.translation_gain = translation_gain
+        self.rotation_gain = rotation_gain
         self.max_age_ns = int(max_age_s * 1e9)
         self.max_translation_jump_m = max_translation_jump_m
         self.max_rotation_jump_rad = max_rotation_jump_rad
@@ -153,7 +159,7 @@ class QuestSE3Mapper:
             # The 60 Hz timer can run before a new 60 Hz PoseArray arrives.
             # A still-fresh duplicate is an active identity command, not a fault.
             return TeleopDelta.identity(active=True, reason="tracking_repeat")
-        values: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        values: dict[str, tuple[np.ndarray, np.ndarray, bool]] = {}
         for side in ("left", "right"):
             current = getattr(sample, side)
             previous = getattr(self._last, side)
@@ -177,19 +183,25 @@ class QuestSE3Mapper:
                 self.translation_gain * self.axis @ raw_translation
             )
             mapped_rotation = self.axis @ raw_rotation @ self.axis.T
-            if np.linalg.norm(mapped_translation) > self.max_translation_step_m:
-                self._hold = True
-                return TeleopDelta.identity(
-                    active=False, hold=True, reason=f"{side}_translation_step_limit"
+            translation_step = float(np.linalg.norm(mapped_translation))
+            limited = False
+            if translation_step > self.max_translation_step_m:
+                mapped_translation *= self.max_translation_step_m / translation_step
+                limited = True
+            rotation_vector = self.rotation_gain * matrix_to_rotvec(
+                mapped_rotation
+            )
+            mapped_rotation = rotvec_to_matrix(rotation_vector)
+            rotation_step = float(np.linalg.norm(rotation_vector))
+            if rotation_step > self.max_rotation_step_rad:
+                mapped_rotation = rotvec_to_matrix(
+                    rotation_vector * (self.max_rotation_step_rad / rotation_step)
                 )
-            if geodesic_distance_rad(mapped_rotation, np.eye(3)) > self.max_rotation_step_rad:
-                self._hold = True
-                return TeleopDelta.identity(
-                    active=False, hold=True, reason=f"{side}_rotation_step_limit"
-                )
+                limited = True
             values[side] = (
                 mapped_translation,
                 matrix_to_rotation6d(mapped_rotation),
+                limited,
             )
         self._last = sample
         return TeleopDelta(
@@ -199,7 +211,11 @@ class QuestSE3Mapper:
             values["right"][1],
             active=True,
             hold_latched=False,
-            reason="mapped",
+            reason=(
+                "mapped_step_limited"
+                if values["left"][2] or values["right"][2]
+                else "mapped"
+            ),
         )
 
     def _invalid_reason(

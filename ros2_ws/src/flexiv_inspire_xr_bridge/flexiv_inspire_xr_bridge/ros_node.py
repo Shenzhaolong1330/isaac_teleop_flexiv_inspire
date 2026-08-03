@@ -32,6 +32,7 @@ def main(args=None) -> int:
                 self.declare_parameter(key, value)
             default_ports = {"head": 5000, "left_wrist": 5002, "right_wrist": 5003}
             self._workers: dict[str, LatestFrameEncoder] = {}
+            self._ready_streams: set[str] = set()
             self._subscriptions = []
             for name in CAMERAS:
                 self.declare_parameter(f"streams.{name}.enabled", True)
@@ -76,9 +77,17 @@ def main(args=None) -> int:
             self._workers[camera].submit(bytes(message.image.data))
 
         def _publish_status(self) -> None:
+            snapshots = {k: v.snapshot() for k, v in self._workers.items()}
+            for name, snapshot in snapshots.items():
+                if int(snapshot["sent"]) > 0 and name not in self._ready_streams:
+                    self._ready_streams.add(name)
+                    self.get_logger().info(
+                        f"XR_VIDEO_STREAM_READY: {name} "
+                        f"encoder={snapshot['encoder']} sent={snapshot['sent']}"
+                    )
             message = String()
             message.data = json.dumps(
-                {"enabled": bool(self._workers), "streams": {k: v.snapshot() for k, v in self._workers.items()}},
+                {"enabled": bool(self._workers), "streams": snapshots},
                 separators=(",", ":"), sort_keys=True,
             )
             self._status_publisher.publish(message)

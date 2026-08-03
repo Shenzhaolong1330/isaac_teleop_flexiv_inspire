@@ -67,11 +67,16 @@ def _ft_config(raw: dict[str, object]) -> FTZeroConfig:
     window = float(raw["sample_window_s"])
     rate = float(raw["sample_rate_hz"])
     return FTZeroConfig(
+        external_contact_check_enabled=bool(
+            raw["external_contact_check_enabled"]
+        ),
         sample_window_s=window,
         sample_rate_hz=rate,
         min_samples=max(1, int(math.ceil(window * rate * 0.8))),
         operational_timeout_s=float(raw["operational_timeout_s"]),
         primitive_timeout_s=float(raw["primitive_timeout_s"]),
+        enable_settle_timeout_s=float(raw["enable_settle_timeout_s"]),
+        enable_settle_window_s=float(raw["enable_settle_window_s"]),
         max_joint_velocity_norm=float(raw["max_joint_velocity_norm"]),
         max_tcp_velocity_norm=float(raw["max_tcp_velocity_norm"]),
         max_wrench_std_force_n=float(raw["max_wrench_std_force_n"]),
@@ -185,7 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     deviceio = AsyncDeviceIOEmitter("rdk")
     dispatcher = RDKRequestDispatcher(
-        backend, ft_zero, hands, interlock, deviceio_emitter=deviceio
+        backend,
+        ft_zero,
+        hands,
+        interlock,
+        deviceio_emitter=deviceio,
+        cartesian_limits=config.cartesian_limits,
     )
     dispatcher.start_watchdog()
     codec = StructEnvelopeCodec() if args.dev_struct_ipc else None

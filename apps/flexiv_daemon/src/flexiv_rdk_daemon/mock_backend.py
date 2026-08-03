@@ -14,6 +14,7 @@ class MockBackend:
     def __init__(self) -> None:
         self._generation = 1
         self.events: list[tuple[str, str]] = []
+        self.cartesian_targets: dict[str, np.ndarray] = {}
         self.primitive_sequences: dict[str, list[dict[str, Any]]] = {
             "left": [{"terminated": True}],
             "right": [{"terminated": True}],
@@ -21,6 +22,7 @@ class MockBackend:
         self.samples: dict[str, ArmSample] = {
             side: self._sample(side) for side in ("left", "right")
         }
+        self.is_faulted = {"left": False, "right": False}
         self.is_operational = {"left": True, "right": True}
 
     @property
@@ -63,6 +65,13 @@ class MockBackend:
 
         return DualArmSample(self.observe("left"), self.observe("right"))
 
+    def clear_fault(self, side: str, *, local_console: bool) -> bool:
+        if not self.is_faulted[side]:
+            return False
+        self.events.append((side, "clear_fault"))
+        self.is_faulted[side] = False
+        return True
+
     def enable(self, side: str, *, local_console: bool) -> None:
         self.events.append((side, "enable"))
 
@@ -80,6 +89,9 @@ class MockBackend:
         if len(sequence) > 1:
             return sequence.pop(0)
         return sequence[0]
+
+    def stop(self, side: str, *, local_console: bool) -> None:
+        self.events.append((side, "stop"))
 
     def switch_idle(self, side: str, *, local_console: bool) -> None:
         self.events.append((side, "idle"))
@@ -144,6 +156,7 @@ class MockBackend:
         pose = np.asarray(pose_rdk, dtype=np.float64).reshape(-1)
         if pose.shape != (7,) or not np.all(np.isfinite(pose)):
             raise ValueError("invalid mock target pose")
+        self.cartesian_targets[side] = pose.copy()
         self.events.append((side, "send_cartesian"))
 
     def send_hold_from_measurement(self, side: str, *, local_authorized: bool) -> np.ndarray:

@@ -43,6 +43,8 @@ _MANAGED_PROCESS_MARKERS = (
     "isaac-flexiv-episode",
     "flexiv_inspire_isaac.xr_raw_ros_source",
     "flexiv-inspire-xr-raw-source",
+    "flexiv_inspire_isaac.rerun_viz.cli",
+    "flexiv-inspire-rerun",
     "flexiv_inspire_xr_bridge.ros_node",
     "flexiv-inspire-xr-bridge",
     "run_manus_plugin.sh",
@@ -100,22 +102,36 @@ def _start(
     log_prefix: str = "service",
 ) -> list[subprocess.Popen]:
     directory.mkdir(parents=True, exist_ok=True)
-    processes = []
-    for index, command in enumerate(commands):
-        selected = list(command)
-        if "--allow-hardware-writes" in selected:
-            permit = Path(selected[selected.index("--local-permit-file") + 1])
-            _ensure_write_permit(permit)
-        log = (directory / f"{log_prefix}-{index}.log").open("ab", buffering=0)
-        processes.append(
-            subprocess.Popen(
-                selected,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=_command_environment(selected),
+    processes: list[subprocess.Popen] = []
+    try:
+        for index, command in enumerate(commands):
+            selected = list(command)
+            if "--allow-hardware-writes" in selected:
+                permit = Path(selected[selected.index("--local-permit-file") + 1])
+                _ensure_write_permit(permit)
+            log = (directory / f"{log_prefix}-{index}.log").open(
+                "ab", buffering=0
             )
-        )
+            try:
+                process = subprocess.Popen(
+                    selected,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    env=_command_environment(selected),
+                )
+            finally:
+                # Popen duplicates the descriptor for the child.  Keeping the
+                # launcher's copy open leaks one fd per service and delays log
+                # file cleanup during repeated record sessions.
+                log.close()
+            processes.append(process)
+    except BaseException:
+        # Starting a service group must be atomic from the caller's point of
+        # view.  Otherwise a missing executable halfway through startup leaves
+        # cameras or the RDK daemon alive and the next run reports "occupied".
+        _stop_started_processes(processes)
+        raise
     return processes
 
 
@@ -194,12 +210,410 @@ def _wait_for_cloudxr_runtime(
                 )
             raise SystemExit("XR/CloudXR 启动失败\n" + "\n".join(details))
         if _cloudxr_runtime_live():
-            print("CloudXR、Quest 输入和 MANUS 已自动启动", flush=True)
+            print("CloudXR 和 Quest 输入已自动启动", flush=True)
             return
         time.sleep(0.1)
     _stop_started_processes(processes)
     raise SystemExit(
         "CloudXR 在 60 秒内未就绪；请检查 Quest USB 连接和最新 record 日志"
+    )
+
+
+def _report_manus_status(
+    commands: Sequence[Sequence[str]],
+    processes: Sequence[subprocess.Popen],
+    logs: Sequence[Path],
+) -> bool:
+    """Report current MANUS state without making it a record startup gate.
+
+    Quest/OpenXR and MANUS may complete their handshake in either order.  The
+    teleop node already degrades to arm-only commands and automatically adds
+    both hand command bits on the first valid MANUS frame, so the launcher only
+    needs to report status and must never tear down an otherwise usable run.
+    """
+
+    teleop_indices = [
+        index
+        for index, command in enumerate(commands)
+        if "flexiv_inspire_control.teleop_input_node" in " ".join(command)
+    ]
+    if len(teleop_indices) != 1:
+        print(
+            "MANUS 状态暂不可用；record 继续运行，机械臂和其余模态不受影响",
+            flush=True,
+        )
+        return False
+    teleop_index = teleop_indices[0]
+    marker = "MANUS_HANDS_READY"
+    log = logs[teleop_index]
+    ready = log.is_file() and marker in log.read_text(
+        encoding="utf-8", errors="replace"
+    )
+    if ready:
+        print("MANUS 左右手套已连接，灵巧手映射就绪", flush=True)
+        return True
+    print(
+        "MANUS 暂未出有效双手位姿；record 继续运行。当前先遥操双臂，"
+        "手套恢复后会自动加入灵巧手控制",
+        flush=True,
+    )
+    return False
+
+
+def _wait_for_rdk_socket(
+    socket_path: Path,
+    processes: Sequence[subprocess.Popen],
+    logs: Sequence[Path],
+    *,
+    timeout_s: float = 45.0,
+) -> None:
+    """Wait until the just-started hardware daemon accepts IPC requests.
+
+    Starting a Flexiv daemon process is not equivalent to it being usable: it
+    initializes both robot controllers before binding the local Unix socket.
+    Collection preflight needs that socket, so running it immediately after a
+    process-only liveness check creates a deterministic startup race.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _rdk_socket_live(socket_path):
+            return
+        failed = [
+            (index, process.returncode)
+            for index, process in enumerate(processes)
+            if process.poll() is not None
+        ]
+        if failed:
+            _stop_started_processes(processes)
+            details: list[str] = []
+            for index, returncode in failed:
+                log = logs[index]
+                tail = (
+                    log.read_text(encoding="utf-8", errors="replace")[-3000:]
+                    if log.is_file()
+                    else ""
+                )
+                details.append(
+                    f"service-{index} 退出码 {returncode}，日志 {log}\n{tail}"
+                )
+            raise SystemExit("RDK daemon 启动失败\n" + "\n".join(details))
+        time.sleep(0.05)
+    _stop_started_processes(processes)
+    raise SystemExit(
+        f"RDK daemon 在 {timeout_s:.0f} 秒内未就绪；查看日志："
+        f"{socket_path.parent / 'launcher' / 'rdk-daemon.log'}"
+    )
+
+
+def _wait_for_camera_streams(
+    commands: Sequence[Sequence[str]],
+    processes: Sequence[subprocess.Popen],
+    logs: Sequence[Path],
+    camera_names: Sequence[str],
+    *,
+    timeout_s: float = 20.0,
+) -> None:
+    """Require every configured RealSense stream before collection starts."""
+
+    camera_index = next(
+        (
+            index
+            for index, command in enumerate(commands)
+            if "flexiv-inspire-camera-node" in " ".join(command)
+        ),
+        None,
+    )
+    if camera_index is None:
+        print("复用已运行的相机服务", flush=True)
+        return
+    log_path = logs[camera_index]
+    process = processes[camera_index]
+    expected = tuple(str(name) for name in camera_names)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        text = (
+            log_path.read_text(encoding="utf-8", errors="replace")
+            if log_path.is_file()
+            else ""
+        )
+        if all(
+            any(
+                f"camera {name} (" in line and ": streaming" in line
+                for line in text.splitlines()
+            )
+            for name in expected
+        ):
+            print(
+                "相机已就绪: " + ", ".join(expected),
+                flush=True,
+            )
+            return
+        if process.poll() is not None or "Device or resource busy" in text:
+            _stop_started_processes(processes)
+            raise SystemExit(
+                "相机启动失败；可能仍被其他采集程序占用。"
+                f"日志：{log_path}\n{text[-3000:]}"
+            )
+        time.sleep(0.05)
+    _stop_started_processes(processes)
+    raise SystemExit(
+        f"相机在 {timeout_s:.0f} 秒内未全部出帧；日志：{log_path}"
+    )
+
+
+def _wait_for_xr_receiver_ready(
+    process: subprocess.Popen,
+    log_path: Path,
+    *,
+    expected_streams: int,
+    timeout_s: float = 1.0,
+) -> bool:
+    """Wait briefly for the Quest display without blocking data collection.
+
+    The Isaac Teleop receiver keeps retrying OpenXR while the Quest browser is
+    waking up or completing the CloudXR handshake.  A slow headset connection
+    must therefore not tear down cameras, robot control, and an otherwise
+    usable foreground recording session.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        text = (
+            log_path.read_text(encoding="utf-8", errors="replace")
+            if log_path.is_file()
+            else ""
+        )
+        if (
+            "OpenXR session is ready" in text
+            and text.count("Session Initialization Time:") >= expected_streams
+        ):
+            print(
+                f"Quest 视频已就绪: {expected_streams} 路单目视频",
+                flush=True,
+            )
+            return True
+        if process.poll() is not None:
+            print(
+                "Quest 视频接收端暂时退出；record 继续运行，启动脚本会自动"
+                f"重试。日志：{log_path}\n{text[-1000:]}",
+                flush=True,
+            )
+            return False
+        time.sleep(0.1)
+    print(
+        "Quest/OpenXR 暂未完成视频握手；record 继续运行，接收端会每 2 秒"
+        f"自动重连。请保持 Quest 页面打开；日志：{log_path}",
+        flush=True,
+    )
+    return False
+
+
+def _wait_for_xr_bridge_streams(
+    commands: Sequence[Sequence[str]],
+    processes: Sequence[subprocess.Popen],
+    logs: Sequence[Path],
+    stream_names: Sequence[str],
+    *,
+    timeout_s: float = 3.0,
+) -> bool:
+    """Check RTP video briefly without making it a collection prerequisite."""
+
+    expected = tuple(str(name) for name in stream_names)
+    if not expected:
+        return True
+    bridge_index = next(
+        (
+            index
+            for index, command in enumerate(commands)
+            if "flexiv-inspire-xr-bridge" in " ".join(command)
+        ),
+        None,
+    )
+    if bridge_index is None:
+        print(
+            "Quest 视频暂不可用：本次启动没有 RTP bridge；record 继续运行",
+            flush=True,
+        )
+        return False
+    process = processes[bridge_index]
+    log_path = logs[bridge_index]
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        output = (
+            log_path.read_text(encoding="utf-8", errors="replace")
+            if log_path.is_file()
+            else ""
+        )
+        if all(f"XR_VIDEO_STREAM_READY: {name} " in output for name in expected):
+            print("Quest RTP 已出帧: " + ", ".join(expected), flush=True)
+            return True
+        if process.poll() is not None:
+            print(
+                "Quest RTP bridge 暂时退出；视频不可用，但 record 和遥操继续。"
+                f"日志：{log_path}\n{output[-1000:]}",
+                flush=True,
+            )
+            return False
+        time.sleep(0.05)
+    print(
+        f"Quest RTP bridge 在 {timeout_s:.0f} 秒内暂未编码出帧；"
+        f"视频后台继续尝试，record 和遥操继续。日志：{log_path}",
+        flush=True,
+    )
+    return False
+
+
+def _wait_for_xr_video_control_gate(
+    commands: Sequence[Sequence[str]],
+    processes: Sequence[subprocess.Popen],
+    logs: Sequence[Path],
+    stream_names: Sequence[str],
+    *,
+    timeout_s: float | None = None,
+) -> bool:
+    """Keep collection/control stopped until video is actually displayed.
+
+    Controller tracking can become valid several seconds before the RTP
+    decoder and OpenXR display.  Starting the episode controller in that gap
+    lets a pedal press arm the robots while the operator still has no live
+    view.  This gate waits for both the first encoded frame and the receiver's
+    decoded-session marker.  The receiver script retries by itself, so the
+    normal hardware path uses no timeout; Ctrl-C still tears everything down.
+    """
+
+    expected = tuple(str(name) for name in stream_names)
+    if not expected:
+        return False
+    bridge_index = next(
+        (
+            index
+            for index, command in enumerate(commands)
+            if "flexiv-inspire-xr-bridge" in " ".join(command)
+            or "flexiv_inspire_xr_bridge.ros_node" in " ".join(command)
+        ),
+        None,
+    )
+    receiver_index = next(
+        (
+            index
+            for index, command in enumerate(commands)
+            if "run_isaac_camera_receiver.sh" in " ".join(command)
+        ),
+        None,
+    )
+    if bridge_index is None or receiver_index is None:
+        return False
+
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    next_notice = 0.0
+    while deadline is None or time.monotonic() < deadline:
+        bridge_process = processes[bridge_index]
+        receiver_process = processes[receiver_index]
+        bridge_text = (
+            logs[bridge_index].read_text(encoding="utf-8", errors="replace")
+            if logs[bridge_index].is_file()
+            else ""
+        )
+        receiver_text = (
+            logs[receiver_index].read_text(encoding="utf-8", errors="replace")
+            if logs[receiver_index].is_file()
+            else ""
+        )
+        bridge_ready = all(
+            f"XR_VIDEO_STREAM_READY: {name} " in bridge_text
+            for name in expected
+        )
+        receiver_ready = (
+            "OpenXR session is ready" in receiver_text
+            and receiver_text.count("Session Initialization Time:")
+            >= len(expected)
+        )
+        if bridge_ready and receiver_ready:
+            print(
+                "Quest 视频已实时显示；脚踏遥操作现已可用: "
+                + ", ".join(expected),
+                flush=True,
+            )
+            return True
+        if bridge_process.poll() is not None:
+            raise RuntimeError(
+                "Quest RTP bridge 已退出，机械臂遥操作保持禁用。日志："
+                f"{logs[bridge_index]}\n{bridge_text[-1200:]}"
+            )
+        if receiver_process.poll() is not None:
+            raise RuntimeError(
+                "Quest 视频接收进程已退出，机械臂遥操作保持禁用。日志："
+                f"{logs[receiver_index]}\n{receiver_text[-1200:]}"
+            )
+        now = time.monotonic()
+        if now >= next_notice:
+            waiting = []
+            if not bridge_ready:
+                waiting.append("RTP 首帧")
+            if not receiver_ready:
+                waiting.append("Quest/OpenXR 解码显示")
+            print(
+                "等待 " + "、".join(waiting)
+                + "；机械臂遥操作尚未启用（Ctrl-C 可退出）",
+                flush=True,
+            )
+            next_notice = now + 5.0
+        time.sleep(0.1)
+    return False
+
+
+def _camera_device_conflicts(config) -> list[str]:
+    """Return non-managed processes that currently hold V4L2 devices."""
+
+    project_root = str(_project_root(config).resolve())
+    conflicts: dict[int, tuple[str, set[str]]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(
+                b"\0", b" "
+            ).decode("utf-8", errors="replace").strip()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if not command:
+            continue
+        if project_root in command and any(
+            marker in command
+            for marker in (
+                "flexiv-inspire-camera-node",
+                "flexiv_inspire_isaac.cameras.ros_node",
+            )
+        ):
+            continue
+        devices: set[str] = set()
+        try:
+            descriptors = (entry / "fd").iterdir()
+            for descriptor in descriptors:
+                try:
+                    target = os.readlink(descriptor)
+                except (FileNotFoundError, PermissionError, OSError):
+                    continue
+                if target.startswith("/dev/video"):
+                    devices.add(target)
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        if devices:
+            conflicts[int(entry.name)] = (command, devices)
+    return [
+        f"PID {pid} ({', '.join(sorted(devices))}): {command}"
+        for pid, (command, devices) in sorted(conflicts.items())
+    ]
+
+
+def _require_camera_devices_available(config) -> None:
+    conflicts = _camera_device_conflicts(config)
+    if not conflicts:
+        return
+    raise SystemExit(
+        "RealSense 视频设备正被其他程序占用，请先在对应终端 Ctrl-C：\n"
+        + "\n".join(conflicts)
     )
 
 
@@ -215,10 +629,15 @@ def _stop_started_processes(
         except ProcessLookupError:
             pass
     deadline = time.monotonic() + timeout_s
-    while live and time.monotonic() < deadline:
+    try:
+        while live and time.monotonic() < deadline:
+            live = [process for process in live if process.poll() is None]
+            if live:
+                time.sleep(0.05)
+    except KeyboardInterrupt:
+        # A second Ctrl-C means "finish now". Continue with the bounded
+        # force-stop below instead of leaking a launcher traceback.
         live = [process for process in live if process.poll() is None]
-        if live:
-            time.sleep(0.05)
     for process in live:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -323,6 +742,50 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _rdk_runtime_fingerprint(config, config_path: Path) -> str:
+    """Fingerprint daemon configuration, IPC schema, and executable source."""
+
+    digest = hashlib.sha256()
+    digest.update(b"flexiv-rdk-runtime-v1\0")
+    digest.update(str(config.sha256).encode("ascii"))
+    paths = (
+        config_path,
+        config.root / "apps/flexiv_daemon/src/flexiv_rdk_daemon/main.py",
+        config.root / "apps/flexiv_daemon/src/flexiv_rdk_daemon/configuration.py",
+        config.root / "apps/flexiv_daemon/src/flexiv_rdk_daemon/server.py",
+        config.root / "apps/flexiv_daemon/src/flexiv_rdk_daemon/backend.py",
+        config.root / "apps/flexiv_daemon/src/flexiv_rdk_daemon/ft_zero.py",
+        config.root / "apps/flexiv_daemon/src/flexiv_rdk_daemon/typed_ipc.py",
+        config.root
+        / "apps/flexiv_daemon/src/flexiv_rdk_daemon/generated/rdk_ipc_pb2.py",
+    )
+    for path in paths:
+        digest.update(b"\0")
+        digest.update(str(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_sha256_file(path).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _reset_ros_runtime_fingerprint(config) -> str:
+    """Restart persistent Reset services after their Python source changes."""
+
+    digest = hashlib.sha256()
+    digest.update(b"flexiv-reset-ros-runtime-v1\0")
+    digest.update(str(config.sha256).encode("ascii"))
+    for relative in (
+        "ros2_ws/src/flexiv_inspire_control/flexiv_inspire_control/node.py",
+        "libs/control_core/src/isaac_teleop_core/control.py",
+        "ros2_ws/src/flexiv_inspire_dftp/ros_node.py",
+    ):
+        path = config.root / relative
+        digest.update(b"\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(_sha256_file(path).encode("ascii"))
+    return digest.hexdigest()
+
+
 def _restart_managed_rdk_if_config_changed(
     state_path: Path,
     *,
@@ -355,7 +818,7 @@ def _restart_managed_rdk_if_config_changed(
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if not _rdk_socket_live(rdk_socket):
-            print("RDK 配置已更新，daemon 已自动重启", flush=True)
+            print("RDK 配置或代码已更新，daemon 已自动重启", flush=True)
             return True
         time.sleep(0.05)
     raise RuntimeError("RDK daemon 配置已更新，但旧进程无法停止")
@@ -399,6 +862,113 @@ def _matching_managed_process_ids(config) -> list[int]:
     return matches
 
 
+def _pid_is_running(pid: int) -> bool:
+    """Return false for absent and zombie processes.
+
+    A zombie still has a ``/proc`` directory but cannot react to SIGKILL.  It
+    must not make foreground record cleanup report a false failure.
+    """
+
+    try:
+        stat_line = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return False
+    closing_parenthesis = stat_line.rfind(")")
+    if closing_parenthesis < 0 or closing_parenthesis + 2 >= len(stat_line):
+        return False
+    return stat_line[closing_parenthesis + 2] not in {"Z", "X"}
+
+
+def _stop_managed_services(config, *, require_existing: bool) -> int:
+    """Stop every background service belonging to this checkout.
+
+    ``robot record`` may reuse processes created by its automatic Reset.  They
+    are not children of the record launcher itself, so stopping only the local
+    ``Popen`` objects leaves the RDK daemon/control bridge alive between runs.
+    Resolve both launcher-owned PIDs and precisely matched orphan processes so
+    the foreground record command has a complete lifecycle.
+    """
+
+    runtime = _runtime_dir(config)
+    state_paths = (
+        runtime / "processes.json",
+        runtime / "rdk-daemon.json",
+        runtime / "reset-services.json",
+    )
+    owned_pids: list[int] = []
+    for state_path in state_paths:
+        if not state_path.is_file():
+            continue
+        try:
+            values = json.loads(state_path.read_text(encoding="utf-8"))
+            owned_pids.extend(int(pid) for pid in values.get("pids", []))
+            if values.get("pid") is not None:
+                owned_pids.append(int(values["pid"]))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            # Process discovery below remains authoritative if a prior crash
+            # left a partially written launcher state file.
+            continue
+
+    discovered_pids = set(_matching_managed_process_ids(config))
+    confirmed_owned_pids = set(owned_pids).intersection(discovered_pids)
+    if not discovered_pids:
+        if require_existing:
+            raise SystemExit("no launcher process state exists")
+        for state_path in state_paths:
+            state_path.unlink(missing_ok=True)
+        return 0
+
+    # Launcher-owned services were started in their own sessions, so stopping
+    # their process groups also reaps wrappers and children such as CloudXR.
+    for pid in confirmed_owned_pids:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    # A discovered process without trusted state may share a caller's process
+    # group. Signal only that exact PID rather than risking the user's shell.
+    for pid in discovered_pids.difference(confirmed_owned_pids):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.monotonic() + 5.0
+    live_pids = set(discovered_pids)
+    while live_pids and time.monotonic() < deadline:
+        live_pids = {pid for pid in live_pids if _pid_is_running(pid)}
+        if live_pids:
+            time.sleep(0.05)
+    if live_pids:
+        # MANUS Core and CloudXR can take longer than ordinary ROS nodes to
+        # unwind.  They are still processes precisely identified as belonging
+        # to this checkout, so escalate after the graceful deadline instead of
+        # leaking them into the next ``robot record`` invocation.
+        for pid in live_pids.intersection(confirmed_owned_pids):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for pid in live_pids.difference(confirmed_owned_pids):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        kill_deadline = time.monotonic() + 2.0
+        while live_pids and time.monotonic() < kill_deadline:
+            live_pids = {pid for pid in live_pids if _pid_is_running(pid)}
+            if live_pids:
+                time.sleep(0.05)
+    if live_pids:
+        raise RuntimeError(
+            "managed services survived SIGKILL: "
+            + ",".join(str(pid) for pid in sorted(live_pids))
+        )
+    for state_path in state_paths:
+        state_path.unlink(missing_ok=True)
+    return len(discovered_pids)
+
+
 def _restart_dftp_processes() -> None:
     markers = (
         "flexiv_inspire_isaac.dftp.ros_node",
@@ -423,6 +993,33 @@ def _restart_dftp_processes() -> None:
         )
 
 
+def _restart_reset_ros_processes() -> None:
+    markers = (
+        "flexiv_inspire_control.node",
+        "flexiv-inspire-control-bridge",
+        "flexiv_inspire_control/control_bridge",
+        "flexiv_inspire_isaac.dftp.ros_node",
+        "flexiv-inspire-dftp-node",
+        "flexiv_inspire_dftp/dftp_node",
+    )
+    pids = _matching_process_ids(*markers)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 3.0
+    while pids and time.monotonic() < deadline:
+        pids = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
+        if pids:
+            time.sleep(0.05)
+    if pids:
+        raise RuntimeError(
+            "旧 ROS Reset 服务无法停止，请先运行 robot stop 后重试: "
+            + ", ".join(str(pid) for pid in pids)
+        )
+
+
 def _xr_receiver_command(config, rendered: dict[str, Path]) -> list[str]:
     return [
         str(_project_root(config) / "orchestration/run_isaac_camera_receiver.sh"),
@@ -433,10 +1030,23 @@ def _xr_receiver_command(config, rendered: dict[str, Path]) -> list[str]:
 
 def _xr_raw_source_command(config) -> list[str]:
     xr = config.document["xr_video"]
+    client = xr["cloudxr_client"]
     command = [
         str(_project_root(config) / "orchestration/run_xr_raw_source.sh"),
         "--transport",
         str(xr["transport"]),
+        "--client-per-eye-width",
+        str(client["per_eye_width"]),
+        "--client-per-eye-height",
+        str(client["per_eye_height"]),
+        "--client-frame-rate",
+        str(client["frame_rate"]),
+        "--client-max-bitrate-mbps",
+        str(client["max_bitrate_mbps"]),
+        "--client-codec",
+        str(client["codec"]),
+        "--client-enable-tex-sub-image-2d",
+        str(bool(client["enable_tex_sub_image_2d"])).lower(),
     ]
     wifi_connection = str(xr.get("wifi_connection", "")).strip()
     if wifi_connection:
@@ -448,6 +1058,18 @@ def _manus_plugin_command(config) -> list[str]:
     return [
         str(_project_root(config) / "orchestration/run_manus_plugin.sh")
     ]
+
+
+def _home_motion_timeout_s(root: dict) -> float:
+    """Return the worst-case lift plus joint-Home motion budget."""
+
+    home = root["flexiv"]["home"]
+    total = float(home["timeout_s"])
+    lift = home.get("lift", {})
+    if bool(lift.get("enabled", False)):
+        lift_count = 1 if bool(lift.get("parallel", False)) else 2
+        total += lift_count * float(lift["timeout_s"])
+    return total
 
 
 def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
@@ -486,7 +1108,7 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         "-p", f"auto_start:={str(bool(recording.get('auto_start', True))).lower()}",
         "-p", f"auto_authorize_home:={str(bool(recording.get('auto_authorize_home', True))).lower()}",
         "-p", f"auto_authorize_control:={str(bool(recording.get('auto_authorize_control', True))).lower()}",
-        "-p", f"home_result_timeout_s:={float(root['flexiv']['home']['timeout_s']) + 10.0}",
+        "-p", f"home_result_timeout_s:={_home_motion_timeout_s(root) + 10.0}",
     ]
     # ROS 2 rejects an empty override such as ``-p name:=``.  These files are
     # optional: the controller has empty defaults and only records calibration
@@ -545,6 +1167,28 @@ def _teleop_input_command(config, rendered: dict[str, Path]) -> list[str]:
     ]
 
 
+def _live_rerun_command(config) -> list[str] | None:
+    live_rerun = config.document["recording"]["live_rerun"]
+    if not bool(live_rerun["enabled"]):
+        return None
+    return [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_isaac.rerun_viz.cli",
+        "--spawn",
+        "--viewer-port",
+        str(int(live_rerun["viewer_port"])),
+        "--telemetry-hz",
+        str(float(live_rerun["telemetry_hz"])),
+        "--tactile-hz",
+        str(float(live_rerun["tactile_hz"])),
+        "--image-hz",
+        str(float(live_rerun["image_hz"])),
+        "--pointcloud-hz",
+        str(float(live_rerun["pointcloud_hz"])),
+    ]
+
+
 def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -> list[list[str]]:
     root = config.document
     rdk_command = _rdk_command(config)
@@ -557,13 +1201,28 @@ def _commands(config, rendered: dict[str, Path], *, include_xr_receiver: bool) -
         ["flexiv-inspire-pedal-router", "--ros-args", "--params-file", str(rendered["pedal.yaml"])],
         _episode_command(config, rendered),
     ]
-    if bool(root["xr_video"]["enabled"]):
-        commands.append(_xr_raw_source_command(config))
-        commands.append(_manus_plugin_command(config))
+    rerun_command = _live_rerun_command(config)
+    if rerun_command is not None:
+        commands.append(rerun_command)
+    # Quest controllers and MANUS are command inputs, not part of the optional
+    # camera display branch.
+    commands.append(_xr_raw_source_command(config))
+    commands.append(_manus_plugin_command(config))
+    # RTP encoding and the Holoscan receiver form the visual control gate.
+    # Start both when XR is requested; collection waits for a decoded frame.
+    if bool(root["xr_video"]["enabled"]) and include_xr_receiver:
         commands.append(["flexiv-inspire-xr-bridge", "--ros-args", "--params-file", str(rendered["xr_bridge.yaml"])])
-        if include_xr_receiver:
-            commands.append(_xr_receiver_command(config, rendered))
+        commands.append(_xr_receiver_command(config, rendered))
     return commands
+
+
+def _is_optional_xr_video_command(command: Sequence[str]) -> bool:
+    joined = " ".join(command)
+    return (
+        "flexiv-inspire-xr-bridge" in joined
+        or "flexiv_inspire_xr_bridge.ros_node" in joined
+        or "run_isaac_camera_receiver.sh" in joined
+    )
 
 
 def _rdk_command(config) -> list[str]:
@@ -613,8 +1272,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     record.add_argument("--dry-run", action="store_true", help="render and print commands only")
     xr_group = record.add_mutually_exclusive_group()
-    xr_group.add_argument("--with-xr", action="store_true", help="start the IsaacTeleop Quest video receiver")
-    xr_group.add_argument("--no-xr", action="store_true", help="keep RTP bridge available but do not start the Quest receiver")
+    xr_group.add_argument("--with-xr", action="store_true", help="start the optional IsaacTeleop Quest video display")
+    xr_group.add_argument("--no-xr", action="store_true", help="do not start Quest video; controller teleoperation remains enabled")
     sub.add_parser("stop", help="recover and stop leftover managed services")
     sub.add_parser("collect", help="run the configured multi-episode collection in the foreground")
     sub.add_parser("visualize", help="play the configured dataset in read-only Rerun")
@@ -657,6 +1316,7 @@ def _parser() -> argparse.ArgumentParser:
 def _xr_doctor(config) -> int:
     root = _project_root(config)
     ffmpeg = str(config.document["xr_video"]["ffmpeg"])
+    transport = str(config.document["xr_video"]["transport"])
     checks = {
         "ffmpeg": Path(ffmpeg).is_file() or shutil.which(ffmpeg) is not None,
         "docker": shutil.which("docker") is not None,
@@ -668,17 +1328,37 @@ def _xr_doctor(config) -> int:
         image = subprocess.run(["docker", "image", "inspect", "isaac-teleop-camera:latest"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     checks["isaac_camera_image"] = image
-    print(json.dumps({"ready": all(checks.values()), "checks": checks,
-                      "next": "orchestration/setup_xr_receiver.sh" if not all(checks.values()) else "flexiv-inspire xr-view"}, indent=2))
-    return 0 if all(checks.values()) else 2
+    if transport == "usb_tcp":
+        checks["adb"] = shutil.which("adb") is not None
+        checks["coturn"] = shutil.which("turnserver") is not None
+        quest_ready = False
+        if checks["adb"]:
+            try:
+                state = subprocess.run(
+                    ["adb", "get-state"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                )
+                quest_ready = (
+                    state.returncode == 0 and state.stdout.strip() == "device"
+                )
+            except subprocess.TimeoutExpired:
+                pass
+        checks["quest_usb_device"] = quest_ready
+    ready = all(checks.values())
+    if transport == "usb_tcp" and not checks.get("quest_usb_device", True):
+        next_step = "unlock Quest and allow USB debugging, then run robot xr-doctor"
+    elif not ready:
+        next_step = "orchestration/setup_xr_receiver.sh"
+    else:
+        next_step = "robot record"
+    print(json.dumps({"ready": ready, "transport": transport,
+                      "checks": checks, "next": next_step}, indent=2))
+    return 0 if ready else 2
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    try:
-        config = load_system_config(args.config)
-    except (OSError, SystemConfigError) as exc:
-        raise SystemExit(f"invalid system config: {exc}")
+def _main(args, config) -> int:
     runtime = _runtime_dir(config)
     if args.operation == "validate":
         print(json.dumps({"valid": True, "config": str(config.path), "sha256": config.sha256}, indent=2)); return 0
@@ -717,6 +1397,21 @@ def main(argv: list[str] | None = None) -> int:
                 "已有旧的后台录制/脚踏进程；请先执行一次 robot stop，"
                 "之后 robot record 将以前台方式运行"
             )
+        _require_camera_devices_available(config)
+        if bool(
+            config.document["recording"].get(
+                "auto_reset_before_record", False
+            )
+        ):
+            print("开始自动准备真机（Reset/F/T/Home/双手张开）", flush=True)
+            reset_result = _run_reset(
+                config, argparse.Namespace(preview_seconds=2.0)
+            )
+            if reset_result != 0:
+                raise SystemExit(
+                    f"自动真机准备失败，Reset 退出码 {reset_result}"
+                )
+            print("真机准备完成，控制状态将由 READY 进入遥操", flush=True)
         # Pedal routing and the episode controller are started by
         # _run_collection() so the latter can remain attached to this TTY.
         commands = [
@@ -748,36 +1443,18 @@ def main(argv: list[str] | None = None) -> int:
                 for command in commands
                 if "flexiv_inspire_control.teleop_input_node" not in command
             ]
-        reusable_services = (
+        # Reset intentionally leaves DFTP running with the control bridge.  All
+        # camera/XR/MANUS/Rerun services belong to this foreground record run
+        # and must start fresh, otherwise a live-looking stale process can hide
+        # a dead video or glove stream.
+        reusable_services = ((
             (
-                (
-                    "flexiv_inspire_isaac.dftp.ros_node",
-                    "flexiv-inspire-dftp-node",
-                    "flexiv_inspire_dftp/dftp_node",
-                ),
-                ("flexiv-inspire-dftp-node",),
+                "flexiv_inspire_isaac.dftp.ros_node",
+                "flexiv-inspire-dftp-node",
+                "flexiv_inspire_dftp/dftp_node",
             ),
-            (
-                ("flexiv-inspire-camera-node", "flexiv_inspire_isaac.cameras.ros_node"),
-                ("flexiv-inspire-camera-node",),
-            ),
-            (
-                ("flexiv-inspire-xr-raw-source", "flexiv_inspire_isaac.xr_raw_ros_source"),
-                ("run_xr_raw_source.sh",),
-            ),
-            (
-                ("manus_hand_plugin",),
-                ("run_manus_plugin.sh",),
-            ),
-            (
-                ("flexiv-inspire-xr-bridge", "flexiv_inspire_xr_bridge.ros_node"),
-                ("flexiv-inspire-xr-bridge",),
-            ),
-            (
-                ("run_isaac_camera_receiver.sh",),
-                ("run_isaac_camera_receiver.sh",),
-            ),
-        )
+            ("flexiv-inspire-dftp-node",),
+        ),)
         for process_markers, command_markers in reusable_services:
             if _process_running(*process_markers):
                 commands = [
@@ -788,6 +1465,16 @@ def main(argv: list[str] | None = None) -> int:
                         for marker in command_markers
                     )
                 ]
+        optional_video_commands = [
+            command
+            for command in commands
+            if _is_optional_xr_video_command(command)
+        ]
+        commands = [
+            command
+            for command in commands
+            if not _is_optional_xr_video_command(command)
+        ]
         log_prefix = f"record-{time.time_ns()}"
         logs = [
             runtime / f"{log_prefix}-{index}.log"
@@ -796,14 +1483,78 @@ def main(argv: list[str] | None = None) -> int:
         processes = _start(commands, runtime, log_prefix=log_prefix)
         _write_state(runtime, config, processes)
         _verify_process_startup(processes, logs)
-        if bool(config.document["xr_video"]["enabled"]):
+        _wait_for_rdk_socket(rdk_socket, processes, logs)
+        _wait_for_camera_streams(
+            commands,
+            processes,
+            logs,
+            tuple(config.document["cameras"]["streams"]),
+        )
+        if any(
+            "run_xr_raw_source.sh" in " ".join(command)
+            for command in commands
+        ):
             _wait_for_cloudxr_runtime(processes, logs)
+        if str(config.document["teleop"]["manus_calibration"]).strip():
+            _report_manus_status(commands, processes, logs)
+
+        # Start video before the foreground episode/pedal processes so the
+        # visual control gate can keep the robots unavailable while it warms.
+        video_processes: list[subprocess.Popen] = []
+        video_logs: list[Path] = []
+        if optional_video_commands:
+            video_prefix = f"{log_prefix}-video"
+            video_logs = [
+                runtime / f"{video_prefix}-{index}.log"
+                for index in range(len(optional_video_commands))
+            ]
+            try:
+                video_processes = _start(
+                    optional_video_commands,
+                    runtime,
+                    log_prefix=video_prefix,
+                )
+            except OSError as exc:
+                print(
+                    f"Quest 视频启动失败；机械臂遥操作保持禁用：{exc}",
+                    flush=True,
+                )
+            else:
+                processes.extend(video_processes)
+                logs.extend(video_logs)
+                _write_state(runtime, config, video_processes)
+                print(
+                    "Quest 视频已在后台启动；确认实时显示后才启用脚踏遥操作",
+                    flush=True,
+                )
         print(
             f"started {len(processes)} supporting services; "
             f"XR receiver={'on' if include_xr else 'off'}",
             flush=True,
         )
         try:
+            if include_xr:
+                enabled_video_streams = tuple(
+                    name
+                    for name, settings in config.document["xr_video"][
+                        "streams"
+                    ].items()
+                    if bool(settings["enabled"])
+                )
+                if not optional_video_commands or not enabled_video_streams:
+                    raise RuntimeError(
+                        "XR 视频已要求启动，但没有启用的视频流；"
+                        "机械臂遥操作保持禁用"
+                    )
+                if not _wait_for_xr_video_control_gate(
+                    optional_video_commands,
+                    video_processes,
+                    video_logs,
+                    enabled_video_streams,
+                ):
+                    raise RuntimeError(
+                        "XR 视频未就绪；机械臂遥操作保持禁用"
+                    )
             try:
                 return _run_collection(config, rendered)
             except KeyboardInterrupt:
@@ -811,59 +1562,11 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             _stop_started_processes(processes)
             _remove_state_pids(runtime, {process.pid for process in processes})
-            print("record stopped; current episode was finalized", flush=True)
     if args.operation == "collect":
         rendered = render_runtime_configs(config, runtime / config.sha256[:12])
         return _run_collection(config, rendered)
     if args.operation == "stop":
-        owned_pids: list[int] = []
-        state = runtime / "processes.json"
-        daemon_state = runtime / "rdk-daemon.json"
-        reset_state = runtime / "reset-services.json"
-        if state.is_file():
-            values = json.loads(state.read_text(encoding="utf-8"))
-            owned_pids.extend(int(pid) for pid in values.get("pids", []))
-        if daemon_state.is_file():
-            values = json.loads(daemon_state.read_text(encoding="utf-8"))
-            if values.get("pid") is not None:
-                owned_pids.append(int(values["pid"]))
-        if reset_state.is_file():
-            values = json.loads(reset_state.read_text(encoding="utf-8"))
-            owned_pids.extend(int(pid) for pid in values.get("pids", []))
-        discovered_pids = set(_matching_managed_process_ids(config))
-        # Launcher state can survive a crash for long enough that the kernel
-        # reuses a PID. Never signal a state-file PID unless its current
-        # command line still identifies a managed process in this checkout.
-        confirmed_owned_pids = set(owned_pids).intersection(discovered_pids)
-        if not confirmed_owned_pids and not discovered_pids:
-            raise SystemExit("no launcher process state exists")
-        for pid in confirmed_owned_pids:
-            try:
-                os.killpg(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        # Reset state records can be overwritten when a later reset reuses an
-        # already-running bridge. Stop those precisely matched orphan services
-        # by PID without assuming ownership of their process group.
-        for pid in discovered_pids.difference(confirmed_owned_pids):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        requested_pids = discovered_pids
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            live_pids = {
-                pid for pid in requested_pids if Path(f"/proc/{pid}").exists()
-            }
-            if not live_pids:
-                break
-            time.sleep(0.05)
-        else:
-            raise RuntimeError(
-                "managed services did not stop within 5 seconds: "
-                + ",".join(str(pid) for pid in sorted(live_pids))
-            )
+        _stop_managed_services(config, require_existing=True)
         print("stop requested; captured episodes are retained"); return 0
     if args.operation == "convert":
         return _run_convert(config, args)
@@ -874,6 +1577,57 @@ def main(argv: list[str] | None = None) -> int:
     from .replay import main as replay_main
 
     return replay_main([])
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        config = load_system_config(args.config)
+    except (OSError, SystemConfigError) as exc:
+        raise SystemExit(f"invalid system config: {exc}")
+
+    if args.operation != "record" or args.dry_run:
+        return _main(args, config)
+
+    runtime_root = Path(config.document["session"]["runtime_root"]).expanduser()
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    record_lock = (runtime_root / "record.lock").open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(record_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        record_lock.close()
+        raise SystemExit("another robot record process is already active")
+
+    failure: BaseException | None = None
+    try:
+        stale_count = _stop_managed_services(config, require_existing=False)
+        if stale_count:
+            print(
+                f"已自动关闭上次遗留的 {stale_count} 个后台服务",
+                flush=True,
+            )
+        return _main(args, config)
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        try:
+            _stop_managed_services(config, require_existing=False)
+            print(
+                "record 已退出；本次启动的全部后台服务已关闭",
+                flush=True,
+            )
+        except Exception as cleanup_error:
+            print(
+                f"record 退出清理失败: {cleanup_error}",
+                file=sys.stderr,
+                flush=True,
+            )
+            if failure is None:
+                raise
+        finally:
+            fcntl.flock(record_lock.fileno(), fcntl.LOCK_UN)
+            record_lock.close()
 
 
 def _latest_completed_manifest(config) -> Path:
@@ -973,35 +1727,68 @@ def _run_reset(config, args) -> int:
         raise SystemExit(f"工具/负载配置不是文件: {tool_config}")
 
     print(
-        "Reset: 双臂 F/T 清零 -> 配置的双臂 Home -> 双手张开/闭合/张开",
+        "Reset: 双臂 F/T 清零 -> TCP 竖直抬升 -> 配置的双臂 Home -> "
+        "双手张开/闭合/张开",
         flush=True,
     )
 
     from flexiv_inspire_control.zero_ft_local import main as zero_ft_main
 
-    return zero_ft_main(
-        [
-            "--rdk-socket",
-            str(rdk_socket),
-            "--tool-payload-config",
-            str(tool_config),
-            "--preview-seconds",
-            str(float(args.preview_seconds)),
-            "--skip-preview-if-ft-zeroed",
-            "--confirm-ft-unloaded",
-            "FLEXIV-FT-UNLOADED",
-            "--home-after-zero",
-            "--cycle-hands-after-home",
-            "--home-timeout",
-            str(float(root["flexiv"]["home"]["timeout_s"])),
-            # Zeroing intentionally latches the daemon in maintenance. This
-            # authorization clears only that freshly validated hold before Home.
-            "--clear-home-hold-latched",
-        ]
-    )
+    zero_args = [
+        "--rdk-socket",
+        str(rdk_socket),
+        "--tool-payload-config",
+        str(tool_config),
+        "--preview-seconds",
+        str(float(args.preview_seconds)),
+        "--skip-hand-preview",
+        "--max-hand-delta",
+        "150",
+        "--skip-preview-if-ft-zeroed",
+        "--confirm-ft-unloaded",
+        "FLEXIV-FT-UNLOADED",
+        "--home-after-zero",
+        "--cycle-hands-after-home",
+        "--home-timeout",
+        str(_home_motion_timeout_s(root)),
+        # Zeroing intentionally latches the daemon in maintenance. This
+        # authorization clears only that freshly validated hold before Home.
+        "--clear-home-hold-latched",
+    ]
+    try:
+        return zero_ft_main(zero_args)
+    except RuntimeError as exc:
+        # The bridge intentionally latches a hardware command failure as
+        # FAULT, but the F/T action can only run from MAINTENANCE. Restarting
+        # the ROS bridge resets that software latch while keeping the same RDK
+        # daemon; the retried F/T transaction then invokes RDK ClearFault on
+        # both real controllers before Enable/ZeroFT/Home.
+        if "got FAULT" not in str(exc):
+            raise
+        print(
+            "Reset: 检测到控制 FAULT，正在重启 ROS 控制桥并调用 RDK "
+            "ClearFault",
+            flush=True,
+        )
+        _restart_reset_ros_processes()
+        _ensure_reset_ros_services(config)
+        return zero_ft_main(zero_args)
 
 
 def _ensure_reset_ros_services(config) -> None:
+    runtime = _runtime_dir(config)
+    state_path = runtime / "reset-services.json"
+    runtime_sha256 = _reset_ros_runtime_fingerprint(config)
+    previous_runtime_sha256 = ""
+    if state_path.is_file():
+        try:
+            previous_runtime_sha256 = str(
+                json.loads(state_path.read_text(encoding="utf-8")).get(
+                    "runtime_sha256", ""
+                )
+            )
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            previous_runtime_sha256 = ""
     control_running = _process_running(
         "flexiv_inspire_control.node",
         "flexiv-inspire-control-bridge",
@@ -1012,8 +1799,14 @@ def _ensure_reset_ros_services(config) -> None:
         "flexiv-inspire-dftp-node",
         "flexiv_inspire_dftp/dftp_node",
     )
+    if (
+        control_running or dftp_running
+    ) and previous_runtime_sha256 != runtime_sha256:
+        _restart_reset_ros_processes()
+        control_running = False
+        dftp_running = False
+        print("Reset 配置已更新，ROS 控制与手部服务已自动重启", flush=True)
 
-    runtime = _runtime_dir(config)
     rendered = render_runtime_configs(config, runtime / config.sha256[:12])
     commands: list[list[str]] = []
     if not control_running:
@@ -1034,13 +1827,15 @@ def _ensure_reset_ros_services(config) -> None:
     log_paths = [
         runtime / f"{log_prefix}-{index}.log" for index in range(len(commands))
     ]
-    (runtime / "reset-services.json").write_text(
+    state_path.write_text(
         json.dumps(
             {
                 "pids": [process.pid for process in processes],
                 "commands": commands,
                 "logs": [str(path) for path in log_paths],
                 "started_unix_ns": time.time_ns(),
+                "config_sha256": config.sha256,
+                "runtime_sha256": runtime_sha256,
                 "reused": {
                     "control_bridge": control_running,
                     "dftp": dftp_running,
@@ -1073,7 +1868,7 @@ def _ensure_rdk_daemon(config, timeout_s: float = 45.0) -> Path:
             "当前 config 把 RDK daemon 配置为 mock；真机 Reset 需要 hardware 配置"
         )
     config_path = Path(command[command.index("--config") + 1])
-    config_sha256 = _sha256_file(config_path)
+    config_sha256 = _rdk_runtime_fingerprint(config, config_path)
     launcher = _runtime_dir(config)
     state_path = launcher / "rdk-daemon.json"
     if _rdk_socket_live(rdk_socket):
@@ -1128,6 +1923,27 @@ def _ensure_rdk_daemon(config, timeout_s: float = 45.0) -> Path:
     )
 
 
+def _wait_for_collection_processes(
+    controller: subprocess.Popen,
+    pedal: subprocess.Popen,
+    *,
+    poll_s: float = 0.1,
+) -> int:
+    """Wait for collection while treating the pedal router as essential."""
+
+    while True:
+        controller_status = controller.poll()
+        if controller_status is not None:
+            return int(controller_status)
+        pedal_status = pedal.poll()
+        if pedal_status is not None:
+            raise RuntimeError(
+                "脚踏输入进程意外退出，已停止本次录制，退出码 "
+                f"{pedal_status}"
+            )
+        time.sleep(poll_s)
+
+
 def _run_collection(config, rendered: dict[str, Path]) -> int:
     _collection_preflight(config, rendered)
     runtime_root = Path(config.document["session"]["runtime_root"]).expanduser()
@@ -1166,7 +1982,7 @@ def _run_collection(config, rendered: dict[str, Path]) -> int:
         collection_pids = {pedal.pid, controller.pid}
         _write_state(_runtime_dir(config), config, [pedal, controller])
         try:
-            return int(controller.wait())
+            return _wait_for_collection_processes(controller, pedal)
         except KeyboardInterrupt:
             return 130
     finally:
@@ -1178,7 +1994,7 @@ def _run_collection(config, rendered: dict[str, Path]) -> int:
                 # EpisodeController may legitimately spend 30 seconds flushing
                 # rosbag/MCAP. Leave headroom before escalating.
                 controller.wait(timeout=45.0)
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, KeyboardInterrupt):
                 # The recorder and rosbag inherit the controller's process
                 # group. Stop the whole group so a recorder cannot be orphaned.
                 try:

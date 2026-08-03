@@ -656,16 +656,27 @@ class EpisodeSession:
         except Exception as exc:
             errors.append(f"deviceio: {exc}")
         self._update_stream_stats()
+        rerecord_requested = reason == "rerecord-requested"
         missing_streams = self._required_stream_errors()
-        if missing_streams and not reason.startswith("fault:"):
+        # An operator-discarded attempt is deliberately not a demonstration.
+        # It can legitimately have no sent command (for example, left pedal
+        # was pressed before the first teleop clutch), so retain it for audit
+        # without failing the controller that must immediately start attempt 2.
+        if (
+            missing_streams
+            and not reason.startswith("fault:")
+            and not rerecord_requested
+        ):
             errors.append(
                 "required streams have no valid samples: "
                 + ",".join(missing_streams)
             )
         # Preserve the raw capture for audit but never label a re-record as a
         # completed demonstration eligible for training or replay.
-        terminal_fault = reason.startswith("fault:") or reason == "rerecord-requested"
+        terminal_fault = reason.startswith("fault:")
         self.manifest.completed = not errors and not terminal_fault
+        if rerecord_requested:
+            self.manifest.completed = False
         self.manifest.completion_reason = (
             reason if not errors else "; ".join([reason, *errors])
         )
@@ -920,8 +931,16 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         reason = "operator-stop"
     except Exception as exc:
-        reason = f"fault:{exc}"
-        failure = exc
+        # rclpy's SIGINT handler can shut down the context before
+        # ``spin_once`` returns.  Jazzy then raises ExternalShutdownException
+        # instead of KeyboardInterrupt.  The operator explicitly requested a
+        # normal stop, so finalize this attempt rather than printing a
+        # traceback and labelling the recording a fault.
+        if type(exc).__name__ == "ExternalShutdownException":
+            reason = "operator-stop"
+        else:
+            reason = f"fault:{exc}"
+            failure = exc
     finally:
         try:
             _write_control_state("STOPPING", reason)

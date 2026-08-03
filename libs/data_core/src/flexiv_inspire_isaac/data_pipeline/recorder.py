@@ -16,6 +16,24 @@ import time
 from typing import Any, Protocol
 
 
+_MCAP_MESSAGE_SEQUENCE_MASK = (1 << 32) - 1
+
+
+def _mcap_message_sequence(sequence: int) -> int:
+    """Project a source sequence onto MCAP's uint32 container field.
+
+    RecordEnvelope keeps the full source sequence in its JSON document.  The
+    separate MCAP Message.sequence field is only a 32-bit transport hint, so a
+    long-running or process-independent source sequence must wrap there rather
+    than making the recorder fail.
+    """
+
+    value = int(sequence)
+    if value < 0:
+        raise ValueError("record sequence cannot be negative")
+    return value & _MCAP_MESSAGE_SEQUENCE_MASK
+
+
 @dataclass(frozen=True)
 class RecordEnvelope:
     topic: str
@@ -138,7 +156,7 @@ class McapJsonSink:
                 if envelope.effective_mapped_host_time_ns is None
                 else envelope.effective_mapped_host_time_ns
             ),
-            sequence=envelope.sequence,
+            sequence=_mcap_message_sequence(envelope.sequence),
             data=envelope.json_bytes(),
         )
 

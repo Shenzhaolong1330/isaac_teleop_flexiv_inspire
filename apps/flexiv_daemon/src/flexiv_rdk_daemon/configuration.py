@@ -33,6 +33,14 @@ def _finite_nonnegative(value: Any, name: str) -> float:
     return result
 
 
+CARTESIAN_LIMIT_KEYS = (
+    "max_linear_velocity_m_s",
+    "max_angular_velocity_rad_s",
+    "max_linear_acceleration_m_s2",
+    "max_angular_acceleration_rad_s2",
+)
+
+
 @dataclass(frozen=True)
 class ConfiguredRobot:
     side: str
@@ -50,6 +58,7 @@ class DaemonConfiguration:
     schema_version: int
     robots: tuple[ConfiguredRobot, ConfiguredRobot]
     target_rate_hz: float
+    cartesian_limits: tuple[float, float, float, float]
     socket_name: str
     max_packet_bytes: int
     tool_payload_path: Path
@@ -124,6 +133,29 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
         raise ConfigurationError(
             "config cannot enable hardware writes; use the guarded local CLI flow"
         )
+    raw_cartesian_limits = _mapping(
+        control.get("cartesian_limits"), "control.cartesian_limits"
+    )
+    cartesian_limits = tuple(
+        _finite_nonnegative(
+            raw_cartesian_limits.get(name), f"control.cartesian_limits.{name}"
+        )
+        for name in CARTESIAN_LIMIT_KEYS
+    )
+    if any(value <= 0.0 for value in cartesian_limits):
+        raise ConfigurationError(
+            "control.cartesian_limits values must be positive"
+        )
+    practical_maxima = (1.0, 3.0, 5.0, 10.0)
+    if any(
+        value > maximum
+        for value, maximum in zip(
+            cartesian_limits, practical_maxima, strict=True
+        )
+    ):
+        raise ConfigurationError(
+            "control.cartesian_limits exceeds the daemon practical ceiling"
+        )
 
     ipc = _mapping(root.get("ipc"), "ipc")
     socket_name = str(ipc.get("socket_name", "")).strip()
@@ -141,11 +173,17 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
         raise ConfigurationError("tool_payload_config must stay in config directory")
 
     ft_zero = _mapping(root.get("ft_zero"), "ft_zero").copy()
+    if not isinstance(ft_zero.get("external_contact_check_enabled"), bool):
+        raise ConfigurationError(
+            "ft_zero.external_contact_check_enabled must be a bool"
+        )
     for name in (
         "sample_window_s",
         "sample_rate_hz",
         "operational_timeout_s",
         "primitive_timeout_s",
+        "enable_settle_timeout_s",
+        "enable_settle_window_s",
         "max_joint_velocity_norm",
         "max_tcp_velocity_norm",
         "max_wrench_std_force_n",
@@ -169,6 +207,7 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
         schema_version=schema,
         robots=(robots[0], robots[1]),
         target_rate_hz=rate,
+        cartesian_limits=cartesian_limits,
         socket_name=socket_name,
         max_packet_bytes=max_packet_bytes,
         tool_payload_path=tool_payload_path,

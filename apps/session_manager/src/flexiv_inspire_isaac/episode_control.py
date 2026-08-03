@@ -18,8 +18,10 @@ import time
 import uuid
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 from flexiv_inspire_interfaces.msg import ControlState
 
@@ -28,6 +30,16 @@ from flexiv_inspire_isaac.data_pipeline.manifest import local_minute_timestamp
 
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+_ROUTINE_CONTROL_HOLD_REASONS = {
+    "physical_pedal_released",
+    "source_deadman_released",
+    "control_authorization_expired",
+    "command_stale",
+    "source_heartbeat_stale",
+    "arm_offline",
+    "hand_offline",
+    "safety_limit",
+}
 
 
 class EpisodeController(Node):
@@ -53,6 +65,7 @@ class EpisodeController(Node):
             "deviceio_mode": "native",
             "home_result_timeout_s": 30.0,
             "recorder_state_timeout_s": 10.0,
+            "control_authorization_refresh_s": 10.0,
             "auto_start": True,
             "auto_authorize_home": True,
             "auto_authorize_control": True,
@@ -72,7 +85,15 @@ class EpisodeController(Node):
         self._pending_home_deadline_ns = 0
         self._pending_home_action: str | None = None
         self._awaiting_home_authorization = False
+        self._home_recovery_attempted = False
         self._routine_control_rearm_pending = False
+        self._routine_control_rearm_pressed_attempted = False
+        self._next_control_authorization_refresh_ns = 0
+        self._control_state_name = ""
+        self._control_physical_pedal = False
+        self._last_announced_control_state: tuple[str, str, bool] | None = None
+        self._control_ready_for_recording = False
+        self._next_ready_wait_log_ns = 0
         self._startup_done = False
         self._finished = False
 
@@ -95,6 +116,12 @@ class EpisodeController(Node):
             ControlState, "/control/state", self._on_control_state, qos
         )
         self.create_timer(0.25, self._tick)
+        self.get_logger().info(
+            "数采控制：左踏板=丢弃当前条并 Home 后重录；"
+            "中踏板=按住使能双臂、松开立即停止；"
+            "右踏板=保存当前条并 Home 后无缝开始下一条；"
+            "Quest A=暂停记录、Home 后继续当前条；Ctrl+C=结束数采"
+        )
         self._publish("STARTING")
 
     @property
@@ -123,6 +150,13 @@ class EpisodeController(Node):
         for key in ("home_result_timeout_s", "recorder_state_timeout_s"):
             if not 1.0 <= float(self.get_parameter(key).value) <= 120.0:
                 raise RuntimeError(f"{key} must be in [1,120]")
+        refresh = float(
+            self.get_parameter("control_authorization_refresh_s").value
+        )
+        if not 2.0 <= refresh <= 25.0:
+            raise RuntimeError(
+                "control_authorization_refresh_s must be in [2,25]"
+            )
 
     def _state_file(self) -> Path:
         return Path(self._required("runtime_dir")) / "episode-recorder-state.json"
@@ -130,12 +164,21 @@ class EpisodeController(Node):
     def _command(self) -> list[str]:
         self._sequence += 1
         collection_timestamp = local_minute_timestamp()
-        episode_name = (
+        base_episode_name = (
             f"episode_{self._episode_index:06d}_attempt_{self._attempt:02d}_"
             f"{collection_timestamp}"
         )
         root = Path(self._required("sessions_root")).expanduser().resolve()
         dataset = str(self.get_parameter("dataset_name").value).strip()
+        # The collection timestamp intentionally has minute precision so it is
+        # easy to read in a dataset browser.  Retrying `robot record` within
+        # that minute must still get a fresh directory rather than killing the
+        # recorder before it can acknowledge startup.
+        episode_name = base_episode_name
+        suffix = 1
+        while (root / dataset / episode_name).exists():
+            episode_name = f"{base_episode_name}_{suffix:02d}"
+            suffix += 1
         self._current_manifest = root / dataset / episode_name / "manifest.json"
         command = [
             sys.executable,
@@ -289,7 +332,12 @@ class EpisodeController(Node):
     def _request_authorization(self, kind: str, payload: dict) -> dict:
         client = RDKIPCClient(Path(self._required("rdk_socket")))
         try:
-            response_kind, response = client.request(kind, payload)
+            # Clearing a routine hold prepares both stopped arms back into NRT
+            # Cartesian mode before returning the one-time token.  Flexiv mode
+            # transitions can legitimately take several seconds.
+            response_kind, response = client.request(
+                kind, payload, timeout_s=15.0
+            )
         finally:
             client.close()
         expected = f"{kind}_result"
@@ -322,35 +370,124 @@ class EpisodeController(Node):
         )
         for _ in range(3):
             self._arm_authorization.publish(outgoing)
+        self._next_control_authorization_refresh_ns = (
+            time.monotonic_ns()
+            + int(
+                float(
+                    self.get_parameter("control_authorization_refresh_s").value
+                )
+                * 1e9
+            )
+        )
 
     def _on_control_state(self, message: ControlState) -> None:
-        """Make the physical pedal behave like a reusable teleop clutch.
+        """Re-arm after an expected clutch or authorization-lifetime hold."""
 
-        Releasing the pedal still executes the normal measured hardware hold.
-        Once that routine hold is visible and the pedal is up, obtain a fresh
-        one-time authorization and re-arm teleop.  Fault, tracking, collision,
-        limit and malformed-command holds remain latched for manual handling.
-        """
+        self._control_state_name = str(message.state_name)
+        self._control_physical_pedal = bool(message.physical_pedal)
+        # Pedal edges are useful status changes while running, but once the
+        # bridge reports FAULT they do not change the fault.  Do not print the
+        # same alarming line again on every press/release.
+        announced_pedal = (
+            False
+            if self._control_state_name == "FAULT"
+            else bool(message.physical_pedal)
+        )
+        announced = (
+            self._control_state_name,
+            str(message.hold_reason),
+            announced_pedal,
+        )
+        if announced != self._last_announced_control_state:
+            previous = self._last_announced_control_state
+            self._last_announced_control_state = announced
+            if self._control_state_name == "ACTIVE":
+                self.get_logger().info(
+                    "中踏板：机械臂运动已使能，Quest 腕部位姿正在发送"
+                )
+            elif previous is not None and previous[0] == "ACTIVE":
+                self.get_logger().info(
+                    "中踏板：机械臂运动已停止；松开后再次踩下会重新取当前位置为零点"
+                )
+            if self._control_state_name == "HOLD_LATCHED":
+                detail = "机械臂进入 HOLD_LATCHED：" + (
+                    message.hold_reason or "unknown"
+                )
+                if message.hold_reason in _ROUTINE_CONTROL_HOLD_REASONS:
+                    self.get_logger().info(detail)
+                else:
+                    self.get_logger().error(detail)
+            elif self._control_state_name == "FAULT":
+                self.get_logger().error(
+                    "机械臂控制进入 FAULT：" + (message.hold_reason or "unknown")
+                )
+        self._control_ready_for_recording = (
+            self._control_state_name == "READY"
+            and bool(getattr(message, "local_permission", False))
+            and bool(getattr(message, "ft_zeroed_for_session", False))
+            and bool(getattr(message, "arms_online", False))
+            and bool(getattr(message, "hands_online", False))
+        )
 
         if message.state_name != "HOLD_LATCHED":
             self._routine_control_rearm_pending = False
+            self._routine_control_rearm_pressed_attempted = False
             return
         if (
-            self._routine_control_rearm_pending
-            or self._pending_home_action is not None
-            or bool(message.physical_pedal)
-            or message.hold_reason
-            not in {"physical_pedal_released", "source_deadman_released"}
+            self._pending_home_action is not None
+            or message.hold_reason not in _ROUTINE_CONTROL_HOLD_REASONS
         ):
+            self._routine_control_rearm_pending = False
             return
-        self._routine_control_rearm_pending = True
+
+        # Do not clear the daemon's routine HOLD as soon as the pedal is
+        # released.  The release notification and the daemon's safe-stop can
+        # cross in flight; clearing here used to let the bridge become ACTIVE
+        # before the daemon had finished latching the old release.  The first
+        # command after the next press was then rejected with the stale
+        # ``hold_latched:physical_pedal_released`` reason and escalated to
+        # FAULT.  Remember the routine hold while released, then clear it and
+        # issue a fresh one-time authorization on the next physical press.
+        if not bool(message.physical_pedal):
+            self._routine_control_rearm_pending = True
+            self._routine_control_rearm_pressed_attempted = False
+            return
+        if self._routine_control_rearm_pressed_attempted:
+            return
+
+        # A daemon-side release latch can arrive just after the bridge has
+        # briefly reported TELEOP_ARMED. Treat a routine HOLD observed while
+        # pressed as the same re-arm request even if that intermediate state
+        # reset ``_routine_control_rearm_pending``.
+        self._routine_control_rearm_pressed_attempted = True
+        self._routine_control_rearm_pending = False
         try:
             self._authorize_control(clear_hold_latched=True)
         except Exception as exc:
-            self._routine_control_rearm_pending = False
-            self.get_logger().error(f"pedal clutch re-arm failed: {exc}")
+            reason = str(exc)
+            controller_fault = any(
+                marker in reason.lower()
+                for marker in ("minor fault", "not operational")
+            )
+            if controller_fault:
+                # Repeating SwitchMode on every 200 Hz state message cannot
+                # clear a Flexiv controller fault and only floods the terminal.
+                # Keep this pedal press attempted; release/press can try once
+                # more after the operator has run Reset.
+                self._routine_control_rearm_pending = False
+                self._routine_control_rearm_pressed_attempted = True
+                self.get_logger().error(
+                    "机械臂控制器故障，遥操作保持禁用；松开中踏板后执行 "
+                    f"robot reset。详情：{reason}"
+                )
+            else:
+                # Transient IPC/authorization races remain retryable while the
+                # operator holds the pedal.
+                self._routine_control_rearm_pending = True
+                self._routine_control_rearm_pressed_attempted = False
+                self.get_logger().error(f"teleop re-arm failed: {exc}")
 
-    def _authorize_home(self) -> None:
+    def _authorize_home(self, *, clear_hold_latched: bool = False) -> None:
         if not bool(self.get_parameter("auto_authorize_home").value):
             self._send_home_request()
             return
@@ -359,7 +496,7 @@ class EpisodeController(Node):
             {
                 "session_id": self._required("session_id"),
                 "operator_confirmation": "FLEXIV-HOME-MOVE",
-                "clear_hold_latched": False,
+                "clear_hold_latched": clear_hold_latched,
             },
         )
         outgoing = String()
@@ -368,6 +505,7 @@ class EpisodeController(Node):
                 "session_id": self._required("session_id"),
                 "one_time_token": response["one_time_token"],
                 "expires_monotonic_ns": response["expires_monotonic_ns"],
+                "clear_hold_latched": clear_hold_latched,
             },
             separators=(",", ":"),
         )
@@ -386,6 +524,7 @@ class EpisodeController(Node):
         # paused; finalization happens only after Home has completed.
         self._pause()
         self._pending_home_action = action
+        self._home_recovery_attempted = False
         self._pending_home_deadline_ns = time.monotonic_ns() + int(
             float(self.get_parameter("home_result_timeout_s").value) * 1e9
         )
@@ -410,12 +549,32 @@ class EpisodeController(Node):
 
     def _on_control(self, message: String) -> None:
         command = str(message.data).strip().lower()
+        if self._control_state_name in {
+            "FAULT",
+            "MAINTENANCE",
+            "DISABLED",
+        }:
+            self.get_logger().error(
+                f"ignored episode input {command!r}: control is "
+                f"{self._control_state_name}; recorder remains active"
+            )
+            self._publish_progress("WAITING_FOR_CONTROL_RECOVERY")
+            return
         try:
             if command in {"stop", "toggle"}:
+                self.get_logger().info(
+                    "右踏板：保存当前 episode；Home 完成后自动开始下一条"
+                )
                 self._begin_home("next")
             elif command == "rerecord":
+                self.get_logger().info(
+                    "左踏板：丢弃当前 episode；Home 完成后重新录制本条"
+                )
                 self._begin_home("discard")
             elif command == "home":
+                self.get_logger().info(
+                    "Quest A：暂停当前 episode；Home 完成后继续本条"
+                )
                 self._begin_home("pause")
             else:
                 self.get_logger().warning(
@@ -445,20 +604,37 @@ class EpisodeController(Node):
             if not request_id or request_id != self._pending_home_request_id:
                 return
             if state in {"failed", "rejected"}:
+                if (
+                    reason == "non_routine_hold_preserved:invalid_command"
+                    and not self._home_recovery_attempted
+                ):
+                    self._home_recovery_attempted = True
+                    self._pending_home_request_id = None
+                    self._pending_home_deadline_ns = time.monotonic_ns() + int(
+                        float(
+                            self.get_parameter("home_result_timeout_s").value
+                        )
+                        * 1e9
+                    )
+                    self._publish_progress("RECOVERING_HOME")
+                    self._authorize_home(clear_hold_latched=True)
+                    return
                 raise RuntimeError(reason or state)
             if state != "complete":
                 return
+            self._pending_home_request_id = None
+            self._home_recovery_attempted = False
             action = self._pending_home_action
             self._pending_home_action = None
-            self._pending_home_request_id = None
             self._pending_home_deadline_ns = 0
-            self._authorize_control()
             if action == "pause":
                 self._resume()
+                self._authorize_control()
             elif action == "discard":
                 self._stop(rerecord=True)
                 self._attempt += 1
                 self._start()
+                self._authorize_control()
             elif action == "next":
                 if self._stop(rerecord=False):
                     self._completed_episodes += 1
@@ -470,14 +646,56 @@ class EpisodeController(Node):
                     self._episode_index += 1
                     self._attempt = 1
                     self._start()
+                    self._authorize_control()
         except Exception as exc:
-            self._fail(f"home:{exc}")
+            self._recover_from_home_failure(str(exc))
+
+    def _recover_from_home_failure(self, reason: str) -> None:
+        """Keep the foreground collection alive when Home cannot run.
+
+        A Home failure is an operator-visible transition failure, not a
+        recorder-process failure.  Left-pedal semantics still discard the
+        attempt; right-pedal and Quest-A semantics resume the current attempt.
+        """
+
+        action = self._pending_home_action
+        self._pending_home_action = None
+        self._pending_home_request_id = None
+        self._pending_home_deadline_ns = 0
+        self._awaiting_home_authorization = False
+        self._home_recovery_attempted = False
+        self.get_logger().error(
+            f"Home failed without stopping collection: {reason}"
+        )
+        try:
+            if action == "discard":
+                self._stop(rerecord=True)
+                self._attempt += 1
+                self._start()
+            else:
+                self._resume()
+            self._publish_progress("RECORDING_HOME_FAILED")
+        except Exception as exc:
+            self._fail(f"home_recovery:{reason}; recorder:{exc}")
 
     def _tick(self) -> None:
         if not self._startup_done and bool(self.get_parameter("auto_start").value):
+            if not self._control_ready_for_recording:
+                now_ns = time.monotonic_ns()
+                if now_ns >= self._next_ready_wait_log_ns:
+                    self.get_logger().info(
+                        "waiting for Reset/READY before recording; "
+                        f"control_state={self._control_state_name or 'not-received'}"
+                    )
+                    self._publish_progress("WAITING_FOR_READY")
+                    self._next_ready_wait_log_ns = now_ns + 5_000_000_000
+                return
             self._startup_done = True
             try:
                 self._start()
+                # Native DeviceIO must be listening before control can receive
+                # a motion-authorized command.  This also keeps Reset/Home and
+                # inter-episode gaps outside the demonstration capture.
                 self._authorize_control()
             except Exception as exc:
                 self._fail(f"startup:{exc}")
@@ -487,10 +705,39 @@ class EpisodeController(Node):
             and time.monotonic_ns() >= self._pending_home_deadline_ns
         ):
             self._fail("home:result_timeout")
+            return
         process = self._process
         if process is not None and process.poll() is not None:
             self._process = None
             self._fail(f"recorder:unexpected_exit:{process.returncode}")
+            return
+        if (
+            process is not None
+            and self._pending_home_action is None
+            and (
+                self._control_state_name
+                in {"TELEOP_ARMED", "POLICY_ARMED", "REPLAY_ARMED", "ACTIVE"}
+                or (
+                    self._control_state_name == "READY"
+                    and self._control_physical_pedal
+                )
+            )
+            and bool(self.get_parameter("auto_authorize_control").value)
+            and time.monotonic_ns()
+            >= self._next_control_authorization_refresh_ns
+        ):
+            try:
+                self._authorize_control()
+            except Exception as exc:
+                # A daemon restart can race the refresh. Retrying one second
+                # later keeps the collection session alive while never using
+                # an expired token for robot motion.
+                self._next_control_authorization_refresh_ns = (
+                    time.monotonic_ns() + 1_000_000_000
+                )
+                self.get_logger().warning(
+                    f"control authorization refresh failed: {exc}"
+                )
 
     def _fail(self, reason: str) -> None:
         self.get_logger().error(reason)
@@ -512,16 +759,20 @@ class EpisodeController(Node):
 
 
 def main(args=None) -> None:
-    rclpy.init(args=args)
+    # Keep the context alive while SIGINT finalizes the recorder.  rclpy's
+    # default handler shuts the context down first, making the final status
+    # publication fail and encouraging a second Ctrl-C during bag flushing.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = EpisodeController()
     try:
         while rclpy.ok() and not node.finished:
             rclpy.spin_once(node, timeout_sec=0.1)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -6,11 +6,11 @@ session:
 sampling:
   arm_observation_hz: 200.0
   teleop_command_hz: 60.0
-  hand_state_hz: 50.0
-  tactile_hz: 30.0
-  camera_hz: 30.0
-  policy_observation_hz: 30.0
-  training_timeline_hz: 30.0
+  hand_state_hz: 20.0
+  tactile_hz: 20.0
+  camera_hz: 20.0
+  policy_observation_hz: 20.0
+  training_timeline_hz: 20.0
   action_label: sent_command
 
 pedal:
@@ -25,9 +25,15 @@ flexiv:
   tool_payload_config: apps/flexiv_daemon/config/tool_payload.yaml
   frame_config: config/dual_arm_frames.yaml
   safety:
+    # Practical site mode: trust the Flexiv controller's built-in joint,
+    # speed, wrench and temperature protection. The bridge still rejects
+    # disconnected/faulted robots and malformed/non-finite packets.
+    software_safety_limits_enabled: false
     joint_lower_limits_rad: [-2.7925667762756348, -2.2689666748046875, -2.967066764831543, -1.8674668073654175, -2.967066764831543, -1.3962668180465698, -2.967066764831543]
     joint_upper_limits_rad: [2.7925667762756348, 2.2689666748046875, 2.967066764831543, 2.6877667903900146, 2.967066764831543, 4.537866592407227, 2.967066764831543]
-    max_joint_velocity_rad_s: 0.75
+    # Rizon4s reports a minimum per-joint dq_max of 2.094 rad/s. Keep a small
+    # controller margin without tripping normal Cartesian teleop at 0.75 rad/s.
+    max_joint_velocity_rad_s: 2.0
     max_tcp_linear_speed_m_s: 0.35
     max_tcp_angular_speed_rad_s: 1.0
     max_external_force_n: 60.0
@@ -55,6 +61,19 @@ flexiv:
     tolerance_rad: 0.01
     timeout_s: 20.0
     quest_button: right_primary_click
+    lift:
+      # Confirmed TCP Z values from the mature dual_arm_teleop station setup.
+      # This stage never descends: an arm already above its safe Z is skipped.
+      enabled: true
+      left_safe_z_m: -0.377676
+      right_safe_z_m: -0.413296
+      max_linear_velocity_m_s: 0.12
+      max_angular_velocity_rad_s: 0.50
+      max_linear_acceleration_m_s2: 0.50
+      max_angular_acceleration_rad_s2: 1.0
+      tolerance_m: 0.005
+      timeout_s: 12.0
+      parallel: false
 
 inspire:
   config: ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml

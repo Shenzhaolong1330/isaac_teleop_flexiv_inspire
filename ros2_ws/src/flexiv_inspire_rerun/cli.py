@@ -22,6 +22,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--viewer-port", type=int, default=9876)
     parser.add_argument(
+        "--telemetry-hz", type=float, default=5.0,
+        help="maximum live arm/hand/control visualization rate per stream",
+    )
+    parser.add_argument(
+        "--tactile-hz", type=float, default=10.0,
+        help="maximum live tactile visualization rate per hand",
+    )
+    parser.add_argument(
+        "--image-hz", type=float, default=10.0,
+        help="maximum live RGB/depth visualization rate per camera stream",
+    )
+    parser.add_argument(
+        "--pointcloud-hz", type=float, default=2.0,
+        help="maximum live point-cloud visualization rate per camera",
+    )
+    parser.add_argument(
         "--legacy-camera-topics",
         action="store_true",
         help=(
@@ -75,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         connect_url=arguments.connect,
         spawn=spawn,
         viewer_port=arguments.viewer_port,
+        telemetry_hz=arguments.telemetry_hz,
+        tactile_hz=arguments.tactile_hz,
+        image_hz=arguments.image_hz,
+        pointcloud_hz=arguments.pointcloud_hz,
         legacy_camera_topics=arguments.legacy_camera_topics,
         ros_args=ros_args or None,
     )

@@ -10,6 +10,12 @@ from typing import Any
 
 import yaml
 
+from flexiv_rdk_daemon.configuration import (
+    CARTESIAN_LIMIT_KEYS,
+    ConfigurationError as DaemonConfigurationError,
+    load_daemon_configuration,
+)
+
 
 class SystemConfigError(ValueError):
     pass
@@ -122,6 +128,10 @@ def load_system_config(path: str | Path) -> SystemConfig:
         if not str(flexiv.get(key, "")).strip():
             raise SystemConfigError(f"flexiv.{key} is required")
     safety = _mapping(flexiv.get("safety"), "flexiv.safety")
+    if not isinstance(safety.get("software_safety_limits_enabled"), bool):
+        raise SystemConfigError(
+            "flexiv.safety.software_safety_limits_enabled must be a bool"
+        )
     joint_lower = _vector(
         safety.get("joint_lower_limits_rad"),
         "flexiv.safety.joint_lower_limits_rad",
@@ -153,6 +163,45 @@ def load_system_config(path: str | Path) -> SystemConfig:
     )
     for key in safety_limit_names:
         _positive(safety.get(key), f"flexiv.safety.{key}")
+    if float(safety["max_linear_velocity_m_s"]) > float(
+        safety["max_tcp_linear_speed_m_s"]
+    ):
+        raise SystemConfigError(
+            "flexiv.safety.max_linear_velocity_m_s exceeds max_tcp_linear_speed_m_s"
+        )
+    if float(safety["max_angular_velocity_rad_s"]) > float(
+        safety["max_tcp_angular_speed_rad_s"]
+    ):
+        raise SystemConfigError(
+            "flexiv.safety.max_angular_velocity_rad_s exceeds max_tcp_angular_speed_rad_s"
+        )
+    config_root = (
+        source.parent.parent
+        if (source.parent.parent / "pyproject.toml").is_file()
+        else source.parent
+    )
+    daemon_path = Path(str(flexiv["rdk_config"])).expanduser()
+    if not daemon_path.is_absolute():
+        daemon_path = (config_root / daemon_path).resolve()
+    try:
+        daemon_config = load_daemon_configuration(daemon_path)
+    except (OSError, DaemonConfigurationError, yaml.YAMLError) as exc:
+        raise SystemConfigError(
+            f"flexiv.rdk_config is invalid: {exc}"
+        ) from exc
+    site_cartesian_limits = tuple(
+        float(safety[name]) for name in CARTESIAN_LIMIT_KEYS
+    )
+    for name, requested, ceiling in zip(
+        CARTESIAN_LIMIT_KEYS,
+        site_cartesian_limits,
+        daemon_config.cartesian_limits,
+        strict=True,
+    ):
+        if requested > ceiling:
+            raise SystemConfigError(
+                f"flexiv.safety.{name}={requested} exceeds daemon ceiling {ceiling}"
+            )
     cartesian = _mapping(
         flexiv.get("cartesian_control"), "flexiv.cartesian_control"
     )
@@ -219,6 +268,57 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError("flexiv.home.timeout_s must be at least 1 second")
     if not str(home.get("quest_button", "")).strip():
         raise SystemConfigError("flexiv.home.quest_button is required")
+    lift = _mapping(home.get("lift"), "flexiv.home.lift")
+    if not isinstance(lift.get("enabled"), bool):
+        raise SystemConfigError("flexiv.home.lift.enabled must be a bool")
+    for side in ("left", "right"):
+        safe_z = float(lift.get(f"{side}_safe_z_m"))
+        if not -2.0 <= safe_z <= 2.0:
+            raise SystemConfigError(
+                f"flexiv.home.lift.{side}_safe_z_m must be finite and in [-2,2]"
+            )
+    lift_limits = (
+        (
+            "max_linear_velocity_m_s",
+            "max_tcp_linear_speed_m_s",
+        ),
+        (
+            "max_angular_velocity_rad_s",
+            "max_tcp_angular_speed_rad_s",
+        ),
+        (
+            "max_linear_acceleration_m_s2",
+            "max_linear_acceleration_m_s2",
+        ),
+        (
+            "max_angular_acceleration_rad_s2",
+            "max_angular_acceleration_rad_s2",
+        ),
+    )
+    for lift_key, safety_key in lift_limits:
+        value = _positive(
+            lift.get(lift_key), f"flexiv.home.lift.{lift_key}"
+        )
+        if value > float(safety[safety_key]):
+            raise SystemConfigError(
+                f"flexiv.home.lift.{lift_key} exceeds flexiv.safety.{safety_key}"
+            )
+    _positive(
+        lift.get("tolerance_m"),
+        "flexiv.home.lift.tolerance_m",
+        upper=0.05,
+    )
+    lift_timeout = _positive(
+        lift.get("timeout_s"),
+        "flexiv.home.lift.timeout_s",
+        upper=30.0,
+    )
+    if lift_timeout < 1.0:
+        raise SystemConfigError(
+            "flexiv.home.lift.timeout_s must be at least 1 second"
+        )
+    if not isinstance(lift.get("parallel"), bool):
+        raise SystemConfigError("flexiv.home.lift.parallel must be a bool")
     inspire = _mapping(root.get("inspire"), "inspire")
     for key in ("left_host", "right_host"):
         if not str(inspire.get(key, "")).strip():
@@ -275,6 +375,50 @@ def load_system_config(path: str | Path) -> SystemConfig:
         "quest_squeeze_either",
     }:
         raise SystemConfigError("teleop.deadman_source is unsupported")
+    teleop_mapping = _mapping(teleop.get("mapping"), "teleop.mapping")
+    axis_rotation = _vector(
+        teleop_mapping.get("axis_rotation"),
+        "teleop.mapping.axis_rotation",
+        9,
+    )
+    axis = [axis_rotation[index : index + 3] for index in range(0, 9, 3)]
+    for row in range(3):
+        for column in range(3):
+            dot = sum(axis[index][row] * axis[index][column] for index in range(3))
+            expected = 1.0 if row == column else 0.0
+            if abs(dot - expected) > 1.0e-7:
+                raise SystemConfigError(
+                    "teleop.mapping.axis_rotation must be orthonormal"
+                )
+    determinant = (
+        axis[0][0] * (axis[1][1] * axis[2][2] - axis[1][2] * axis[2][1])
+        - axis[0][1] * (axis[1][0] * axis[2][2] - axis[1][2] * axis[2][0])
+        + axis[0][2] * (axis[1][0] * axis[2][1] - axis[1][1] * axis[2][0])
+    )
+    if abs(determinant - 1.0) > 1.0e-7:
+        raise SystemConfigError(
+            "teleop.mapping.axis_rotation must be a proper rotation"
+        )
+    _positive(
+        teleop_mapping.get("translation_gain"),
+        "teleop.mapping.translation_gain",
+        upper=3.0,
+    )
+    _positive(
+        teleop_mapping.get("rotation_gain"),
+        "teleop.mapping.rotation_gain",
+        upper=3.0,
+    )
+    left_pose_index = int(teleop_mapping.get("left_pose_index", -1))
+    right_pose_index = int(teleop_mapping.get("right_pose_index", -1))
+    if (
+        left_pose_index < 0
+        or right_pose_index < 0
+        or left_pose_index == right_pose_index
+    ):
+        raise SystemConfigError(
+            "teleop.mapping left/right pose indices must be distinct and non-negative"
+        )
     export = _mapping(root.get("lerobot_export"), "lerobot_export")
     if int(export.get("schema_version", 0)) != 1:
         raise SystemConfigError("lerobot_export.schema_version must be 1")
@@ -337,6 +481,42 @@ def load_system_config(path: str | Path) -> SystemConfig:
     if not str(xr.get("ffmpeg", "")).strip() or not str(xr.get("receiver_host", "")).strip():
         raise SystemConfigError("xr_video.ffmpeg and receiver_host are required")
     _positive(xr.get("bitrate_mbps"), "xr_video.bitrate_mbps", upper=100.0)
+    cloudxr_client = _mapping(
+        xr.get("cloudxr_client"), "xr_video.cloudxr_client"
+    )
+    per_eye_width = int(cloudxr_client.get("per_eye_width", 0))
+    per_eye_height = int(cloudxr_client.get("per_eye_height", 0))
+    if per_eye_width < 128 or per_eye_width % 16:
+        raise SystemConfigError(
+            "xr_video.cloudxr_client.per_eye_width must be >=128 and divisible by 16"
+        )
+    if per_eye_height < 128 or per_eye_height % 64:
+        raise SystemConfigError(
+            "xr_video.cloudxr_client.per_eye_height must be >=128 and divisible by 64"
+        )
+    if int(cloudxr_client.get("frame_rate", 0)) not in {72, 90, 120}:
+        raise SystemConfigError(
+            "xr_video.cloudxr_client.frame_rate must be 72, 90, or 120"
+        )
+    if int(cloudxr_client.get("max_bitrate_mbps", 0)) not in {
+        80,
+        100,
+        120,
+        150,
+        180,
+        200,
+    }:
+        raise SystemConfigError(
+            "xr_video.cloudxr_client.max_bitrate_mbps must be a supported WebXR option"
+        )
+    if cloudxr_client.get("codec") not in {"h264", "h265", "av1"}:
+        raise SystemConfigError(
+            "xr_video.cloudxr_client.codec must be h264, h265, or av1"
+        )
+    if not isinstance(cloudxr_client.get("enable_tex_sub_image_2d"), bool):
+        raise SystemConfigError(
+            "xr_video.cloudxr_client.enable_tex_sub_image_2d must be boolean"
+        )
     if int(xr.get("payload_type", -1)) != 96:
         raise SystemConfigError("xr_video.payload_type must be 96 for IsaacTeleop")
     xr_streams = _mapping(xr.get("streams"), "xr_video.streams")
@@ -351,6 +531,8 @@ def load_system_config(path: str | Path) -> SystemConfig:
         ports.append(port)
     if len(set(ports)) != len(ports):
         raise SystemConfigError("xr_video RTP ports must be unique")
+    if not any(bool(stream.get("enabled", False)) for stream in xr_streams.values()):
+        raise SystemConfigError("xr_video.streams must enable at least one camera")
     display = _mapping(xr.get("display"), "xr_video.display")
     if display.get("mode") not in {"xr", "monitor"}:
         raise SystemConfigError("xr_video.display.mode must be xr or monitor")
@@ -376,6 +558,31 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError("recording.camera_recording_mode must be jpeg")
     if recording.get("deviceio_mode") != "native":
         raise SystemConfigError("recording.deviceio_mode must be native")
+    if not isinstance(recording.get("auto_reset_before_record"), bool):
+        raise SystemConfigError(
+            "recording.auto_reset_before_record must be a bool"
+        )
+    live_rerun = _mapping(
+        recording.get("live_rerun", {}), "recording.live_rerun"
+    )
+    if not isinstance(live_rerun.get("enabled"), bool):
+        raise SystemConfigError("recording.live_rerun.enabled must be a bool")
+    viewer_port = int(live_rerun.get("viewer_port", 0))
+    if not 1 <= viewer_port <= 65535:
+        raise SystemConfigError(
+            "recording.live_rerun.viewer_port must be a TCP port"
+        )
+    for field in (
+        "telemetry_hz",
+        "tactile_hz",
+        "image_hz",
+        "pointcloud_hz",
+    ):
+        value = float(live_rerun.get(field, 0.0))
+        if not 0.1 <= value <= 120.0:
+            raise SystemConfigError(
+                f"recording.live_rerun.{field} must be in [0.1,120]"
+            )
     return SystemConfig(source, root, canonical_hash(root))
 
 
@@ -412,13 +619,14 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
         xr_params[f"streams.{name}.topic"] = f"/camera/{name}/color/frame"
         xr_params[f"streams.{name}.port"] = int(xr_stream["port"])
         xr_params[f"streams.{name}.fps"] = float(camera_stream["fps"])
-        isaac_cameras[name] = {
-            "enabled": bool(xr_stream["enabled"]), "type": "v4l2", "stereo": False,
-            "device": "/dev/null", "width": int(camera_stream["width"]),
-            "height": int(camera_stream["height"]), "fps": int(camera_stream["fps"]),
-            "streams": {"mono": {"stream_id": len(isaac_cameras), "port": int(xr_stream["port"]),
-                                   "bitrate_mbps": float(xr["bitrate_mbps"])}}
-        }
+        if bool(xr_stream["enabled"]):
+            isaac_cameras[name] = {
+                "type": "v4l2", "stereo": False,
+                "device": "/dev/null", "width": int(camera_stream["width"]),
+                "height": int(camera_stream["height"]), "fps": int(camera_stream["fps"]),
+                "streams": {"mono": {"stream_id": len(isaac_cameras), "port": int(xr_stream["port"]),
+                                       "bitrate_mbps": float(xr["bitrate_mbps"])}}
+            }
     display = xr["display"]
     receiver = {
         "source": "rtp", "streaming": {"host": xr["receiver_host"]},
@@ -427,7 +635,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
             "mode": display["mode"], "cuda_device": int(display["cuda_device"]),
             "monitor": {"width": 1920, "height": 1080, "title": "Flexiv Inspire Teleop",
                         "padding": 4, "stream_timeout": float(xr["stream_timeout_s"])},
-            "xr": {"planes": {name: display[name] for name in cameras["streams"]},
+            "xr": {"planes": {name: display[name] for name in isaac_cameras},
                    "lock_mode": display["lock_mode"], "look_away_angle": float(display["look_away_angle"]),
                    "reposition_distance": float(display["reposition_distance"]),
                    "reposition_delay": float(display["reposition_delay"]),
@@ -482,6 +690,9 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     "frame_config": str(config.resolve(flexiv["frame_config"])),
                     "foot_pedal": pedal["device"],
                     "observation_rate_hz": sampling["arm_observation_hz"],
+                    "software_safety_limits_enabled": bool(
+                        safety["software_safety_limits_enabled"]
+                    ),
                     "joint_lower_limits_rad": safety["joint_lower_limits_rad"],
                     "joint_upper_limits_rad": safety["joint_upper_limits_rad"],
                     "max_joint_velocity_rad_s": safety["max_joint_velocity_rad_s"],
@@ -543,10 +754,20 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     ],
                     "home_tolerance_rad": flexiv["home"]["tolerance_rad"],
                     "home_timeout_s": flexiv["home"]["timeout_s"],
+                    "home_lift_enabled": bool(flexiv["home"]["lift"]["enabled"]),
+                    "home_lift_left_safe_z_m": float(flexiv["home"]["lift"]["left_safe_z_m"]),
+                    "home_lift_right_safe_z_m": float(flexiv["home"]["lift"]["right_safe_z_m"]),
+                    "home_lift_max_linear_velocity_m_s": float(flexiv["home"]["lift"]["max_linear_velocity_m_s"]),
+                    "home_lift_max_angular_velocity_rad_s": float(flexiv["home"]["lift"]["max_angular_velocity_rad_s"]),
+                    "home_lift_max_linear_acceleration_m_s2": float(flexiv["home"]["lift"]["max_linear_acceleration_m_s2"]),
+                    "home_lift_max_angular_acceleration_rad_s2": float(flexiv["home"]["lift"]["max_angular_acceleration_rad_s2"]),
+                    "home_lift_tolerance_m": float(flexiv["home"]["lift"]["tolerance_m"]),
+                    "home_lift_timeout_s": float(flexiv["home"]["lift"]["timeout_s"]),
+                    "home_lift_parallel": bool(flexiv["home"]["lift"]["parallel"]),
                 }
             }
         },
-        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "deadman_source": teleop["deadman_source"], "foot_pedal": pedal["device"], "enable_key_code": pedal["enable_key_code"], "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/episode/control"}}},
+        "teleop.yaml": {"/**": {"ros__parameters": {"session_id": session["id"], "command_enabled": bool(teleop["control_enabled"]), "control_rate_hz": sampling["teleop_command_hz"], "manus_calibration": str(config.resolve(teleop["manus_calibration"])) if str(teleop["manus_calibration"]).strip() else "", "deadman_source": teleop["deadman_source"], "foot_pedal": pedal["device"], "enable_key_code": pedal["enable_key_code"], "left_pose_index": int(teleop["mapping"]["left_pose_index"]), "right_pose_index": int(teleop["mapping"]["right_pose_index"]), "axis_rotation": [float(value) for value in teleop["mapping"]["axis_rotation"]], "translation_gain": float(teleop["mapping"]["translation_gain"]), "rotation_gain": float(teleop["mapping"]["rotation_gain"]), "max_translation_step_m": safety["max_translation_step_m"], "max_rotation_step_rad": safety["max_rotation_step_rad"], "home_button_key": flexiv["home"]["quest_button"], "home_topic": "/episode/control"}}},
         "pedal.yaml": {"/**": {"ros__parameters": {"foot_pedal": pedal["device"], "rerecord_key_code": pedal["rerecord_key_code"], "enable_key_code": pedal["enable_key_code"], "record_toggle_key_code": pedal["record_toggle_key_code"]}}},
         "lerobot_export.yaml": root["lerobot_export"],
     }

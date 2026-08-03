@@ -187,6 +187,18 @@ message HomeCommand {
   bool collision_clear = 13;
   string local_authorization_token = 14;
   bool clear_routine_hold = 15;
+  bool lift_enabled = 16;
+  double left_lift_safe_z_m = 17;
+  double right_lift_safe_z_m = 18;
+  double lift_max_linear_velocity = 19;
+  double lift_max_angular_velocity = 20;
+  double lift_max_linear_acceleration = 21;
+  double lift_max_angular_acceleration = 22;
+  double lift_tolerance_m = 23;
+  double lift_timeout_s = 24;
+  bool lift_parallel = 25;
+  repeated double lift_cartesian_stiffness = 26;
+  repeated double lift_cartesian_damping_ratio = 27;
 }
 
 message HomeResult {

@@ -76,6 +76,57 @@ def test_source_is_exclusive_and_first_valid_command_activates() -> None:
     assert arbiter.snapshot.state is ControlState.ACTIVE
 
 
+def test_older_approved_command_ack_remains_valid_after_newer_submit() -> None:
+    arbiter = ready_arbiter()
+    first = arbiter.submit(
+        action(CommandSource.TELEOP, 1), now_monotonic_ns=BASE
+    )
+    second = arbiter.submit(
+        action(CommandSource.TELEOP, 2), now_monotonic_ns=BASE + 1
+    )
+
+    arbiter.mark_sent(first)
+    assert arbiter.snapshot.last_sent is first
+    arbiter.mark_sent(second)
+    assert arbiter.snapshot.last_sent is second
+    assert arbiter.snapshot.state is ControlState.ACTIVE
+
+
+def test_positive_ack_arriving_after_pedal_release_preserves_hold() -> None:
+    arbiter = ready_arbiter()
+    approved = arbiter.submit(
+        action(CommandSource.TELEOP, 1), now_monotonic_ns=BASE
+    )
+
+    arbiter.update_gates(
+        GateInputs(
+            local_permission=True,
+            physical_pedal=False,
+            arms_online=True,
+            hands_online=True,
+            limits_ok=True,
+            collision_clear=True,
+        ),
+        now_monotonic_ns=BASE + 1,
+    )
+    assert arbiter.snapshot.state is ControlState.HOLD_LATCHED
+    assert arbiter.snapshot.hold_reason is HoldReason.PEDAL_RELEASED
+
+    arbiter.mark_sent(approved)
+
+    assert arbiter.snapshot.state is ControlState.HOLD_LATCHED
+    assert arbiter.snapshot.hold_reason is HoldReason.PEDAL_RELEASED
+    assert arbiter.snapshot.last_sent is approved
+
+
+def test_unapproved_future_command_cannot_be_marked_sent() -> None:
+    arbiter = ready_arbiter()
+    arbiter.submit(action(CommandSource.TELEOP, 1), now_monotonic_ns=BASE)
+
+    with pytest.raises(TransitionError, match="not approved"):
+        arbiter.mark_sent(action(CommandSource.TELEOP, 2))
+
+
 def test_ttl_watchdog_latches_and_never_auto_resumes() -> None:
     arbiter = ready_arbiter()
     arbiter.submit(action(CommandSource.TELEOP, 1), now_monotonic_ns=BASE)
@@ -97,6 +148,33 @@ def test_invalid_or_gate_failed_first_packet_latches_from_armed() -> None:
     second.reject_invalid_command(CommandSource.TELEOP, now_monotonic_ns=BASE)
     assert second.snapshot.state is ControlState.HOLD_LATCHED
     assert second.snapshot.hold_reason is HoldReason.INVALID_COMMAND
+
+
+def test_expired_local_authorization_holds_without_marking_command_invalid() -> None:
+    arbiter = ready_arbiter()
+
+    arbiter.require_reauthorization(
+        CommandSource.TELEOP, now_monotonic_ns=BASE
+    )
+
+    assert arbiter.snapshot.state is ControlState.HOLD_LATCHED
+    assert arbiter.snapshot.hold_reason is HoldReason.AUTHORIZATION_EXPIRED
+
+
+def test_daemon_release_latch_is_recoverable_without_fault() -> None:
+    arbiter = ready_arbiter()
+    arbiter.submit(action(CommandSource.TELEOP, 1), now_monotonic_ns=BASE)
+
+    arbiter.observe_hardware_hold(
+        CommandSource.TELEOP,
+        HoldReason.PEDAL_RELEASED,
+        now_monotonic_ns=BASE + 1,
+    )
+
+    assert arbiter.snapshot.state is ControlState.HOLD_LATCHED
+    assert arbiter.snapshot.hold_reason is HoldReason.PEDAL_RELEASED
+    arbiter.clear_hold(local_acknowledged=True)
+    assert arbiter.snapshot.state is ControlState.READY
 
 
 def test_deadman_release_can_be_locally_cleared_but_requires_rearm() -> None:

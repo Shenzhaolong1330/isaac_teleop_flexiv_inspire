@@ -18,15 +18,30 @@ control:
   target_rate_hz: 200
   default_mode: observe_only
   hardware_writes_enabled: false
+  # Independent daemon ceiling. The site command profile must be at or below
+  # these values; robot validate checks the two configs before startup.
+  cartesian_limits:
+    max_linear_velocity_m_s: 0.35
+    max_angular_velocity_rad_s: 1.0
+    max_linear_acceleration_m_s2: 1.0
+    max_angular_acceleration_rad_s2: 2.0
 ipc:
   socket_name: rdk.sock
   max_packet_bytes: 65536
 ft_zero:
   confirmation_token: FLEXIV-FT-UNLOADED
+  # Practical site mode: ZeroFTSensor may run with a non-zero estimated
+  # external wrench. The operator is responsible for physically unloading it.
+  external_contact_check_enabled: false
   sample_window_s: 2.0
   sample_rate_hz: 200.0
   operational_timeout_s: 30.0
   primitive_timeout_s: 30.0
+  # Robot.Enable releases the brakes and can cause a brief unloaded rebound.
+  # Keep the strict velocity limits, but require them continuously for this
+  # window before executing ZeroFTSensor.
+  enable_settle_timeout_s: 10.0
+  enable_settle_window_s: 0.5
   max_joint_velocity_norm: 0.01
   max_tcp_velocity_norm: 0.01
   max_wrench_std_force_n: 0.5

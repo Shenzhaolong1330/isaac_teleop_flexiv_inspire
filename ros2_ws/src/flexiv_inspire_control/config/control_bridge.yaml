@@ -2,12 +2,14 @@
   ros__parameters:
     # Requested arm observation rate; actual achieved rate is recorded in MCAP.
     observation_rate_hz: 200.0
+    # Site config may disable these duplicate software limits and rely on RDK.
+    software_safety_limits_enabled: false
     # Rizon4s manufacturer defaults returned by RobotInfo on both site arms.
     # Degrees: [-160,-130,-170,-107,-170,-80,-170] and
     # [160,130,170,154,170,260,170].
     joint_lower_limits_rad: [-2.7925667762756348, -2.2689666748046875, -2.967066764831543, -1.8674668073654175, -2.967066764831543, -1.3962668180465698, -2.967066764831543]
     joint_upper_limits_rad: [2.7925667762756348, 2.2689666748046875, 2.967066764831543, 2.6877667903900146, 2.967066764831543, 4.537866592407227, 2.967066764831543]
-    max_joint_velocity_rad_s: 0.75
+    max_joint_velocity_rad_s: 2.0
     max_tcp_linear_speed_m_s: 0.35
     max_tcp_angular_speed_rad_s: 1.0
     max_external_force_n: 60.0
@@ -30,3 +32,14 @@
     home_max_acceleration_rad_s2: 1.0
     home_tolerance_rad: 0.01
     home_timeout_s: 20.0
+    # Vertical-only protective stage before joint-space Home.
+    home_lift_enabled: true
+    home_lift_left_safe_z_m: -0.377676
+    home_lift_right_safe_z_m: -0.413296
+    home_lift_max_linear_velocity_m_s: 0.12
+    home_lift_max_angular_velocity_rad_s: 0.50
+    home_lift_max_linear_acceleration_m_s2: 0.50
+    home_lift_max_angular_acceleration_rad_s2: 1.0
+    home_lift_tolerance_m: 0.005
+    home_lift_timeout_s: 12.0
+    home_lift_parallel: false

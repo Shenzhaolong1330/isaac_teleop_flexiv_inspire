@@ -47,7 +47,7 @@ def _pose_at(
 
 
 class EpisodeAligner:
-    """Align all streams to head RGB source timestamps at 30 Hz."""
+    """Align asynchronous streams to camera frames or a uniform target grid."""
 
     def __init__(
         self,
@@ -55,12 +55,31 @@ class EpisodeAligner:
         *,
         tolerance: ExportTolerance = ExportTolerance(),
         timeline_source: str = "camera/head/jpeg",
+        timeline_hz: float | None = None,
+        high_rate_arm_samples_per_frame: int = 0,
         action: ActionView = ActionView(),
+        depth_cameras: Sequence[str] = (),
+        segment_gap_threshold_s: float = 0.25,
     ) -> None:
         self.streams = streams
         self.tolerance = tolerance
         self.timeline_source = timeline_source.lstrip("/")
+        if timeline_hz is not None and not 0.0 < timeline_hz <= 1000.0:
+            raise ValueError("timeline_hz must be in (0,1000]")
+        self.timeline_hz = timeline_hz
+        if not 0 <= high_rate_arm_samples_per_frame <= 128:
+            raise ValueError("high_rate_arm_samples_per_frame must be in [0,128]")
+        self.high_rate_arm_samples_per_frame = high_rate_arm_samples_per_frame
         self.action = action
+        self.depth_cameras = tuple(depth_cameras)
+        if any(
+            camera not in {"head", "left_wrist", "right_wrist"}
+            for camera in self.depth_cameras
+        ):
+            raise ValueError("unsupported depth camera")
+        if not 0.05 <= segment_gap_threshold_s <= 60.0:
+            raise ValueError("segment_gap_threshold_s must be in [0.05,60]")
+        self.segment_gap_threshold_ns = int(segment_gap_threshold_s * 1e9)
         self._mapped_streams: dict[str, tuple[TimedSample, ...]] = {}
         self._stream_times: dict[str, tuple[int, ...]] = {}
         for name, samples in streams.items():
@@ -79,22 +98,72 @@ class EpisodeAligner:
 
     def rows(self) -> list[dict[str, Any]]:
         reference = self.streams.get(self.timeline_source, ())
+        mapped_reference = [
+            sample for sample in reference if sample.alignment_time_ns is not None
+        ]
+        if self.timeline_hz is None:
+            timeline = [
+                (int(sample.alignment_time_ns), sample)
+                for sample in mapped_reference
+            ]
+        elif mapped_reference:
+            start_ns = int(mapped_reference[0].alignment_time_ns)
+            end_ns = int(mapped_reference[-1].alignment_time_ns)
+            period_ns = int(round(1e9 / self.timeline_hz))
+            timeline = []
+            for timestamp in range(start_ns, end_ns + 1, period_ns):
+                head = self._causal(
+                    self.timeline_source, timestamp, self.tolerance.image_ns
+                )
+                timeline.append((timestamp, head))
+        else:
+            timeline = []
         output: list[dict[str, Any]] = []
-        for head in reference:
-            timestamp = head.alignment_time_ns
-            if timestamp is None:
-                continue
+        previous_timestamp: int | None = None
+        capture_segment = 0
+        frame_in_segment = 0
+        for timestamp, head in timeline:
+            source_gap_ns = (
+                0 if previous_timestamp is None else timestamp - previous_timestamp
+            )
+            segment_start = previous_timestamp is None or (
+                source_gap_ns > self.segment_gap_threshold_ns
+            )
+            if segment_start and previous_timestamp is not None:
+                capture_segment += 1
+                frame_in_segment = 0
+            if isinstance(head, TimedSample):
+                head_value = AlignedValue(
+                    head.value if head.valid else None,
+                    timestamp,
+                    0,
+                    head.valid,
+                    head.invalid_reason,
+                )
+            else:
+                head_value = head
             row: dict[str, Any] = {
                 "timestamp_ns": timestamp,
-                "observation.images.head": head.value if head.valid else None,
-                "observation.images.head.valid": head.valid,
-                "observation.images.head.age_ns": 0,
+                "observation.source_timestamp_ns": timestamp,
+                "observation.source_gap_s": source_gap_ns / 1e9,
+                "observation.capture_segment": capture_segment,
+                "observation.frame_in_segment": frame_in_segment,
+                "observation.capture_segment_start": segment_start,
             }
+            self._put(row, "observation.images.head", head_value)
             for camera in ("left_wrist", "right_wrist"):
                 self._put_nearest(
                     row,
                     f"observation.images.{camera}",
                     f"camera/{camera}/jpeg",
+                    timestamp,
+                    self.tolerance.image_ns,
+                )
+            for camera in self.depth_cameras:
+                self._put_nearest(
+                    row,
+                    f"observation.depth.{camera}",
+                    f"camera/{camera}/depth_z16",
                     timestamp,
                     self.tolerance.image_ns,
                 )
@@ -144,9 +213,45 @@ class EpisodeAligner:
                     timestamp,
                     self.tolerance.tactile_ns,
                 )
+                history, history_valid, history_age_ns = self._arm_history_at(
+                    side, timestamp
+                )
+                row[f"observation.{side}_arm.high_rate"] = history
+                row[f"observation.{side}_arm.high_rate.valid"] = history_valid
+                row[f"observation.{side}_arm.high_rate.age_ns"] = history_age_ns
             self._put(row, "action", self._action_at(timestamp))
             output.append(row)
+            previous_timestamp = timestamp
+            frame_in_segment += 1
         return output
+
+    def _arm_history_at(
+        self, side: str, timestamp_ns: int
+    ) -> tuple[list[Any | None], list[bool], list[int | None]]:
+        count = self.high_rate_arm_samples_per_frame
+        if count == 0:
+            return [], [], []
+        name = f"robot/{side}_arm/state"
+        samples = self._mapped_streams.get(name, ())
+        times = self._stream_times.get(name, ())
+        end = bisect_right(times, timestamp_ns)
+        start = max(0, end - count)
+        selected = list(samples[start:end])
+        selected_times = list(times[start:end])
+        padding = count - len(selected)
+        values: list[Any | None] = [None] * padding
+        valid = [False] * padding
+        ages: list[int | None] = [None] * padding
+        # At 300/15 Hz the oldest expected sample is about 63 ms old. A
+        # 150 ms cutoff prevents a disconnected arm's stale history from
+        # being presented as current while retaining normal timing jitter.
+        for sample, sample_time in zip(selected, selected_times):
+            age = timestamp_ns - sample_time
+            sample_valid = bool(sample.valid) and 0 <= age <= 150_000_000
+            values.append(sample.value if sample_valid else None)
+            valid.append(sample_valid)
+            ages.append(age if age >= 0 else None)
+        return values, valid, ages
 
     def _action_at(self, timestamp_ns: int) -> AlignedValue:
         if self.action.name == "sent_command":

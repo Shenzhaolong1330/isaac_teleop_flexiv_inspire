@@ -54,6 +54,23 @@ channels: {}
         load_export_spec(config)
 
 
+def test_export_spec_can_keep_recorded_camera_timeline(tmp_path: Path):
+    config = tmp_path / "export.yaml"
+    config.write_text(
+        """
+schema_version: 1
+timeline: {source: camera/head/jpeg, fps: 15.0, resample: false}
+action: {view: sent_command}
+channels: {}
+""",
+        encoding="utf-8",
+    )
+
+    spec = load_export_spec(config)
+
+    assert spec.resample_timeline is False
+
+
 def test_lerobot_cli_action_view_overrides_export_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -77,8 +94,22 @@ channels: {}
     captured = {}
 
     class FakeAligner:
-        def __init__(self, streams, *, timeline_source, action):
+        def __init__(
+            self,
+            streams,
+            *,
+            timeline_source,
+            timeline_hz,
+            high_rate_arm_samples_per_frame,
+            action,
+            depth_cameras,
+            segment_gap_threshold_s,
+        ):
             captured["action_view"] = action.name
+            captured["timeline_hz"] = timeline_hz
+            captured["high_rate_samples"] = high_rate_arm_samples_per_frame
+            captured["depth_cameras"] = depth_cameras
+            captured["segment_gap_threshold_s"] = segment_gap_threshold_s
 
         def rows(self):
             return []
@@ -90,6 +121,8 @@ channels: {}
             frames_written=0,
             frames_dropped_invalid_action=0,
             frames_dropped_invalid_image=0,
+            frames_dropped_invalid_depth=0,
+            episodes_written=0,
             reload_length=0,
         )
 
@@ -120,3 +153,59 @@ channels: {}
         ]
     ) == 0
     assert captured["action_view"] == "absolute_joint_position"
+    assert captured["timeline_hz"] == 30.0
+    assert captured["high_rate_samples"] == 0
+
+
+def test_export_spec_selects_exact_fields_and_head_z16_depth(tmp_path: Path):
+    config = tmp_path / "export.yaml"
+    config.write_text(
+        """
+schema_version: 1
+timeline: {source: camera/head/jpeg, fps: 15.0, resample: false}
+high_rate_arm_samples_per_frame: 20
+action: {view: sent_command}
+fields:
+  - observation.images.head
+  - observation.depth.head
+  - observation.depth_scale_m.head
+  - observation.depth_intrinsics.head
+  - observation.source_timestamp_ns
+  - action
+depth: {enabled: true, cameras: [head], representation: z16, storage: parquet}
+segments: {gap_threshold_s: 0.25, split_episodes: true}
+channels: {}
+""",
+        encoding="utf-8",
+    )
+
+    spec = load_export_spec(config)
+
+    assert spec.depth.enabled
+    assert spec.depth.cameras == ("head",)
+    assert spec.segments.split_episodes
+    assert spec.fields == (
+        "observation.images.head",
+        "observation.depth.head",
+        "observation.depth_scale_m.head",
+        "observation.depth_intrinsics.head",
+        "observation.source_timestamp_ns",
+        "action",
+    )
+
+
+def test_export_spec_rejects_depth_field_without_depth_metadata(tmp_path: Path):
+    config = tmp_path / "export.yaml"
+    config.write_text(
+        """
+schema_version: 1
+timeline: {source: camera/head/jpeg, fps: 15.0}
+action: {view: sent_command}
+fields: [observation.depth.head, action]
+depth: {enabled: false}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ExportSpecError, match="depth fields"):
+        load_export_spec(config)

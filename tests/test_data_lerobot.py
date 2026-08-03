@@ -1,6 +1,8 @@
 from flexiv_inspire_isaac.data_pipeline.alignment import Pose, TimedSample
 from flexiv_inspire_isaac.data_pipeline.export_spec import ActionView
 from flexiv_inspire_isaac.data_pipeline.lerobot_export import EpisodeAligner
+from flexiv_inspire_isaac.data_pipeline.lerobot_v3 import _arm_high_rate_frame
+from flexiv_inspire_isaac.data_pipeline.mcap_input import _derive_compact_arm_streams
 
 
 def s(value, t, seq=0, valid=True):
@@ -74,3 +76,106 @@ def test_episode_aligner_indexes_high_rate_stream_only_once_per_key():
     ).rows()
     assert len(rows) == 100
     assert states.iterations == 2
+
+
+def test_uniform_training_timeline_really_downsamples_camera_frames():
+    streams = {
+        "camera/head/jpeg": [
+            s(b"head", timestamp)
+            for timestamp in (0, 33_333_333, 66_666_667, 100_000_000)
+        ]
+    }
+
+    rows = EpisodeAligner(streams, timeline_hz=20.0).rows()
+
+    assert [row["timestamp_ns"] for row in rows] == [
+        0,
+        50_000_000,
+        100_000_000,
+    ]
+    assert all(row["observation.images.head.valid"] for row in rows)
+
+
+def test_source_gaps_are_marked_as_distinct_capture_segments_with_depth():
+    depth = {
+        "z16": b"\x01\x00\x02\x00",
+        "width": 2,
+        "height": 1,
+        "scale_m": 0.001,
+        "intrinsics": (100.0, 101.0, 1.0, 0.5),
+    }
+    streams = {
+        "camera/head/jpeg": [s(b"head-a", 100), s(b"head-b", 400_000_100)],
+        "camera/head/depth_z16": [s(depth, 100), s(depth, 400_000_100)],
+    }
+
+    rows = EpisodeAligner(
+        streams,
+        depth_cameras=("head",),
+        segment_gap_threshold_s=0.25,
+    ).rows()
+
+    assert [row["observation.capture_segment"] for row in rows] == [0, 1]
+    assert [row["observation.frame_in_segment"] for row in rows] == [0, 0]
+    assert rows[1]["observation.source_gap_s"] == 0.4
+    assert rows[0]["observation.depth.head"] == depth
+    assert rows[0]["observation.depth.head.valid"]
+
+
+def _native_arm_state(value: float) -> dict:
+    return {
+        **{
+            field: [value] * 7
+            for field in (
+                "q",
+                "dq",
+                "tau",
+                "tau_des",
+                "tau_ext",
+                "tau_interact",
+                "temperature",
+            )
+        },
+        "tcp_pose_rdk_xyz_wxyz": [value] * 7,
+        "tcp_velocity": [value] * 6,
+        "raw_ft": [value] * 6,
+        "external_wrench": [value] * 6,
+    }
+
+
+def test_each_training_frame_embeds_twenty_dual_arm_samples():
+    states = [
+        s(_native_arm_state(float(index)), 1_000_000 * index, index)
+        for index in range(1, 26)
+    ]
+    streams = {
+        "camera/head/jpeg": [s(b"head", 25_000_000)],
+        "robot/left_arm/state": states,
+        "robot/right_arm/state": states,
+    }
+
+    row = EpisodeAligner(
+        streams, high_rate_arm_samples_per_frame=20
+    ).rows()[0]
+    packed, valid, ages = _arm_high_rate_frame(row, 20)
+
+    assert packed.shape == (20 * 2 * 74,)
+    assert valid.shape == (40,)
+    assert valid.all()
+    assert ages.shape == (40,)
+    # The window contains the most recent 20 samples: indices 6..25.
+    assert packed[0] == 6.0
+    assert packed[-1] == 25.0
+
+
+def test_compact_arm_state_recreates_pose_force_and_twist_views():
+    streams = {
+        "robot/left_arm/state": [s(_native_arm_state(3.0), 10, 1)]
+    }
+
+    _derive_compact_arm_streams(streams)
+
+    assert streams["robot/left_arm/tcp_pose"][0].value.xyz == (3.0, 3.0, 3.0)
+    assert streams["robot/left_arm/tcp_twist"][0].value["values"] == [3.0] * 6
+    assert streams["robot/left_arm/raw_ft"][0].value["values"] == [3.0] * 6
+    assert streams["robot/left_arm/tcp_wrench"][0].value["values"] == [3.0] * 6

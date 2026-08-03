@@ -1,0 +1,83 @@
+# `robot convert` 的默认输入/输出配置。
+schema_version: 1
+
+source:
+  # episode: latest | 数字 episode_index | 完整目录名。
+  dataset_root: sessions/pick_place_demo
+  episode: latest
+  # manifest 非空时优先于 dataset_root/episode。
+  manifest: ""
+  # 留空时读取 manifest.deviceio_mcap；需要手工指定 MCAP 时可写一个或多个。
+  mcap_files: []
+
+output:
+  root: artifacts/lerobot/pick_place_demo
+  # true: <root>/<episode目录名>/<action view>/
+  # false: 直接把 root 当作最终 LeRobot 文件夹。
+  episode_subdirectory: true
+  repo_id: local/pick-place-demo-sent-command
+
+lerobot_export:
+  schema_version: 1
+  timeline:
+    source: camera/head/jpeg
+    fps: 15.0
+    # false: use actual head-camera frames. This preserves discontinuous
+    # middle-pedal capture segments without inventing frames in the gaps.
+    resample: false
+  # 每个 15 Hz LeRobot 帧内嵌最近 20 个双臂 300 Hz 原始状态样本。
+  high_rate_arm_samples_per_frame: 20
+  action:
+    view: sent_command
+  # 这里只列出的字段才会写进 LeRobot。头部深度保留相机原始 Z16，
+  # 不转成 8-bit 图片，也不经过有损视频编码。
+  fields:
+    - observation.images.head
+    - observation.images.left_wrist
+    - observation.images.right_wrist
+    - observation.depth.head
+    - observation.depth_scale_m.head
+    - observation.depth_intrinsics.head
+    - observation.arm_pose
+    - observation.arm_quaternion_xyzw
+    - observation.arm_q
+    - observation.arm_dq
+    - observation.arm_tau
+    - observation.arm_tau_des
+    - observation.arm_tau_ext
+    - observation.arm_tau_interact
+    - observation.arm_temperature
+    - observation.tcp_twist
+    - observation.hand_state
+    - observation.hand_position
+    - observation.hand_actual_force
+    - observation.hand_current
+    - observation.hand_temperature
+    - observation.hand_error
+    - observation.hand_status
+    - observation.hand_field_valid
+    - observation.hand_field_age_s
+    - observation.force_torque
+    - observation.tactile
+    - observation.valid
+    - observation.age_s
+    - observation.arm_high_rate
+    - observation.arm_high_rate_valid
+    - observation.arm_high_rate_age_s
+    - observation.source_timestamp_ns
+    - observation.source_gap_s
+    - observation.capture_segment
+    - observation.frame_in_segment
+    - observation.capture_segment_start
+    - action
+  depth:
+    enabled: true
+    cameras: [head]
+    representation: z16
+    storage: parquet
+  # record_only_while_pedal_pressed 会在源时间轴上留下空档。超过阈值就
+  # 标记为新片段；默认仍保留为同一个任务 episode，不篡改真实采集顺序。
+  segments:
+    gap_threshold_s: 0.25
+    split_episodes: false
+  channels: {}

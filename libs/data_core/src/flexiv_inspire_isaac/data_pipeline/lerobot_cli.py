@@ -32,7 +32,14 @@ def main(argv=None) -> int:
         help="VLA prompt override; defaults to manifest.task_description",
     )
     parser.add_argument("--mcap", action="append", default=[])
-    parser.add_argument("--export-config", default=None, help="schema-v1 YAML selecting timeline, action view and channel remaps")
+    parser.add_argument(
+        "--export-config",
+        default=None,
+        help=(
+            "schema-v1 YAML selecting timeline, exact LeRobot fields, depth, "
+            "action view and channel remaps"
+        ),
+    )
     parser.add_argument(
         "--action-view",
         choices=(
@@ -91,7 +98,15 @@ def main(argv=None) -> int:
                 streams[name] = recovered[name]
                 recovered_cameras.append(name)
     streams = remap_streams(streams, spec)
-    rows = EpisodeAligner(streams, timeline_source=spec.timeline_source, action=spec.action).rows()
+    rows = EpisodeAligner(
+        streams,
+        timeline_source=spec.timeline_source,
+        timeline_hz=spec.fps if spec.resample_timeline else None,
+        high_rate_arm_samples_per_frame=spec.high_rate_arm_samples_per_frame,
+        action=spec.action,
+        depth_cameras=spec.depth.cameras if spec.depth.enabled else (),
+        segment_gap_threshold_s=spec.segments.gap_threshold_s,
+    ).rows()
     result = export_rows(
         rows,
         output_root=args.output_root,
@@ -99,6 +114,10 @@ def main(argv=None) -> int:
         task=task,
         action=spec.action,
         fps=spec.fps,
+        high_rate_arm_samples_per_frame=spec.high_rate_arm_samples_per_frame,
+        fields=spec.fields,
+        depth_cameras=spec.depth.cameras if spec.depth.enabled else (),
+        split_episodes=spec.segments.split_episodes,
     )
     validation_path = Path(args.output_root) / "export_validation.json"
     validation_path.write_text(
@@ -115,9 +134,32 @@ def main(argv=None) -> int:
                 "recovered_camera_streams": sorted(recovered_cameras),
                 "timeline_source": spec.timeline_source,
                 "timeline_fps": spec.fps,
+                "timeline_resampled": spec.resample_timeline,
+                "high_rate_arm_samples_per_frame": spec.high_rate_arm_samples_per_frame,
                 "action_view": spec.action.name,
                 "action_shape": spec.action.shape,
                 "channel_remaps": dict(spec.channels),
+                "lerobot_fields": list(spec.fields),
+                "depth": {
+                    "enabled": spec.depth.enabled,
+                    "cameras": list(spec.depth.cameras),
+                    "representation": spec.depth.representation,
+                    "storage": spec.depth.storage,
+                },
+                "capture_segments_detected": (
+                    max(
+                        (
+                            int(row.get("observation.capture_segment", 0))
+                            for row in rows
+                        ),
+                        default=-1,
+                    )
+                    + 1
+                ),
+                "segment_gap_threshold_s": spec.segments.gap_threshold_s,
+                "split_capture_segments_into_episodes": (
+                    spec.segments.split_episodes
+                ),
                 "rotation_representation": "ROT6D_FIRST_TWO_COLUMNS",
                 "task_description": task,
             },

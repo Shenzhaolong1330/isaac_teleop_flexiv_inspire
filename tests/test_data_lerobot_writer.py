@@ -152,6 +152,63 @@ def test_writer_infers_configured_camera_resolution(tmp_path):
     ]["shape"] == (120, 160, 3)
 
 
+def test_writer_exports_selected_head_depth_and_segment_fields(tmp_path):
+    FakeDataset.instances.clear()
+    row = valid_row()
+    row.update(
+        {
+            "observation.depth.head": {
+                "z16": np.asarray([[1, 2], [3, 4]], dtype="<u2").tobytes(),
+                "width": 2,
+                "height": 2,
+                "scale_m": 0.001,
+                "intrinsics": (100.0, 101.0, 1.0, 1.0),
+            },
+            "observation.depth.head.valid": True,
+            "observation.source_timestamp_ns": 123456789,
+            "observation.source_gap_s": 0.3,
+            "observation.capture_segment": 1,
+            "observation.frame_in_segment": 0,
+            "observation.capture_segment_start": True,
+        }
+    )
+    fields = (
+        "observation.images.head",
+        "observation.depth.head",
+        "observation.depth_scale_m.head",
+        "observation.depth_intrinsics.head",
+        "observation.source_timestamp_ns",
+        "observation.source_gap_s",
+        "observation.capture_segment",
+        "observation.frame_in_segment",
+        "observation.capture_segment_start",
+        "action",
+    )
+
+    result = export_rows(
+        [row],
+        output_root=tmp_path / "depth-dataset",
+        repo_id="local/test-depth",
+        task="test task",
+        dataset_class=FakeDataset,
+        fields=fields,
+        depth_cameras=("head",),
+    )
+
+    created = FakeDataset.instances[0]
+    assert set(created.frames[0]).difference({"task"}) == set(fields)
+    assert created.frames[0]["observation.depth.head"].dtype == np.uint16
+    assert created.frames[0]["observation.depth.head"].shape == (2, 2)
+    assert created.frames[0]["observation.depth.head"].tolist() == [[1, 2], [3, 4]]
+    assert created.create_kwargs["features"]["observation.depth.head"] == {
+        "dtype": "uint16",
+        "shape": (2, 2),
+        "names": None,
+    }
+    assert result.frames_dropped_invalid_depth == 0
+    assert result.episodes_written == 1
+
+
 def test_hand_field_timing_uses_each_modbus_read_timestamp():
     row = valid_row()
     row["timestamp_ns"] = 2_000_000_000

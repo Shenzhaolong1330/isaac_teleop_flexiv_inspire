@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from pathlib import Path
-from typing import Iterable
+from dataclasses import replace
+from typing import Iterable, Mapping
 
 from .alignment import Pose, TimedSample
 from isaac_teleop_core.rotation6d import quaternion_xyzw_to_rotation6d
@@ -95,6 +97,40 @@ def _payload_value(topic: str, payload):
     return payload
 
 
+def _camera_depth_value(payload) -> tuple[dict | None, str]:
+    """Decode exact camera Z16 depth while keeping RGB independently valid."""
+
+    if not isinstance(payload, Mapping) or "depth_z16_b64" not in payload:
+        return None, "depth-not-recorded"
+    try:
+        width = int(payload["depth_width"])
+        height = int(payload["depth_height"])
+        scale_m = float(payload["depth_scale_m"])
+        intrinsics = payload["depth_intrinsics"]
+        if not isinstance(intrinsics, Mapping):
+            raise TypeError("depth_intrinsics is not a mapping")
+        intrinsics_xy = tuple(
+            float(intrinsics[name]) for name in ("fx", "fy", "ppx", "ppy")
+        )
+        z16 = base64.b64decode(payload["depth_z16_b64"], validate=True)
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, f"depth-decode-failed:{exc}"
+    if width <= 0 or height <= 0 or len(z16) != width * height * 2:
+        return None, "depth-z16-size-mismatch"
+    if not math.isfinite(scale_m) or scale_m <= 0.0:
+        return None, "depth-scale-invalid"
+    if not all(math.isfinite(value) for value in intrinsics_xy):
+        return None, "depth-intrinsics-invalid"
+    return {
+        "z16": z16,
+        "width": width,
+        "height": height,
+        "scale_m": scale_m,
+        "intrinsics": intrinsics_xy,
+        "frame_id": str(payload.get("depth_frame_id", "")),
+    }, ""
+
+
 def _stream_name(topic: str) -> str:
     normalized = topic.lstrip("/")
     parts = normalized.split("/")
@@ -147,20 +183,39 @@ def load_json_mcap_streams(paths: Iterable[str | Path]) -> dict[str, list[TimedS
                     timing_reason = str(document.get("timing_invalid_reason", "timing-unmapped"))
                     reason = ";".join(filter(None, (reason, timing_reason)))
                     effective_valid = False
-                streams.setdefault(topic, []).append(
-                    TimedSample(
-                        value=payload,
-                        source_time_ns=int(document["source_time_ns"]),
-                        host_receive_time_ns=int(document["host_receive_time_ns"]),
-                        sequence=int(document["sequence"]),
-                        valid=effective_valid,
-                        invalid_reason=reason,
-                        source_clock_domain=source_domain,
-                        host_clock_domain=host_domain,
-                        mapped_host_time_ns=mapped,
-                        require_explicit_mapping=True,
-                    )
+                sample = TimedSample(
+                    value=payload,
+                    source_time_ns=int(document["source_time_ns"]),
+                    host_receive_time_ns=int(document["host_receive_time_ns"]),
+                    sequence=int(document["sequence"]),
+                    valid=effective_valid,
+                    invalid_reason=reason,
+                    source_clock_domain=source_domain,
+                    host_clock_domain=host_domain,
+                    mapped_host_time_ns=mapped,
+                    require_explicit_mapping=True,
                 )
+                streams.setdefault(topic, []).append(sample)
+                raw_payload = document["payload"]
+                if topic.startswith("camera/") and topic.endswith("/jpeg"):
+                    depth, depth_reason = _camera_depth_value(raw_payload)
+                    if depth is not None or (
+                        isinstance(raw_payload, Mapping)
+                        and "depth_z16_b64" in raw_payload
+                    ):
+                        camera = topic.split("/")[1]
+                        streams.setdefault(
+                            f"camera/{camera}/depth_z16", []
+                        ).append(
+                            replace(
+                                sample,
+                                value=depth,
+                                valid=effective_valid and depth is not None,
+                                invalid_reason=";".join(
+                                    filter(None, (reason, depth_reason))
+                                ),
+                            )
+                        )
     for samples in streams.values():
         samples.sort(
             key=lambda sample: (
@@ -170,6 +225,7 @@ def load_json_mcap_streams(paths: Iterable[str | Path]) -> dict[str, list[TimedS
                 else sample.host_receive_time_ns,
             )
         )
+    _derive_compact_arm_streams(streams)
     if unsupported_channels and not streams:
         raise RuntimeError(
             "MCAP contains only non-JSON ROS CDR channels. Install the ROS "
@@ -178,6 +234,54 @@ def load_json_mcap_streams(paths: Iterable[str | Path]) -> dict[str, list[TimedS
             + ", ".join(sorted(unsupported_channels)[:10])
         )
     return streams
+
+
+def _derive_compact_arm_streams(
+    streams: dict[str, list[TimedSample]],
+) -> None:
+    """Recreate exporter views from the compact native arm/state stream."""
+
+    for side in ("left", "right"):
+        state_name = f"robot/{side}_arm/state"
+        states = streams.get(state_name, [])
+        if not states:
+            continue
+        derived: dict[str, list[TimedSample]] = {
+            "tcp_pose": [],
+            "tcp_twist": [],
+            "raw_ft": [],
+            "tcp_wrench": [],
+        }
+        for sample in states:
+            payload = sample.value
+            if not isinstance(payload, Mapping):
+                continue
+            pose = payload.get("tcp_pose_rdk_xyz_wxyz")
+            if isinstance(pose, (list, tuple)) and len(pose) == 7:
+                derived["tcp_pose"].append(
+                    replace(
+                        sample,
+                        value=Pose(
+                            tuple(float(value) for value in pose[:3]),
+                            tuple(float(value) for value in (pose[4], pose[5], pose[6], pose[3])),
+                        ),
+                    )
+                )
+            for output, field_name in (
+                ("tcp_twist", "tcp_velocity"),
+                ("raw_ft", "raw_ft"),
+                ("tcp_wrench", "external_wrench"),
+            ):
+                values = payload.get(field_name)
+                if isinstance(values, (list, tuple)) and len(values) == 6:
+                    derived[output].append(
+                        replace(
+                            sample,
+                            value={"values": [float(value) for value in values]},
+                        )
+                    )
+        for suffix, samples in derived.items():
+            streams.setdefault(f"robot/{side}_arm/{suffix}", samples)
 
 
 def _ros_time_ns(value) -> int:

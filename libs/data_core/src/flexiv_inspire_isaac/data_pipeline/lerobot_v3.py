@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 
 from isaac_teleop_core.rotation6d import rotation6d_to_matrix
-from .export_spec import ActionView
+from .export_spec import ActionView, CORE_LEROBOT_FIELDS
 
 
 FPS = 30
@@ -50,12 +50,17 @@ HAND_FIELDS = (
 HAND_FIELD_TIMING_NAMES = tuple(
     f"{side}_{field}" for side in ("left", "right") for field in HAND_FIELDS
 )
+ARM_HIGH_RATE_WIDTH_PER_ARM = 74
 
 
 def lerobot_features(
     action: ActionView = ActionView(),
     image_shapes: Mapping[str, tuple[int, int, int]] | None = None,
+    high_rate_arm_samples_per_frame: int = 0,
+    fields: Sequence[str] | None = None,
+    depth_shapes: Mapping[str, tuple[int, int]] | None = None,
 ) -> dict[str, dict]:
+    selected = set(CORE_LEROBOT_FIELDS if fields is None else fields)
     features: dict[str, dict] = {
         "observation.arm_pose": {
             "dtype": "float32",
@@ -212,13 +217,80 @@ def lerobot_features(
             "names": [f"{field}_{name}" for name in hand_actuator_names],
         }
     for camera in CAMERAS:
+        if f"observation.images.{camera}" not in selected:
+            continue
         shape = (240, 424, 3) if image_shapes is None else image_shapes[camera]
         features[f"observation.images.{camera}"] = {
             "dtype": "video",
             "shape": shape,
             "names": ["height", "width", "channel"],
         }
-    return features
+    if high_rate_arm_samples_per_frame:
+        features["observation.arm_high_rate"] = {
+            "dtype": "float32",
+            "shape": (
+                high_rate_arm_samples_per_frame
+                * ARM_HIGH_RATE_WIDTH_PER_ARM
+                * 2,
+            ),
+            "names": None,
+        }
+        features["observation.arm_high_rate_valid"] = {
+            "dtype": "bool",
+            "shape": (high_rate_arm_samples_per_frame * 2,),
+            "names": None,
+        }
+        features["observation.arm_high_rate_age_s"] = {
+            "dtype": "float32",
+            "shape": (high_rate_arm_samples_per_frame * 2,),
+            "names": None,
+        }
+    for camera, shape in (depth_shapes or {}).items():
+        features[f"observation.depth.{camera}"] = {
+            "dtype": "uint16",
+            "shape": shape,
+            "names": None,
+        }
+        features[f"observation.depth_scale_m.{camera}"] = {
+            "dtype": "float32",
+            "shape": (1,),
+            "names": ["meters_per_z16_unit"],
+        }
+        features[f"observation.depth_intrinsics.{camera}"] = {
+            "dtype": "float32",
+            "shape": (4,),
+            "names": ["fx", "fy", "ppx", "ppy"],
+        }
+    features.update(
+        {
+            "observation.source_timestamp_ns": {
+                "dtype": "int64",
+                "shape": (1,),
+                "names": ["mapped_host_time_ns"],
+            },
+            "observation.source_gap_s": {
+                "dtype": "float32",
+                "shape": (1,),
+                "names": ["seconds_since_previous_source_frame"],
+            },
+            "observation.capture_segment": {
+                "dtype": "int64",
+                "shape": (1,),
+                "names": ["capture_segment"],
+            },
+            "observation.frame_in_segment": {
+                "dtype": "int64",
+                "shape": (1,),
+                "names": ["frame_in_segment"],
+            },
+            "observation.capture_segment_start": {
+                "dtype": "bool",
+                "shape": (1,),
+                "names": ["capture_segment_start"],
+            },
+        }
+    )
+    return {name: feature for name, feature in features.items() if name in selected}
 
 
 def _vector(value: Any, length: int, *, dtype=np.float32) -> np.ndarray:
@@ -269,6 +341,77 @@ def _field_vector(value: Any, field: str, length: int, *, dtype=np.float32) -> n
     if not isinstance(value, Mapping):
         return _vector(value, length, dtype=dtype)
     return _vector(None, length, dtype=dtype)
+
+
+def _native_arm_state_vector(value: Any) -> np.ndarray:
+    """Pack one complete native arm state into a stable 74-D vector."""
+
+    if not isinstance(value, Mapping):
+        return np.full(ARM_HIGH_RATE_WIDTH_PER_ARM, np.nan, dtype=np.float32)
+    joint_fields = (
+        "q",
+        "dq",
+        "tau",
+        "tau_des",
+        "tau_ext",
+        "tau_interact",
+        "temperature",
+    )
+    parts = [_field_vector(value, field, 7) for field in joint_fields]
+    parts.extend(
+        (
+            _vector(value.get("tcp_pose_rdk_xyz_wxyz"), 7),
+            _vector(value.get("tcp_velocity"), 6),
+            _vector(value.get("raw_ft"), 6),
+            _vector(value.get("external_wrench"), 6),
+        )
+    )
+    result = np.concatenate(parts).astype(np.float32, copy=False)
+    if result.shape != (ARM_HIGH_RATE_WIDTH_PER_ARM,):
+        raise ValueError("native arm high-rate state is not 74-D")
+    return result
+
+
+def _arm_high_rate_frame(
+    row: Mapping[str, Any], samples_per_frame: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    packed: list[np.ndarray] = []
+    valid_flat: list[bool] = []
+    age_flat: list[float] = []
+    histories = {
+        side: list(row.get(f"observation.{side}_arm.high_rate", ()))
+        for side in ("left", "right")
+    }
+    validities = {
+        side: list(row.get(f"observation.{side}_arm.high_rate.valid", ()))
+        for side in ("left", "right")
+    }
+    ages = {
+        side: list(row.get(f"observation.{side}_arm.high_rate.age_ns", ()))
+        for side in ("left", "right")
+    }
+    for side in ("left", "right"):
+        if not all(
+            len(values) == samples_per_frame
+            for values in (histories[side], validities[side], ages[side])
+        ):
+            raise ValueError(f"{side} arm high-rate history length mismatch")
+    for index in range(samples_per_frame):
+        for side in ("left", "right"):
+            is_valid = bool(validities[side][index])
+            packed.append(
+                _native_arm_state_vector(histories[side][index])
+                if is_valid
+                else np.full(ARM_HIGH_RATE_WIDTH_PER_ARM, np.nan, dtype=np.float32)
+            )
+            valid_flat.append(is_valid)
+            age_ns = ages[side][index]
+            age_flat.append(np.nan if age_ns is None else float(age_ns) / 1e9)
+    return (
+        np.concatenate(packed).astype(np.float32, copy=False),
+        np.asarray(valid_flat, dtype=bool),
+        np.asarray(age_flat, dtype=np.float32),
+    )
 
 
 
@@ -350,6 +493,41 @@ def _decode_image(
     return image
 
 
+def _decode_depth(
+    value: Any, expected_shape: tuple[int, int] | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not isinstance(value, Mapping):
+        raise ValueError("depth is not a decoded Z16 mapping")
+    try:
+        width = int(value["width"])
+        height = int(value["height"])
+        raw = value["z16"]
+        scale_m = float(value["scale_m"])
+        intrinsics = np.asarray(value["intrinsics"], dtype=np.float32).reshape(-1)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"depth metadata is invalid: {exc}") from exc
+    if not isinstance(raw, (bytes, bytearray)):
+        raise ValueError("depth Z16 payload is not bytes")
+    image = np.frombuffer(raw, dtype="<u2")
+    if image.size != width * height:
+        raise ValueError("depth Z16 payload size does not match dimensions")
+    image = image.reshape(height, width).astype(np.uint16, copy=False)
+    if expected_shape is not None and image.shape != expected_shape:
+        raise ValueError(
+            f"depth shape changed within episode: expected {expected_shape}, "
+            f"got {image.shape}"
+        )
+    if not np.isfinite(scale_m) or scale_m <= 0.0:
+        raise ValueError("depth scale must be finite and positive")
+    if intrinsics.shape != (4,) or not np.all(np.isfinite(intrinsics)):
+        raise ValueError("depth intrinsics must be finite [fx,fy,ppx,ppy]")
+    return (
+        image,
+        np.asarray([scale_m], dtype=np.float32),
+        intrinsics,
+    )
+
+
 def _ros_time_ns(value: Any) -> int | None:
     if not isinstance(value, Mapping):
         return None
@@ -405,18 +583,36 @@ def aligned_row_to_frame(
     task: str,
     action: ActionView = ActionView(),
     image_shapes: Mapping[str, tuple[int, int, int]] | None = None,
+    high_rate_arm_samples_per_frame: int = 0,
+    fields: Sequence[str] | None = None,
+    depth_shapes: Mapping[str, tuple[int, int]] | None = None,
 ) -> dict[str, Any]:
     if not task:
         raise ValueError("LeRobot frames require a non-empty task")
+    selected = set(CORE_LEROBOT_FIELDS if fields is None else fields)
     images = {}
     for camera in CAMERAS:
         key = f"observation.images.{camera}"
+        if key not in selected:
+            continue
         if not row.get(f"{key}.valid", False):
             # Video features cannot represent a missing frame. Drop the aligned
             # row at the caller rather than inserting a black image.
             raise ValueError(f"required image {camera} is invalid")
         expected_shape = None if image_shapes is None else image_shapes[camera]
         images[key] = _decode_image(row[key], expected_shape)
+
+    depths: dict[str, Any] = {}
+    for camera, expected_shape in (depth_shapes or {}).items():
+        key = f"observation.depth.{camera}"
+        if key not in selected:
+            continue
+        if not row.get(f"{key}.valid", False):
+            raise ValueError(f"required depth {camera} is invalid")
+        depth, scale, intrinsics = _decode_depth(row.get(key), expected_shape)
+        depths[key] = depth
+        depths[f"observation.depth_scale_m.{camera}"] = scale
+        depths[f"observation.depth_intrinsics.{camera}"] = intrinsics
 
     arm_pose = np.concatenate(
         [
@@ -531,8 +727,41 @@ def aligned_row_to_frame(
         "observation.age_s": age_s,
         "action": _validated_action(row.get("action"), action),
         **images,
+        **depths,
+        "observation.source_timestamp_ns": np.asarray(
+            [int(row.get("observation.source_timestamp_ns", row.get("timestamp_ns", 0)))],
+            dtype=np.int64,
+        ),
+        "observation.source_gap_s": np.asarray(
+            [float(row.get("observation.source_gap_s", 0.0))],
+            dtype=np.float32,
+        ),
+        "observation.capture_segment": np.asarray(
+            [int(row.get("observation.capture_segment", 0))], dtype=np.int64
+        ),
+        "observation.frame_in_segment": np.asarray(
+            [int(row.get("observation.frame_in_segment", 0))], dtype=np.int64
+        ),
+        "observation.capture_segment_start": np.asarray(
+            [bool(row.get("observation.capture_segment_start", False))],
+            dtype=bool,
+        ),
     }
-    return frame
+    if high_rate_arm_samples_per_frame:
+        history, history_valid, history_age_s = _arm_high_rate_frame(
+            row, high_rate_arm_samples_per_frame
+        )
+        frame.update(
+            {
+                "observation.arm_high_rate": history,
+                "observation.arm_high_rate_valid": history_valid,
+                "observation.arm_high_rate_age_s": history_age_s,
+            }
+        )
+    return {
+        "task": task,
+        **{name: value for name, value in frame.items() if name in selected},
+    }
 
 
 @dataclass(frozen=True)
@@ -541,6 +770,8 @@ class ExportResult:
     frames_written: int
     frames_dropped_invalid_action: int
     frames_dropped_invalid_image: int
+    frames_dropped_invalid_depth: int
+    episodes_written: int
     reload_length: int
 
 
@@ -553,34 +784,55 @@ def export_rows(
     dataset_class=None,
     action: ActionView = ActionView(),
     fps: float = FPS,
+    high_rate_arm_samples_per_frame: int = 0,
+    fields: Sequence[str] | None = None,
+    depth_cameras: Sequence[str] = (),
+    split_episodes: bool = False,
 ) -> ExportResult:
-    image_shapes: dict[str, tuple[int, int, int]] | None = None
-    for row in rows:
-        validity = row.get("valid", {})
-        if row.get("action") is None or (
-            isinstance(validity, Mapping)
-            and "action" in validity
-            and not bool(validity["action"])
-        ):
+    selected = set(CORE_LEROBOT_FIELDS if fields is None else fields)
+    selected_image_cameras = tuple(
+        camera
+        for camera in CAMERAS
+        if f"observation.images.{camera}" in selected
+    )
+    image_shapes: dict[str, tuple[int, int, int]] = {}
+    if selected_image_cameras:
+        for row in rows:
+            try:
+                candidate = {
+                    camera: tuple(
+                        int(value)
+                        for value in _decode_image(
+                            row[f"observation.images.{camera}"]
+                        ).shape
+                    )
+                    for camera in selected_image_cameras
+                    if row.get(f"observation.images.{camera}.valid", False)
+                }
+            except (KeyError, ValueError):
+                continue
+            if len(candidate) == len(selected_image_cameras):
+                image_shapes = candidate
+                break
+        if len(image_shapes) != len(selected_image_cameras):
+            raise ValueError("no fully valid aligned image frames to export")
+
+    depth_shapes: dict[str, tuple[int, int]] = {}
+    for camera in depth_cameras:
+        key = f"observation.depth.{camera}"
+        if key not in selected:
             continue
-        try:
-            candidate = {
-                camera: tuple(
-                    int(value)
-                    for value in _decode_image(
-                        row[f"observation.images.{camera}"]
-                    ).shape
-                )
-                for camera in CAMERAS
-                if row.get(f"observation.images.{camera}.valid", False)
-            }
-        except (KeyError, ValueError):
-            continue
-        if len(candidate) == len(CAMERAS):
-            image_shapes = candidate
+        for row in rows:
+            if not row.get(f"{key}.valid", False):
+                continue
+            try:
+                depth, _, _ = _decode_depth(row.get(key))
+            except ValueError:
+                continue
+            depth_shapes[camera] = tuple(int(value) for value in depth.shape)
             break
-    if image_shapes is None:
-        raise ValueError("no fully valid aligned frames to export")
+        if camera not in depth_shapes:
+            raise ValueError(f"no valid {camera} depth frames to export")
 
     if dataset_class is None:
         try:
@@ -609,7 +861,13 @@ def export_rows(
     dataset = dataset_class.create(
         repo_id=repo_id,
         fps=int(fps),
-        features=lerobot_features(action, image_shapes),
+        features=lerobot_features(
+            action,
+            image_shapes,
+            high_rate_arm_samples_per_frame,
+            fields,
+            depth_shapes,
+        ),
         root=root,
         robot_type="flexiv_rizon4s_dual_inspire_dftp2",
         use_videos=True,
@@ -617,6 +875,10 @@ def export_rows(
     written = 0
     dropped_action = 0
     dropped_image = 0
+    dropped_depth = 0
+    episodes_written = 0
+    frames_in_episode = 0
+    active_segment: int | None = None
     try:
         for row in rows:
             validity = row.get("valid", {})
@@ -629,17 +891,42 @@ def export_rows(
                 dropped_action += 1
                 continue
             try:
-                frame = aligned_row_to_frame(row, task, action, image_shapes)
+                frame = aligned_row_to_frame(
+                    row,
+                    task,
+                    action,
+                    image_shapes,
+                    high_rate_arm_samples_per_frame,
+                    fields,
+                    depth_shapes,
+                )
             except ValueError as exc:
                 if "required image" in str(exc):
                     dropped_image += 1
                     continue
+                if "required depth" in str(exc):
+                    dropped_depth += 1
+                    continue
                 raise
+            row_segment = int(row.get("observation.capture_segment", 0))
+            if (
+                split_episodes
+                and active_segment is not None
+                and row_segment != active_segment
+                and frames_in_episode > 0
+            ):
+                dataset.save_episode()
+                episodes_written += 1
+                frames_in_episode = 0
             dataset.add_frame(frame)
             written += 1
+            frames_in_episode += 1
+            active_segment = row_segment
         if written == 0:
             raise ValueError("no fully valid aligned frames to export")
-        dataset.save_episode()
+        if frames_in_episode > 0:
+            dataset.save_episode()
+            episodes_written += 1
         dataset.finalize()
     except Exception:
         # finalize is idempotent in 0.6.0 and closes parquet/video writers.
@@ -665,6 +952,22 @@ def export_rows(
         "observation.valid": (len(VALIDITY_FIELDS),),
         "observation.age_s": (len(VALIDITY_FIELDS),),
     }
+    if high_rate_arm_samples_per_frame:
+        expected_shapes.update(
+            {
+                "observation.arm_high_rate": (
+                    high_rate_arm_samples_per_frame
+                    * ARM_HIGH_RATE_WIDTH_PER_ARM
+                    * 2,
+                ),
+                "observation.arm_high_rate_valid": (
+                    high_rate_arm_samples_per_frame * 2,
+                ),
+                "observation.arm_high_rate_age_s": (
+                    high_rate_arm_samples_per_frame * 2,
+                ),
+            }
+        )
     expected_shapes.update({
         f"observation.arm_{field}": (14,)
         for field in ("q", "dq", "tau", "tau_des", "tau_ext", "tau_interact", "temperature")
@@ -673,22 +976,58 @@ def export_rows(
         f"observation.hand_{field}": (12,)
         for field in ("position", "actual_force", "current", "temperature", "error", "status")
     })
+    expected_shapes.update(
+        {
+            f"observation.depth.{camera}": shape
+            for camera, shape in depth_shapes.items()
+        }
+    )
+    expected_shapes.update(
+        {
+            f"observation.depth_scale_m.{camera}": (1,)
+            for camera in depth_shapes
+        }
+    )
+    expected_shapes.update(
+        {
+            f"observation.depth_intrinsics.{camera}": (4,)
+            for camera in depth_shapes
+        }
+    )
+    expected_shapes.update(
+        {
+            "observation.source_timestamp_ns": (1,),
+            "observation.source_gap_s": (1,),
+            "observation.capture_segment": (1,),
+            "observation.frame_in_segment": (1,),
+            "observation.capture_segment_start": (1,),
+        }
+    )
     for key, expected in expected_shapes.items():
-        if tuple(np.asarray(sample[key]).shape) != expected:
+        if key not in selected:
+            continue
+        actual = tuple(np.asarray(sample[key]).shape)
+        # LeRobot/HuggingFace stores declared one-element numeric features as
+        # scalar Value columns and therefore reloads them with shape ().
+        accepted = {expected, ()} if expected == (1,) else {expected}
+        if actual not in accepted:
             raise RuntimeError(f"reloaded {key} shape is not {expected}")
-    tactile_reload = np.asarray(sample["observation.tactile"])
-    if (
-        not np.issubdtype(tactile_reload.dtype, np.integer)
-        or np.any(tactile_reload < 0)
-        or np.any(tactile_reload > 65535)
-    ):
-        raise RuntimeError(
-            "reloaded tactile values must preserve the uint16 value domain"
-        )
+    if "observation.tactile" in selected:
+        tactile_reload = np.asarray(sample["observation.tactile"])
+        if (
+            not np.issubdtype(tactile_reload.dtype, np.integer)
+            or np.any(tactile_reload < 0)
+            or np.any(tactile_reload > 65535)
+        ):
+            raise RuntimeError(
+                "reloaded tactile values must preserve the uint16 value domain"
+            )
     return ExportResult(
         str(root.resolve()),
         written,
         dropped_action,
         dropped_image,
+        dropped_depth,
+        episodes_written,
         reload_length,
     )

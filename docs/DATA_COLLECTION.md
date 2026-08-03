@@ -67,9 +67,17 @@ robot convert --action-view absolute_joint_position
 robot convert --action-view absolute_cartesian_pose
 ```
 
-默认动作视图来自 `config/recording.yaml`；三种视图分别是 30 维实际下发命令、
-14 维双臂绝对关节位置和 18 维 world 下双臂绝对 EE 位姿。输出写入
+输入 episode、输出目录、动作视图以及最终写进 LeRobot 的字段都在
+`config/conversion.yaml` 配置。`lerobot_export.fields` 是字段白名单；当前还会
+把头部相机原始 Z16 深度、深度比例和内参写进 Parquet。三种动作视图分别是
+30 维实际下发命令、14 维双臂绝对关节位置和 18 维 world 下双臂绝对 EE 位姿。
+输出写入
 `artifacts/lerobot/<dataset>/<episode>/<action-view>/`，已有非空目录不会被覆盖。
+
+中踏板松开时若启用了 `record_only_while_pedal_pressed`，源 MCAP 会保留真实
+时间空档。转换不会复制旧图像或跨空档插值；每帧额外导出源时间戳、空档时长、
+片段编号和片段内帧号。`segments.split_episodes: false` 保留原始任务 episode；
+改为 `true` 时才把空档两侧写成不同的 LeRobot episode。
 
 `config/site.yaml` 现在只是组合入口，不再堆全部参数：
 

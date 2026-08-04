@@ -610,6 +610,9 @@ def test_first_direct_policy_action_authorizes_and_arms_itself() -> None:
             collision_clear=True,
         )
         bridge._arbiter.update_gates(bridge._last_gate_inputs)
+        # Production _update_gates() also consumes the pending token and arms
+        # before returning. The direct-action helper must accept that state.
+        bridge._arbiter.arm(CommandSource.POLICY)
 
     bridge._update_gates = update_gates
 

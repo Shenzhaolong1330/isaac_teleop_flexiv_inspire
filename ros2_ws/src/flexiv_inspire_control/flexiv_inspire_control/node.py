@@ -890,11 +890,16 @@ class ControlBridge(Node):
             self._hold_sent_for_latch = False
 
         self._update_gates(now_monotonic_ns)
-        if self._arbiter.snapshot.state is not ControlState.READY:
-            raise RuntimeError("policy action could not return bridge to READY")
-        if not self._gates_allow_arm(self._last_gate_inputs):
-            raise RuntimeError("robot hardware is not ready for policy action")
-        self._arbiter.arm(CommandSource.POLICY)
+        prepared_state = self._arbiter.snapshot.state
+        if prepared_state is ControlState.READY:
+            if not self._gates_allow_arm(self._last_gate_inputs):
+                raise RuntimeError("robot hardware is not ready for policy action")
+            self._arbiter.arm(CommandSource.POLICY)
+        elif prepared_state is not ControlState.POLICY_ARMED:
+            raise RuntimeError(
+                "policy action could not arm bridge: "
+                f"{prepared_state.value}"
+            )
 
     def _execute_chunk(
         self,

@@ -24,6 +24,13 @@ clients should open separate subscriptions for high-rate state and images to
 avoid transport head-of-line blocking. `INTERPOLATE` is limited to floating
 numeric channels and uses quaternion SLERP for `tcp_pose`.
 
+External LeRobot environments use the portable Python 3.10+ packages in
+`libs/policy_contracts` and `libs/policy_client`. They contain no ROS, RDK,
+Inspire, or RealSense dependency. `SyncPolicyProfileClient` compiles a named
+profile against `DescribeSystem`, rejects missing/stale channels, and produces
+the exact `observation.state` and image keys declared by the dataset contract.
+It is read-only: P3 exposes no lease or action call.
+
 Smoke the real wire path after starting the policy server:
 
 ```bash

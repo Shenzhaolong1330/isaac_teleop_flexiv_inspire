@@ -22,6 +22,7 @@ from policy_contracts import (
     matrix_to_rotvec,
     native_action30_to_policy24,
     policy_action24_to_native30,
+    quaternion_xyzw_to_matrix,
     rotation6d_to_matrix,
     rotvec_to_matrix,
 )
@@ -90,6 +91,14 @@ def test_so3_rotvec_roundtrip(rotvec) -> None:
     recovered = matrix_to_rotvec(matrix)
 
     assert np.allclose(rotvec_to_matrix(recovered), matrix, atol=1e-7)
+
+
+def test_xyzw_quaternion_is_normalized_and_converted_to_so3() -> None:
+    matrix = quaternion_xyzw_to_matrix([0.0, 0.0, 2.0, 2.0])
+
+    assert np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-8)
+    assert np.isclose(np.linalg.det(matrix), 1.0)
+    assert np.allclose(matrix @ [1.0, 0.0, 0.0], [0.0, 1.0, 0.0])
 
 
 def test_native_and_policy_action_roundtrip_preserves_se3_and_hands() -> None:

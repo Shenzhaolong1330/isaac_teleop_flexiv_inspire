@@ -206,6 +206,7 @@ flexiv-rdk-daemon \
 终端 B：
 
 ```bash
+scripts/generate_loopback_policy_cert.sh  # 只需一次；已有证书时会拒绝覆盖
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
 flexiv-inspire-camera-verify --config "$CAMERA_CONFIG"
@@ -647,6 +648,19 @@ flexiv-inspire-policy-server \
   --server-cert "$ROOT/certs/server.crt" \
   --server-key "$ROOT/certs/private/server.key"
 ```
+
+旧 `dual_arm_teleop` 的 Python 3.10 环境只安装两个可移植小包，不安装本仓库
+Python 3.12 主包，也不替换它现有的 LeRobot：
+
+```bash
+/home/hb/miniconda3/envs/flexiv_teleop/bin/pip install \
+  -e "$ROOT/libs/policy_contracts" \
+  -e "$ROOT/libs/policy_client"
+```
+
+P3 的 `isaac_flexiv_rpc` 强制 `shadow_only: true`：它用 `GetSnapshot` 读取与
+checkpoint metadata 完全一致的观测，策略动作只校验和打印，绝不下发真机。
+本地 Home/Enable/F/T 清零仍由本仓库负责。
 
 远程策略显式绑定机器人地址时必须使用 mTLS：
 

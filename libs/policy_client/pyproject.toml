@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flexiv-inspire-policy-client"
+version = "0.1.0"
+description = "Portable PolicyData v2 client for Flexiv/Inspire policy profiles"
+requires-python = ">=3.10"
+dependencies = [
+  "flexiv-inspire-policy-contracts==0.1.0",
+  "grpcio>=1.71,<2",
+  "numpy>=1.24",
+  "Pillow>=10",
+  "protobuf>=5.29,<7",
+]
+
+[tool.setuptools]
+packages = ["policy_runtime_client", "policy_runtime_client.generated"]
+
+[tool.setuptools.package-dir]
+"policy_runtime_client" = "src/policy_runtime_client"
+"policy_runtime_client.generated" = "src/policy_runtime_client/generated"

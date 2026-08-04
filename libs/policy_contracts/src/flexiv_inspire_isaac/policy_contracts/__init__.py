@@ -19,6 +19,7 @@ from .profiles import (
 from .rotation import (
     matrix_to_rotation6d,
     matrix_to_rotvec,
+    quaternion_xyzw_to_matrix,
     rotation6d_to_matrix,
     rotvec_to_matrix,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "matrix_to_rotvec",
     "native_action30_to_policy24",
     "policy_action24_to_native30",
+    "quaternion_xyzw_to_matrix",
     "rotation6d_to_matrix",
     "rotvec_to_matrix",
 ]

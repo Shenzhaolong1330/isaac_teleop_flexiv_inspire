@@ -47,6 +47,24 @@ def matrix_to_rotation6d(value: Sequence[Sequence[float]]) -> np.ndarray:
     return np.concatenate((matrix[:, 0], matrix[:, 1]))
 
 
+def quaternion_xyzw_to_matrix(value: Sequence[float]) -> np.ndarray:
+    """Convert a finite, non-zero XYZW quaternion to SO(3)."""
+
+    x, y, z, w = _vector(value, 4, "quaternion xyzw")
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm < 1e-12:
+        raise ValueError("quaternion norm is too small")
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    return np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
 def rotvec_to_matrix(value: Sequence[float]) -> np.ndarray:
     vector = _vector(value, 3, "rotation vector")
     angle = float(np.linalg.norm(vector))

@@ -4,6 +4,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PROJECT_ROOT}/envs/ros-py312/bin/python"
 PROTO_DIR="${PROJECT_ROOT}/libs/rpc_interfaces/proto"
 OUTPUT_DIR="${PROJECT_ROOT}/apps/policy_server/src/flexiv_inspire_isaac/policy_api/generated"
+PORTABLE_OUTPUT_DIR="${PROJECT_ROOT}/libs/policy_client/src/policy_runtime_client/generated"
 "${PYTHON_BIN}" -m grpc_tools.protoc \
   -I"${PROTO_DIR}" \
   --python_out="${OUTPUT_DIR}" \
@@ -14,5 +15,10 @@ sed -i 's/^import policy_service_v1_pb2 as /from . import policy_service_v1_pb2 
   "${OUTPUT_DIR}/policy_service_v1_pb2_grpc.py"
 sed -i 's/^import policy_data_v2_pb2 as /from . import policy_data_v2_pb2 as /' \
   "${OUTPUT_DIR}/policy_data_v2_pb2_grpc.py"
+mkdir -p "${PORTABLE_OUTPUT_DIR}"
+cp \
+  "${OUTPUT_DIR}/policy_data_v2_pb2.py" \
+  "${OUTPUT_DIR}/policy_data_v2_pb2_grpc.py" \
+  "${PORTABLE_OUTPUT_DIR}/"
 PYTHONPATH="${PROJECT_ROOT}/libs/control_core/src:${PROJECT_ROOT}/apps/session_manager/src:${PROJECT_ROOT}/libs/data_core/src" \
   "${PYTHON_BIN}" -m py_compile "${OUTPUT_DIR}"/*.py

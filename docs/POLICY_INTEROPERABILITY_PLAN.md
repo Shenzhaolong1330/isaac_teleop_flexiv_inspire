@@ -259,9 +259,12 @@ Home、Enable 和 F/T 清零仍由本机 `robot reset/record` 流程负责。RPC
 
 ## 7. 分阶段交付与验收
 
-当前实施状态：P-1、P0、P1 已完成；P2 的严格 profile、批量合并 exporter 和本仓库
-回归已完成。P2 剩余的跨仓库 dataset/batch/短训练冒烟与 P3、P4 继续按以下门禁
-推进。所有新能力均为显式 opt-in，默认 `config/conversion.yaml` 和 v1 RPC 未改变。
+当前实施状态：P-1、P0、P1 已完成；P2 的严格 profile、批量合并 exporter、跨
+LeRobot 0.6/0.3.4 dataset 加载、batch 冒烟和 LeRobot 0.3.4 ACT 单步优化均已完成。
+P3 的 Python 3.10+ 可移植 client 与 `isaac_flexiv_rpc` shadow Robot 已完成，真实跨
+环境 gRPC snapshot 和 TLS 连接已验证；长时间 shadow/checkpoint 现场验收仍待执行。
+P4 真机 action stream 尚未启用。所有新能力均为显式 opt-in，默认
+`config/conversion.yaml`、v1 RPC 和旧直连 Robot 未改。
 
 ### P-1：兼容基线
 

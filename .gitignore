@@ -37,6 +37,7 @@ build/generated/
 install/generated/
 
 # Credentials must never be committed
+certs/
 certs/private/
 *.key
 *.pem

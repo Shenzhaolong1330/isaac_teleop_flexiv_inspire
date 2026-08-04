@@ -495,7 +495,7 @@ class RerunVisualizer:
                 "/control/requested/action",
                 "/control/safe/action",
                 "/control/sent/action",
-                "/control/state/state_code",
+                "/control/state/id",
                 "/control/state/physical_pedal",
             ],
             name="Control",
@@ -1099,6 +1099,34 @@ class RerunVisualizer:
             )
         return int(value or 0)
 
+    @staticmethod
+    def _offline_entity_root(normalized: str, payload: Any) -> str:
+        """Map native DeviceIO topics onto the same entities as live ROS.
+
+        Native recording keeps the source topic in the envelope (for example
+        ``robot/left_arm/state``).  The live visualizer intentionally presents
+        that state at ``robot/left_arm``.  Without this mapping, the offline
+        curves exist in Rerun but the shared blueprint cannot find them.
+        """
+
+        if not isinstance(payload, Mapping):
+            return normalized or "unknown"
+        side = str(payload.get("side", "")).strip().lower()
+        if side not in {"left", "right"}:
+            if "/left_" in f"/{normalized}":
+                side = "left"
+            elif "/right_" in f"/{normalized}":
+                side = "right"
+            else:
+                side = ""
+        if side and normalized.endswith("_arm/state"):
+            return f"robot/{side}_arm"
+        if side and normalized.endswith("_hand/state"):
+            return f"robot/{side}_hand"
+        if side and normalized.endswith("tactile_raw"):
+            return f"robot/{side}_hand/tactile"
+        return normalized or "unknown"
+
     def log_deviceio(
         self,
         *,
@@ -1114,7 +1142,7 @@ class RerunVisualizer:
         """Log one recorded native envelope without creating ROS publishers."""
 
         normalized = topic.strip("/")
-        root = normalized or "unknown"
+        root = self._offline_entity_root(normalized, payload)
         self._set_time(playback_time_ns, sequence=sequence)
         self._scalar(f"{root}/record/valid", valid)
         self._scalar(f"{root}/record/timing_valid", timing_valid)

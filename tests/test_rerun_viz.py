@@ -312,6 +312,48 @@ def test_offline_deviceio_logs_images_depth_points_and_curves() -> None:
     assert "camera/head/color/image_raw/compressed/temperature_c" in visualizer.stream.paths
 
 
+def test_offline_deviceio_uses_live_arm_and_hand_entity_paths() -> None:
+    class Stream:
+        def __init__(self):
+            self.paths = []
+
+        def log(self, path, _value):
+            self.paths.append(path)
+
+    visualizer = object.__new__(RerunVisualizer)
+    visualizer.stream = Stream()
+    visualizer._set_time = lambda *args, **kwargs: None
+    visualizer._scalar = lambda path, value: visualizer.stream.paths.append(path)
+    visualizer._vector = (
+        lambda path, values, labels: visualizer.stream.paths.append(path)
+    )
+    visualizer._text_if_changed = lambda *args, **kwargs: None
+
+    visualizer.log_deviceio(
+        topic="/robot/left_arm/state",
+        payload={"side": "left", "q": [0.0] * 7, "dq": [0.0] * 7},
+        playback_time_ns=1,
+        original_time_ns=1,
+        sequence=1,
+        valid=True,
+        timing_valid=True,
+    )
+    visualizer.log_deviceio(
+        topic="/robot/right_hand/state",
+        payload={"side": "right", "position": [0.0] * 6},
+        playback_time_ns=2,
+        original_time_ns=2,
+        sequence=2,
+        valid=True,
+        timing_valid=True,
+    )
+
+    assert "robot/left_arm/q" in visualizer.stream.paths
+    assert "robot/left_arm/dq" in visualizer.stream.paths
+    assert "robot/right_hand/position" in visualizer.stream.paths
+    assert not any("/state/q" in path for path in visualizer.stream.paths)
+
+
 def test_live_depth_and_pointcloud_are_decoded_without_ros_helpers() -> None:
     class Stream:
         def __init__(self):

@@ -1337,8 +1337,10 @@ def _policy_server_command(settings: dict) -> list[str]:
     return command
 
 
-def _policy_authorization_command(config, rdk_socket: Path) -> list[str]:
-    return [
+def _policy_authorization_command(
+    config, rdk_socket: Path, *, clear_hold_latched: bool
+) -> list[str]:
+    command = [
         "flexiv-inspire-authorize-control",
         "--session-id",
         str(config.document["session"]["id"]),
@@ -1346,16 +1348,18 @@ def _policy_authorization_command(config, rdk_socket: Path) -> list[str]:
         "policy",
         "--confirm",
         "FLEXIV-CONTROL-ARM",
-        "--clear-hold-latched",
         "--socket",
         str(rdk_socket),
     ]
+    if clear_hold_latched:
+        command.insert(-2, "--clear-hold-latched")
+    return command
 
 
 class _PolicyAuthorizationSupervisor:
-    """Refresh local policy authority while the physical pedal is held."""
+    """Authorize policy once per physical-pedal press."""
 
-    _REFRESH_INTERVAL_S = 10.0
+    _RETRY_INTERVAL_S = 2.0
 
     def __init__(self, config, rdk_socket: Path) -> None:
         if not sys.stdin.isatty():
@@ -1370,9 +1374,11 @@ class _PolicyAuthorizationSupervisor:
 
         self._rclpy = rclpy
         self._external_shutdown = ExternalShutdownException
-        self._command = _policy_authorization_command(config, rdk_socket)
+        self._config = config
+        self._rdk_socket = rdk_socket
         self._pedal_pressed = False
         self._control_state = ""
+        self._authorization_pending = False
         self._last_attempt = 0.0
         self._last_reported_error = ""
         rclpy.init()
@@ -1390,30 +1396,41 @@ class _PolicyAuthorizationSupervisor:
     def _on_pedal(self, message) -> None:
         pressed = bool(message.data)
         if pressed and not self._pedal_pressed:
-            # Every new press may follow a deliberate measured hardware hold.
+            # Exactly one local action by the operator starts a new policy
+            # control attempt. Retry only until the bridge confirms it armed.
+            self._authorization_pending = True
             self._last_attempt = 0.0
+        elif not pressed:
+            self._authorization_pending = False
         self._pedal_pressed = pressed
 
     def _on_control_state(self, message) -> None:
         self._control_state = str(message.state_name).upper()
+        if self._control_state in {"POLICY_ARMED", "ACTIVE"}:
+            self._authorization_pending = False
 
     def _refresh_if_needed(self) -> None:
-        if not self._pedal_pressed:
+        if not self._pedal_pressed or not self._authorization_pending:
             return
-        if self._control_state not in {"READY", "POLICY_ARMED", "HOLD_LATCHED"}:
+        if self._control_state not in {"READY", "HOLD_LATCHED"}:
             return
         now = time.monotonic()
-        if now - self._last_attempt < self._REFRESH_INTERVAL_S:
+        if now - self._last_attempt < self._RETRY_INTERVAL_S:
             return
         self._last_attempt = now
+        command = _policy_authorization_command(
+            self._config,
+            self._rdk_socket,
+            clear_hold_latched=self._control_state == "HOLD_LATCHED",
+        )
         try:
             result = subprocess.run(
-                self._command,
+                command,
                 stdin=sys.stdin,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=5.0,
+                timeout=15.0,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:

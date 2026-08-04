@@ -51,11 +51,19 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     assert settings["auto_reset_before_serve"] is True
     assert settings["auto_authorize_policy"] is True
     authorization = _policy_authorization_command(
-        config, Path(config.document["session"]["runtime_root"]) / "rdk.sock"
+        config,
+        Path(config.document["session"]["runtime_root"]) / "rdk.sock",
+        clear_hold_latched=False,
     )
     assert authorization[0] == "flexiv-inspire-authorize-control"
     assert authorization[authorization.index("--source") + 1] == "policy"
-    assert "--clear-hold-latched" in authorization
+    assert "--clear-hold-latched" not in authorization
+    recovery_authorization = _policy_authorization_command(
+        config,
+        Path(config.document["session"]["runtime_root"]) / "rdk.sock",
+        clear_hold_latched=True,
+    )
+    assert "--clear-hold-latched" in recovery_authorization
     assert len(commands) == 6
     assert any("flexiv-rdk-daemon" in command for command in joined)
     assert any("flexiv_inspire_control.node" in command for command in joined)
@@ -73,14 +81,16 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     assert not any(marker in command for marker in forbidden for command in joined)
 
 
-def test_policy_authorizer_refreshes_on_pedal_press(monkeypatch, capsys) -> None:
+def test_policy_authorizer_authorizes_once_per_pedal_press(monkeypatch, capsys) -> None:
     calls = []
     supervisor = _PolicyAuthorizationSupervisor.__new__(
         _PolicyAuthorizationSupervisor
     )
-    supervisor._command = ["authorize-policy"]
+    supervisor._config = SimpleNamespace(document={"session": {"id": "test"}})
+    supervisor._rdk_socket = Path("/tmp/rdk.sock")
     supervisor._pedal_pressed = False
     supervisor._control_state = ""
+    supervisor._authorization_pending = False
     supervisor._last_attempt = 0.0
     supervisor._last_reported_error = ""
     monkeypatch.setattr(
@@ -96,8 +106,44 @@ def test_policy_authorizer_refreshes_on_pedal_press(monkeypatch, capsys) -> None
     supervisor._on_pedal(SimpleNamespace(data=True))
     supervisor._refresh_if_needed()
 
-    assert [item[0] for item in calls] == [["authorize-policy"]]
+    assert len(calls) == 1
+    assert "--clear-hold-latched" not in calls[0][0]
+    assert calls[0][1]["timeout"] == 15.0
     assert "policy 控制已自动授权" in capsys.readouterr().out
+
+    # A successful request is not repeated while the bridge is transitioning.
+    supervisor._last_attempt = 0.0
+    supervisor._on_control_state(SimpleNamespace(state_name="POLICY_ARMED"))
+    supervisor._refresh_if_needed()
+    assert len(calls) == 1
+
+
+def test_policy_authorizer_clears_hold_only_on_new_pedal_press(monkeypatch) -> None:
+    calls = []
+    supervisor = _PolicyAuthorizationSupervisor.__new__(
+        _PolicyAuthorizationSupervisor
+    )
+    supervisor._config = SimpleNamespace(document={"session": {"id": "test"}})
+    supervisor._rdk_socket = Path("/tmp/rdk.sock")
+    supervisor._pedal_pressed = False
+    supervisor._control_state = "HOLD_LATCHED"
+    supervisor._authorization_pending = False
+    supervisor._last_attempt = 0.0
+    supervisor._last_reported_error = ""
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.time.monotonic", lambda: 20.0
+    )
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.subprocess.run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    supervisor._on_pedal(SimpleNamespace(data=True))
+    supervisor._refresh_if_needed()
+
+    assert len(calls) == 1
+    assert "--clear-hold-latched" in calls[0][0]
 
 
 def test_conversion_manifest_discovers_raw_and_legacy_episodes(tmp_path) -> None:

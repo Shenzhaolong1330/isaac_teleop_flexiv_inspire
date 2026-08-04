@@ -35,6 +35,10 @@ def main(argv: list[str] | None = None) -> int:
             "operator_confirmation": args.confirm,
             "clear_hold_latched": args.clear_hold_latched,
         },
+        # Clearing a measured hardware hold can switch both controllers back
+        # into Cartesian mode.  The old 50 ms IPC default was shorter than a
+        # normal real-robot mode transition and produced false timeouts.
+        timeout_s=10.0 if args.clear_hold_latched else 2.0,
     )
     client.close()
     if kind != "authorize_control_result" or not payload.get("authorized", False):

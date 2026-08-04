@@ -54,8 +54,8 @@ robot policy-serve
 
 该命令以前台方式运行，默认先执行本机 Reset，然后启动 RDK、控制桥、Inspire、
 三路相机、脚踏和 loopback TLS Policy RPC。它不会启动 Quest、MANUS、Episode
-Controller、LeRobot 或训练/推理程序。中踏板踩下时，前台进程会自动生成/刷新
-policy 授权；松开停止，再踩自动恢复，不再需要单独运行 authorize-control。
+Controller、LeRobot 或训练/推理程序。每次新踩下中踏板时，前台进程会自动生成
+一次 policy 授权，失败时才重试；松开停止，再踩自动恢复，不再需要单独运行 authorize-control。
 `Ctrl-C` 关闭 server 及其硬件服务。
 
 只做不允许运动的 shadow 诊断且不希望自动 Home 时，可以使用：

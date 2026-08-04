@@ -224,7 +224,10 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
         for field_name in fields
         if field_name in DEPTH_LEROBOT_FIELDS
     }
-    expected_depth_fields = {
+    required_depth_fields = {
+        f"observation.depth.{camera}" for camera in depth_cameras
+    }
+    allowed_depth_fields = {
         field_name
         for camera in depth_cameras
         for field_name in (
@@ -237,10 +240,12 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
         raise ExportSpecError("depth.cameras is required when depth is enabled")
     if not depth_enabled and configured_depth_fields:
         raise ExportSpecError("depth fields require depth.enabled: true")
-    if depth_enabled and configured_depth_fields != expected_depth_fields:
+    missing_depth_fields = required_depth_fields.difference(configured_depth_fields)
+    unexpected_depth_fields = configured_depth_fields.difference(allowed_depth_fields)
+    if depth_enabled and (missing_depth_fields or unexpected_depth_fields):
         raise ExportSpecError(
-            "fields must include depth, depth_scale_m and depth_intrinsics "
-            "for every configured depth camera"
+            "fields must include depth for every configured depth camera and "
+            "must not include depth fields for unconfigured cameras"
         )
 
     raw_segments = raw.get("segments", {})

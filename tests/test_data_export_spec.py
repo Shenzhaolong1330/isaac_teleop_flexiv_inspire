@@ -194,6 +194,31 @@ channels: {}
     )
 
 
+def test_export_spec_allows_omitting_optional_depth_intrinsics(tmp_path: Path):
+    config = tmp_path / "export.yaml"
+    config.write_text(
+        """
+schema_version: 1
+timeline: {source: camera/head/jpeg, fps: 15.0}
+action: {view: sent_command}
+fields:
+  - observation.depth.head
+  - observation.depth_scale_m.head
+  - action
+depth: {enabled: true, cameras: [head], representation: z16, storage: parquet}
+""",
+        encoding="utf-8",
+    )
+
+    spec = load_export_spec(config)
+
+    assert spec.fields == (
+        "observation.depth.head",
+        "observation.depth_scale_m.head",
+        "action",
+    )
+
+
 def test_export_spec_rejects_depth_field_without_depth_metadata(tmp_path: Path):
     config = tmp_path / "export.yaml"
     config.write_text(

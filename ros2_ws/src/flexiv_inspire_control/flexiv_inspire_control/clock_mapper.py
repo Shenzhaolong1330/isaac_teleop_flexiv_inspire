@@ -88,13 +88,24 @@ class OnlineClockMapper:
             [host - origin_host for _, host, _ in self._pairs],
             dtype=np.float64,
         )
-        denominator = float(np.dot(x, x))
+        # Estimate rate independently of the first packet's transport delay.
+        # RDK samples are polled asynchronously, so anchoring the fit at the
+        # first receive time makes normal 3/4 ms controller timestamp
+        # quantization periodically project a fresh sample into the future.
+        centered_x = x - float(np.mean(x))
+        centered_y = y - float(np.mean(y))
+        denominator = float(np.dot(centered_x, centered_x))
         if denominator <= 0.0:
             return ClockMapping(0, 0, False, count, math.nan, math.inf)
-        slope = float(np.dot(x, y) / denominator)
-        intercept = origin_host
-        prediction = intercept + slope * x
-        residual_rms = float(np.sqrt(np.mean(np.square(y - slope * x))))
+        slope = float(np.dot(centered_x, centered_y) / denominator)
+
+        # host_receive = mapped_source + non-negative delivery latency.  The
+        # lower envelope therefore provides the causal clock offset; an
+        # ordinary least-squares intercept estimates the *mean* delivery
+        # latency and can place low-latency samples after their receive time.
+        relative_intercept = float(np.min(y - slope * x))
+        prediction = relative_intercept + slope * x
+        residual_rms = float(np.sqrt(np.mean(np.square(y - prediction))))
         span = int(self._pairs[-1][0] - origin_device)
         valid = (
             count >= self._min_samples
@@ -102,7 +113,11 @@ class OnlineClockMapper:
             and abs(slope - 1.0) <= self._max_rate_error
             and residual_rms <= self._max_residual_rms_ns
         )
-        mapped_mono = int(round(intercept + slope * (int(device_ns) - origin_device)))
+        mapped_mono = int(round(
+            origin_host
+            + relative_intercept
+            + slope * (int(device_ns) - origin_device)
+        ))
         # UNIX-minus-monotonic offset is sampled together at the daemon. Median
         # rejects individual scheduling outliers without mixing clock domains.
         unix_minus_mono = int(np.median([

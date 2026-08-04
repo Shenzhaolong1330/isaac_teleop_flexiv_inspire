@@ -68,22 +68,44 @@ def test_repeated_rdk_timestamp_preserves_converged_clock_window() -> None:
     assert repeated.sample_count == count
 
 
-def test_future_clock_fit_is_invalid_instead_of_age_clamped() -> None:
+def test_quantized_rdk_clock_stays_valid_after_convergence() -> None:
     mapper = OnlineClockMapper(
         min_samples=5,
-        min_span_ns=3_000_000,
+        min_span_ns=10_000_000,
         max_rate_error=2e-3,
         max_residual_rms_ns=5_000_000,
     )
-    host_offsets = [0, 1_000_500, 2_000_500, 3_000_500, 4_000_000]
-    result = None
-    for index, offset in enumerate(host_offsets):
-        result = mapper.update(
+    results = []
+    for index in range(80):
+        # The controller timestamp has a 1 ms resolution while the bridge
+        # polls at 300 Hz.  Real hardware consequently advances in a repeating
+        # 3/4/3 ms cadence even though host receives are evenly spaced.
+        device_offset = round(index * 10_000_000 / 3)
+        host_offset = round(index * 10_000_000 / 3) + 350_000
+        results.append(mapper.update(
+            1_000_000_000 + device_offset,
+            10_000_000_000 + host_offset,
+            1_800_000_000_000_000_000 + host_offset,
+        ))
+
+    assert all(result.timing_valid for result in results[20:])
+    assert all(
+        result.mapped_host_monotonic_ns
+        <= 10_000_000_000 + round(index * 10_000_000 / 3) + 350_000
+        for index, result in enumerate(results)
+        if result.timing_valid
+    )
+
+
+def test_mapping_an_unobserved_future_device_time_is_invalid() -> None:
+    mapper = OnlineClockMapper(min_samples=5, min_span_ns=3_000_000)
+    for index in range(5):
+        mapper.update(
             1_000_000_000 + index * 1_000_000,
-            10_000_000_000 + offset,
-            1_800_000_000_000_000_000 + offset,
+            10_000_000_000 + index * 1_000_000,
+            1_800_000_000_000_000_000 + index * 1_000_000,
         )
-    assert result is not None
-    assert result.slope > 1.0
+
+    result = mapper.map(1_010_000_000)
     assert not result.timing_valid
     assert result.mapped_host_monotonic_ns == 0

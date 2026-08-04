@@ -7,16 +7,15 @@ commands and has no robot, Modbus, camera, or ROS side effects.
 
 from __future__ import annotations
 
-from collections import OrderedDict
 import base64
-from dataclasses import dataclass
-from pathlib import Path
 import math
 import threading
+from collections import OrderedDict
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
-
 
 ROT6D_FIRST_TWO_COLUMNS = "R00,R10,R20,R01,R11,R21"
 ROT6D_IDENTITY = np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
@@ -90,7 +89,11 @@ def tactile_atlas(
 
     by_name = {str(surface["name"]): surface for surface in surfaces}
     required = [
-        *(f"{finger}_{suffix}" for finger in ("little", "ring", "middle", "index") for suffix in ("end", "tip", "pad")),
+        *(
+            f"{finger}_{suffix}"
+            for finger in ("little", "ring", "middle", "index")
+            for suffix in ("end", "tip", "pad")
+        ),
         "thumb_end",
         "thumb_tip",
         "thumb_middle",
@@ -115,9 +118,7 @@ def tactile_atlas(
         return taxels.reshape(rows, columns, order="F" if palm else "C")
 
     # Four upright finger columns: distal end, fingertip and finger pad.
-    for x, finger in zip(
-        (2, 13, 24, 35), ("little", "ring", "middle", "index")
-    ):
+    for x, finger in zip((2, 13, 24, 35), ("little", "ring", "middle", "index")):
         end = image_for(f"{finger}_end")
         tip = image_for(f"{finger}_tip")
         pad = image_for(f"{finger}_pad")
@@ -235,8 +236,12 @@ def command_action_vector(command: Mapping[str, Any]) -> np.ndarray:
         raise ValueError("hand targets must contain six values per side")
 
     if representation == 1:
-        left_rotation = np.asarray(point.get("left_delta_rotation6d", ()), dtype=np.float64)
-        right_rotation = np.asarray(point.get("right_delta_rotation6d", ()), dtype=np.float64)
+        left_rotation = np.asarray(
+            point.get("left_delta_rotation6d", ()), dtype=np.float64
+        )
+        right_rotation = np.asarray(
+            point.get("right_delta_rotation6d", ()), dtype=np.float64
+        )
     elif representation == 2:
         left_rotation = matrix_to_rotation6d(
             quaternion_xyzw_to_matrix(point.get("left_delta_quaternion_xyzw", ()))
@@ -245,8 +250,12 @@ def command_action_vector(command: Mapping[str, Any]) -> np.ndarray:
             quaternion_xyzw_to_matrix(point.get("right_delta_quaternion_xyzw", ()))
         )
     elif representation == 3:
-        left_joints = np.asarray(point.get("left_arm_joint_positions", ()), dtype=np.float64)
-        right_joints = np.asarray(point.get("right_arm_joint_positions", ()), dtype=np.float64)
+        left_joints = np.asarray(
+            point.get("left_arm_joint_positions", ()), dtype=np.float64
+        )
+        right_joints = np.asarray(
+            point.get("right_arm_joint_positions", ()), dtype=np.float64
+        )
         result = np.concatenate((left_joints, right_joints, left_hand, right_hand))
         if not np.all(np.isfinite(result)):
             raise ValueError("joint command contains NaN or Inf")
@@ -286,7 +295,9 @@ class LatestOnlyDispatcher:
 
     def __init__(self, *, name: str = "rerun-latest-only") -> None:
         self._condition = threading.Condition()
-        self._pending: OrderedDict[str, tuple[Callable[[Any], None], Any]] = OrderedDict()
+        self._pending: OrderedDict[str, tuple[Callable[[Any], None], Any]] = (
+            OrderedDict()
+        )
         self._closed = False
         self._submitted = 0
         self._processed = 0
@@ -370,7 +381,9 @@ class RerunVisualizer:
         try:
             import rerun as rr
         except ImportError as exc:  # pragma: no cover - exercised by deployment
-            raise RuntimeError("rerun-sdk==0.33.1 is required in envs/ros-py312") from exc
+            raise RuntimeError(
+                "rerun-sdk==0.33.1 is required in envs/ros-py312"
+            ) from exc
         selected = sum((save_path is not None, connect_url is not None, bool(spawn)))
         if selected != 1:
             raise ValueError("select exactly one Rerun sink: save, connect, or spawn")
@@ -383,7 +396,9 @@ class RerunVisualizer:
         elif connect_url is not None:
             self.stream.connect_grpc(connect_url)
         else:
-            self.stream.spawn(port=int(viewer_port), connect=True, hide_welcome_screen=True)
+            self.stream.spawn(
+                port=int(viewer_port), connect=True, hide_welcome_screen=True
+            )
         self._send_default_blueprint()
         self._series_configured: set[str] = set()
         self._last_text: dict[str, str] = {}
@@ -464,6 +479,7 @@ class RerunVisualizer:
                     origin=f"/robot/{side}_hand",
                     contents=[
                         f"/robot/{side}_hand/position",
+                        f"/robot/{side}_hand/manus_ergonomics_rad",
                         f"/robot/{side}_hand/actual_force",
                         f"/robot/{side}_hand/current",
                     ],
@@ -560,7 +576,9 @@ class RerunVisualizer:
                 timestamp=np.datetime64(mapped_host_ns, "ns"),
             )
 
-    def _vector(self, path: str, values: Sequence[float], labels: Sequence[str]) -> None:
+    def _vector(
+        self, path: str, values: Sequence[float], labels: Sequence[str]
+    ) -> None:
         array = np.asarray(values, dtype=np.float64).reshape(-1)
         if array.size != len(labels):
             raise ValueError(f"{path}: {array.size} values but {len(labels)} labels")
@@ -583,7 +601,9 @@ class RerunVisualizer:
         timing_valid = bool(acquisition.get("timing_valid", False))
         self._scalar(f"{path}/valid", valid)
         self._scalar(f"{path}/timing_valid", timing_valid)
-        self._scalar(f"{path}/age_seconds", float(acquisition.get("age_ns", 0)) * 1.0e-9)
+        self._scalar(
+            f"{path}/age_seconds", float(acquisition.get("age_ns", 0)) * 1.0e-9
+        )
         self._scalar(
             f"{path}/acquisition_duration_seconds",
             max(
@@ -603,12 +623,8 @@ class RerunVisualizer:
                 acquisition_start_ns=np.int64(
                     acquisition.get("acquisition_start_ns", 0)
                 ),
-                acquisition_end_ns=np.int64(
-                    acquisition.get("acquisition_end_ns", 0)
-                ),
-                mapped_host_time_ns=np.int64(
-                    acquisition.get("mapped_host_time_ns", 0)
-                ),
+                acquisition_end_ns=np.int64(acquisition.get("acquisition_end_ns", 0)),
+                mapped_host_time_ns=np.int64(acquisition.get("mapped_host_time_ns", 0)),
                 source_sequence=np.uint64(acquisition.get("sequence", 0)),
                 valid=valid,
                 timing_valid=timing_valid,
@@ -645,8 +661,16 @@ class RerunVisualizer:
         camera = str(payload["camera"])
         stamp_ns = int(payload["stamp_ns"])
         acquisition = payload.get("acquisition")
-        sequence = acquisition.get("sequence") if acquisition is not None else payload.get("sequence")
-        mapped_host_ns = int(acquisition.get("mapped_host_time_ns", 0)) if acquisition is not None else None
+        sequence = (
+            acquisition.get("sequence")
+            if acquisition is not None
+            else payload.get("sequence")
+        )
+        mapped_host_ns = (
+            int(acquisition.get("mapped_host_time_ns", 0))
+            if acquisition is not None
+            else None
+        )
         self._set_time(
             stamp_ns,
             sequence=int(sequence) if sequence is not None else None,
@@ -713,7 +737,12 @@ class RerunVisualizer:
         height = int(payload["height"])
         point_step = int(payload["point_step"])
         row_step = int(payload["row_step"])
-        if width <= 0 or height <= 0 or point_step < 12 or row_step < point_step * width:
+        if (
+            width <= 0
+            or height <= 0
+            or point_step < 12
+            or row_step < point_step * width
+        ):
             raise ValueError(f"{camera}: invalid live point-cloud layout")
         fields = payload.get("fields", {})
         if not isinstance(fields, Mapping):
@@ -818,7 +847,9 @@ class RerunVisualizer:
             ("fx", "fy", "fz", "tx", "ty", "tz"),
         )
         self._scalar(f"{root}/connected", bool(payload.get("connected", False)))
-        self._scalar(f"{root}/rdk_connection_generation", int(payload.get("generation", 0)))
+        self._scalar(
+            f"{root}/rdk_connection_generation", int(payload.get("generation", 0))
+        )
         fault = str(payload.get("fault", ""))
         self._text_if_changed(f"{root}/fault", fault, level="ERROR")
         self._log_acquisition(f"{root}/acquisition", acquisition)
@@ -848,6 +879,21 @@ class RerunVisualizer:
         reason = str(payload.get("fault_reason", ""))
         self._text_if_changed(f"{root}/fault_reason", reason, level="ERROR")
         self._log_acquisition(f"{root}/acquisition", acquisition)
+
+    def log_manus_ergonomics(self, payload: Mapping[str, Any]) -> None:
+        side = str(payload["side"])
+        names = [str(name) for name in payload["names"]]
+        values = np.asarray(payload["values_rad"], dtype=np.float64)
+        if side not in {"left", "right"}:
+            raise ValueError(f"invalid MANUS side: {side}")
+        if values.shape != (len(names),) or len(set(names)) != len(names):
+            raise ValueError("invalid MANUS Ergonomics vector")
+        self._set_time(int(payload["stamp_ns"]))
+        self._vector(
+            f"robot/{side}_hand/manus_ergonomics_rad",
+            values,
+            names,
+        )
 
     def log_tactile(self, payload: Mapping[str, Any]) -> None:
         side = str(payload["side"])
@@ -883,7 +929,9 @@ class RerunVisualizer:
         self._scalar(f"{root}/taxel_count", len(flattened))
         self._scalar(f"{root}/raw_min", min(flattened) if flattened else 0)
         self._scalar(f"{root}/raw_max", max(flattened) if flattened else 0)
-        self._scalar(f"{root}/raw_mean", float(np.mean(flattened)) if flattened else 0.0)
+        self._scalar(
+            f"{root}/raw_mean", float(np.mean(flattened)) if flattened else 0.0
+        )
         self._scalar(f"{root}/frame_valid", bool(payload.get("valid", False)))
         frame_reason = str(payload.get("invalid_reason", ""))
         self._text_if_changed(f"{root}/invalid_reason", frame_reason, level="WARN")
@@ -892,7 +940,9 @@ class RerunVisualizer:
     def log_command(self, stage: str, command: Mapping[str, Any]) -> np.ndarray:
         if stage not in {"requested", "safe", "sent"}:
             raise ValueError(f"unknown control stage {stage}")
-        self._set_time(int(command["stamp_ns"]), sequence=int(command.get("sequence", 0)))
+        self._set_time(
+            int(command["stamp_ns"]), sequence=int(command.get("sequence", 0))
+        )
         root = f"control/{stage}"
         action = command_action_vector(command)
         labels = (
@@ -953,7 +1003,11 @@ class RerunVisualizer:
             ("sent_minus_requested", "sent", "requested"),
         )
         for name, left, right in comparisons:
-            if left in actions and right in actions and actions[left].shape == actions[right].shape:
+            if (
+                left in actions
+                and right in actions
+                and actions[left].shape == actions[right].shape
+            ):
                 difference = actions[left] - actions[right]
                 self._vector(
                     f"control/difference/{name}",
@@ -976,7 +1030,9 @@ class RerunVisualizer:
         )
 
     def log_control_state(self, payload: Mapping[str, Any]) -> None:
-        self._set_time(int(payload["stamp_ns"]), sequence=int(payload.get("generation", 0)))
+        self._set_time(
+            int(payload["stamp_ns"]), sequence=int(payload.get("generation", 0))
+        )
         self._scalar("control/state/id", int(payload.get("state", 0)))
         for field in (
             "local_permission",
@@ -1086,7 +1142,8 @@ class RerunVisualizer:
                 if rgb.size != width * height * 3:
                     raise ValueError(f"{camera}: raw RGB byte count mismatch")
                 self.stream.log(
-                    f"camera/{camera}/color", self.rr.Image(rgb.reshape(height, width, 3))
+                    f"camera/{camera}/color",
+                    self.rr.Image(rgb.reshape(height, width, 3)),
                 )
             depth_b64 = payload.get("depth_z16_b64")
             if isinstance(depth_b64, str) and depth_b64:
@@ -1104,16 +1161,12 @@ class RerunVisualizer:
                 )
             points_b64 = payload.get("pointcloud_xyz_f32_b64")
             if isinstance(points_b64, str) and points_b64:
-                points = np.frombuffer(
-                    base64.b64decode(points_b64), dtype="<f4"
-                )
+                points = np.frombuffer(base64.b64decode(points_b64), dtype="<f4")
                 if points.size % 3:
                     raise ValueError(f"{camera}: point cloud XYZ count mismatch")
                 points = points.reshape(-1, 3)
                 points = points[np.all(np.isfinite(points), axis=1)]
-                self.stream.log(
-                    f"camera/{camera}/pointcloud", self.rr.Points3D(points)
-                )
+                self.stream.log(f"camera/{camera}/pointcloud", self.rr.Points3D(points))
 
         if normalized.endswith("_arm/state"):
             pose = payload.get("tcp_pose_rdk_xyz_wxyz")
@@ -1137,7 +1190,9 @@ class RerunVisualizer:
                     side = (
                         "left"
                         if "left_hand" in normalized
-                        else "right" if "right_hand" in normalized else ""
+                        else "right"
+                        if "right_hand" in normalized
+                        else ""
                     )
                 self.stream.log(
                     f"{root}/atlas_raw_u16",
@@ -1166,9 +1221,7 @@ class RerunVisualizer:
             try:
                 self.log_command(command_stage, command)
             except ValueError as exc:
-                self._text_if_changed(
-                    f"{root}/decode_error", str(exc), level="WARN"
-                )
+                self._text_if_changed(f"{root}/decode_error", str(exc), level="WARN")
 
         # Curves for arm/hand/control diagnostics and all remaining bounded
         # scalar/vector fields. Large image/tactile blobs are handled above.

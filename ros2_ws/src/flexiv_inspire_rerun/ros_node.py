@@ -168,6 +168,17 @@ def hand_to_dict(message: Any) -> dict[str, Any]:
     }
 
 
+def ergonomics_to_dict(side: str, message: Any) -> dict[str, Any]:
+    if len(message.name) != len(message.position):
+        raise ValueError("MANUS Ergonomics names/positions differ")
+    return {
+        "stamp_ns": _time_ns(message.header.stamp),
+        "side": side,
+        "names": [str(name) for name in message.name],
+        "values_rad": [float(value) for value in message.position],
+    }
+
+
 def tactile_to_dict(message: Any) -> dict[str, Any]:
     surfaces = []
     for surface in message.surfaces:
@@ -181,7 +192,9 @@ def tactile_to_dict(message: Any) -> dict[str, Any]:
                 "acquisition": surface_acquisition,
                 "valid": bool(surface_acquisition["valid"]),
                 "invalid_reason": str(surface_acquisition["invalid_reason"]),
-                "acquisition_start_ns": int(surface_acquisition["acquisition_start_ns"]),
+                "acquisition_start_ns": int(
+                    surface_acquisition["acquisition_start_ns"]
+                ),
                 "acquisition_end_ns": int(surface_acquisition["acquisition_end_ns"]),
             }
         )
@@ -304,9 +317,6 @@ def run_ros(
     """Run until ROS shutdown. This function creates subscriptions only."""
 
     import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-    from sensor_msgs.msg import CompressedImage, Image, PointCloud2
     from flexiv_inspire_interfaces.msg import (
         ArmState,
         BimanualCommand,
@@ -316,6 +326,9 @@ def run_ros(
         HandState,
         TactileFrame,
     )
+    from rclpy.node import Node
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+    from sensor_msgs.msg import CompressedImage, Image, JointState, PointCloud2
 
     sensor_qos = QoSProfile(
         history=HistoryPolicy.KEEP_LAST,
@@ -459,6 +472,20 @@ def run_ros(
                 )
                 self._viz_subscriptions.append(
                     self.create_subscription(
+                        JointState,
+                        f"/manus/{side}/ergonomics",
+                        lambda message, selected=side: self._submit_if_due(
+                            telemetry_dispatcher,
+                            f"manus-ergonomics:{selected}",
+                            rates["telemetry"],
+                            visualizer.log_manus_ergonomics,
+                            lambda: ergonomics_to_dict(selected, message),
+                        ),
+                        sensor_qos,
+                    )
+                )
+                self._viz_subscriptions.append(
+                    self.create_subscription(
                         TactileFrame,
                         f"/robot/{side}_hand/tactile_raw",
                         lambda message, selected=side: self._on_tactile(
@@ -516,7 +543,9 @@ def run_ros(
             sink = (
                 f"save:{visualizer.save_path}"
                 if visualizer.save_path is not None
-                else (f"connect:{connect_url}" if connect_url else f"spawn:{viewer_port}")
+                else (
+                    f"connect:{connect_url}" if connect_url else f"spawn:{viewer_port}"
+                )
             )
             self.get_logger().info(
                 f"read-only latest-only Rerun subscriber active ({sink}); "

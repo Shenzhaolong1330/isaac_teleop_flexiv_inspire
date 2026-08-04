@@ -11,6 +11,7 @@ from flexiv_inspire_isaac.data_pipeline.playback import (
     RecordedCommand,
     extract_replay_commands,
     load_playback_config,
+    override_playback_selection,
     read_deviceio_records,
     resolve_episode,
     validate_replay_home_origin,
@@ -114,7 +115,21 @@ def test_config_and_latest_episode_selection(tmp_path: Path) -> None:
     result = resolve_episode(spec)
     assert result.directory == selected
     assert spec.visualize.speed == 2.0
+    assert spec.visualize.telemetry_hz == 5.0
+    assert spec.visualize.image_hz == 10.0
     assert spec.replay.enabled is False
+
+
+def test_command_line_dataset_and_episode_override(tmp_path: Path) -> None:
+    spec = load_playback_config(_config(tmp_path))
+    alternate = tmp_path / "alternate"
+    selected = override_playback_selection(
+        spec, dataset_root=alternate, episode="7"
+    )
+
+    assert selected.dataset.root == alternate
+    assert selected.dataset.episode == "7"
+    assert spec.dataset.episode == "latest"
 
 
 def test_latest_selection_skips_newer_incomplete_attempt(tmp_path: Path) -> None:

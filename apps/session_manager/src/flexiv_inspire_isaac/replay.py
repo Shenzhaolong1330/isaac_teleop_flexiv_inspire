@@ -21,6 +21,7 @@ from flexiv_inspire_isaac.data_pipeline.playback import (
     RecordedCommand,
     extract_replay_commands,
     load_playback_config,
+    override_playback_selection,
     read_deviceio_records,
     resolve_episode,
     validate_replay_home_origin,
@@ -39,10 +40,16 @@ def _default_config() -> Path:
 
 def _validate_replay_request(
     config_path: str | Path,
+    *,
+    dataset_root: str | Path | None = None,
+    episode_selector: str | None = None,
 ) -> tuple[Any, Any, Any, list[RecordedCommand]]:
     """Complete all side-effect-free validation before ROS publishers exist."""
 
     spec = load_playback_config(config_path)
+    spec = override_playback_selection(
+        spec, dataset_root=dataset_root, episode=episode_selector
+    )
     if not spec.replay.enabled:
         raise PlaybackConfigError(
             "hardware replay is disabled; set replay.enabled=true deliberately"
@@ -452,8 +459,17 @@ class ReplayNode:
         self.node.destroy_node()
 
 
-def run_replay(config_path: str | Path) -> int:
-    spec, site, episode, commands = _validate_replay_request(config_path)
+def run_replay(
+    config_path: str | Path,
+    *,
+    dataset_root: str | Path | None = None,
+    episode_selector: str | None = None,
+) -> int:
+    spec, site, episode, commands = _validate_replay_request(
+        config_path,
+        dataset_root=dataset_root,
+        episode_selector=episode_selector,
+    )
     session_id = str(site.document["session"]["id"])
     runtime_root = Path(site.document["session"]["runtime_root"]).expanduser()
     rdk_socket = runtime_root / "rdk.sock"
@@ -540,9 +556,18 @@ def main(argv: list[str] | None = None) -> int:
             "Replay remains disabled unless that file explicitly authorizes it."
         ),
     )
-    parser.parse_args(selected)
+    parser.add_argument("--playback-config", default="")
+    parser.add_argument("--dataset", default="", help="dataset directory")
+    parser.add_argument(
+        "--episode", default="", help="latest, numeric index, or directory name"
+    )
+    args = parser.parse_args(selected)
     try:
-        return run_replay(_default_config())
+        return run_replay(
+            args.playback_config or _default_config(),
+            dataset_root=args.dataset or None,
+            episode_selector=args.episode or None,
+        )
     except KeyboardInterrupt:
         print("replay interrupted", file=sys.stderr)
         return 130

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import yaml
 
@@ -36,6 +36,10 @@ class VisualizeSpec:
     viewer_port: int
     speed: float
     realtime: bool
+    telemetry_hz: float
+    tactile_hz: float
+    image_hz: float
+    pointcloud_hz: float
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,15 @@ def _resolve(root: Path, value: Any, name: str) -> Path:
     return path.resolve() if path.is_absolute() else (root / path).resolve()
 
 
+def _positive_visualize_rate(
+    config: dict[str, Any], name: str, default: float
+) -> float:
+    value = float(config.get(name, default))
+    if not 0.1 <= value <= 120.0:
+        raise PlaybackConfigError(f"visualize.{name} must be in [0.1,120]")
+    return value
+
+
 def load_playback_config(path: str | Path) -> PlaybackSpec:
     source = Path(path).expanduser().resolve(strict=True)
     raw = _mapping(yaml.safe_load(source.read_text(encoding="utf-8")), "playback config")
@@ -144,8 +157,11 @@ def load_playback_config(path: str | Path) -> PlaybackSpec:
         viewer_port=viewer_port,
         speed=visualize_speed,
         realtime=bool(visualize_raw.get("realtime", False)),
+        telemetry_hz=_positive_visualize_rate(visualize_raw, "telemetry_hz", 5.0),
+        tactile_hz=_positive_visualize_rate(visualize_raw, "tactile_hz", 10.0),
+        image_hz=_positive_visualize_rate(visualize_raw, "image_hz", 10.0),
+        pointcloud_hz=_positive_visualize_rate(visualize_raw, "pointcloud_hz", 2.0),
     )
-
     replay_raw = _mapping(raw.get("replay"), "replay")
     replay_speed = float(replay_raw.get("speed", 1.0))
     if not 0.05 <= replay_speed <= 1.0:
@@ -187,6 +203,31 @@ def load_playback_config(path: str | Path) -> PlaybackSpec:
         visualize=visualize,
         replay=replay,
     )
+
+
+def override_playback_selection(
+    spec: PlaybackSpec,
+    *,
+    dataset_root: str | Path | None = None,
+    episode: str | None = None,
+) -> PlaybackSpec:
+    """Apply command-line selection without rewriting playback.yaml."""
+
+    root = spec.dataset.root
+    if dataset_root is not None and str(dataset_root).strip():
+        candidate = Path(dataset_root).expanduser()
+        root = (
+            candidate.resolve()
+            if candidate.is_absolute()
+            else (spec.project_root / candidate).resolve()
+        )
+    selected_episode = str(episode).strip() if episode is not None else ""
+    dataset = replace(
+        spec.dataset,
+        root=root,
+        episode=selected_episode or spec.dataset.episode,
+    )
+    return replace(spec, dataset=dataset)
 
 
 def _candidate_key(path: Path, manifest: dict[str, Any]) -> tuple[int, int, int]:
@@ -268,10 +309,9 @@ def resolve_episode(spec: PlaybackSpec, *, for_hardware: bool = False) -> Episod
     )
 
 
-def read_deviceio_records(path: str | Path) -> list[DeviceIORecord]:
+def iter_deviceio_records(path: str | Path) -> Iterator[DeviceIORecord]:
     from mcap.reader import make_reader
 
-    result: list[DeviceIORecord] = []
     with Path(path).open("rb") as handle:
         for _schema, channel, message in make_reader(handle).iter_messages():
             if channel.message_encoding != "json":
@@ -286,17 +326,19 @@ def read_deviceio_records(path: str | Path) -> list[DeviceIORecord]:
                 if timing_valid and mapped is not None
                 else int(document.get("host_receive_time_ns", message.log_time))
             )
-            result.append(
-                DeviceIORecord(
-                    topic=str(document.get("topic", channel.topic)),
-                    timestamp_ns=timestamp,
-                    valid=bool(document.get("valid", False)),
-                    timing_valid=timing_valid and mapped is not None,
-                    sequence=int(document.get("sequence", 0)),
-                    payload=document["payload"],
-                    envelope=document,
-                )
+            yield DeviceIORecord(
+                topic=str(document.get("topic", channel.topic)),
+                timestamp_ns=timestamp,
+                valid=bool(document.get("valid", False)),
+                timing_valid=timing_valid and mapped is not None,
+                sequence=int(document.get("sequence", 0)),
+                payload=document["payload"],
+                envelope=document,
             )
+
+
+def read_deviceio_records(path: str | Path) -> list[DeviceIORecord]:
+    result = list(iter_deviceio_records(path))
     result.sort(key=lambda item: (item.timestamp_ns, item.sequence, item.topic))
     if not result:
         raise PlaybackConfigError("deviceio MCAP contains no JSON records")

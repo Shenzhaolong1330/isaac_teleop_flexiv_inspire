@@ -4,24 +4,51 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+from itertools import chain
 import sys
 import time
 
 from flexiv_inspire_isaac.data_pipeline.playback import (
     PlaybackConfigError,
+    iter_deviceio_records,
     load_playback_config,
-    read_deviceio_records,
+    override_playback_selection,
     resolve_episode,
 )
 
 from .runtime import RerunVisualizer
 
 
-def run_offline(config_path: str | Path) -> int:
+def _visualization_rate(record, visualize) -> float:
+    topic = record.topic.lower()
+    if "point" in topic or (
+        isinstance(record.payload, dict)
+        and "pointcloud_xyz_f32_b64" in record.payload
+    ):
+        return visualize.pointcloud_hz
+    if "camera/" in topic or "image" in topic or "depth" in topic:
+        return visualize.image_hz
+    if "tactile" in topic:
+        return visualize.tactile_hz
+    return visualize.telemetry_hz
+
+
+def run_offline(
+    config_path: str | Path,
+    *,
+    dataset_root: str | Path | None = None,
+    episode_selector: str | None = None,
+) -> int:
     spec = load_playback_config(config_path)
+    spec = override_playback_selection(
+        spec, dataset_root=dataset_root, episode=episode_selector
+    )
     episode = resolve_episode(spec, for_hardware=False)
-    records = read_deviceio_records(episode.deviceio_mcap)
-    source_start = records[0].timestamp_ns
+    records = iter_deviceio_records(episode.deviceio_mcap)
+    first = next(records, None)
+    if first is None:
+        raise PlaybackConfigError("deviceio MCAP contains no JSON records")
+    source_start = first.timestamp_ns
     timeline_start = source_start
     wall_start = time.monotonic_ns()
     visualize = spec.visualize
@@ -31,8 +58,20 @@ def run_offline(config_path: str | Path) -> int:
         viewer_port=visualize.viewer_port,
         recording_id=str(episode.manifest.get("episode_uuid", "")) or None,
     )
+    logged = 0
+    seen = 0
+    last_logged_ns: dict[str, int] = {}
     try:
-        for record in records:
+        for record in chain((first,), records):
+            seen += 1
+            rate = _visualization_rate(record, visualize)
+            previous = last_logged_ns.get(record.topic)
+            if previous is not None and (
+                record.timestamp_ns >= previous
+                and record.timestamp_ns - previous < int(1e9 / rate)
+            ):
+                continue
+            last_logged_ns[record.topic] = record.timestamp_ns
             offset = record.timestamp_ns - source_start
             scaled_offset = int(offset / visualize.speed)
             if visualize.realtime:
@@ -50,10 +89,11 @@ def run_offline(config_path: str | Path) -> int:
                 timing_valid=record.timing_valid,
                 invalid_reason=str(record.envelope.get("invalid_reason", "")),
             )
+            logged += 1
     finally:
         visualizer.close()
     print(
-        f"visualized {len(records)} records from {episode.directory} "
+        f"visualized {logged}/{seen} records from {episode.directory} "
         f"at {visualize.speed:g}x; hardware_writes=false"
     )
     return 0
@@ -68,10 +108,24 @@ def main(argv: list[str] | None = None) -> int:
             "this command never writes to hardware."
         ),
     )
-    parser.parse_args(selected)
+    parser.add_argument("--playback-config", default="")
+    parser.add_argument("--dataset", default="", help="dataset directory")
+    parser.add_argument(
+        "--episode", default="", help="latest, numeric index, or directory name"
+    )
+    args = parser.parse_args(selected)
     project_root = Path(__file__).resolve().parents[3]
+    config_path = (
+        Path(args.playback_config)
+        if args.playback_config
+        else project_root / "config" / "playback.yaml"
+    )
     try:
-        return run_offline(project_root / "config" / "playback.yaml")
+        return run_offline(
+            config_path,
+            dataset_root=args.dataset or None,
+            episode_selector=args.episode or None,
+        )
     except (OSError, ValueError, PlaybackConfigError, RuntimeError) as exc:
         raise SystemExit(f"visualize failed: {exc}") from exc
 

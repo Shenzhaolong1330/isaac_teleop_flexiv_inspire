@@ -3,7 +3,7 @@ schema_version: 1
 site_config: config/site.yaml
 
 dataset:
-  # Dataset directory created by config/recording.yaml.
+  # `robot visualize` 和 `robot replay` 都只从这里选择数据。
   root: sessions/pick_place_demo
   # latest | numeric episode_index | exact episode directory name.
   episode: latest
@@ -14,7 +14,12 @@ visualize:
   save_path: artifacts/playback/playback.rrd
   viewer_port: 9876
   speed: 1.0
-  realtime: false            # false loads immediately; Rerun timeline still preserves timing
+  realtime: true             # 按真实时间流式播放，避免一次性灌满 Rerun
+  # 只影响可视化，不改变 MCAP 中的原始采样率。
+  telemetry_hz: 5.0
+  tactile_hz: 10.0
+  image_hz: 10.0
+  pointcloud_hz: 2.0
 
 replay:
   # Hardware execution is impossible until both fields below are deliberately set.

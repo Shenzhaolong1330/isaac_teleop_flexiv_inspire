@@ -7,11 +7,14 @@ from .runtime import (
     ProfileSnapshotMapper,
     SyncPolicyProfileClient,
 )
+from .control import PolicyActionError, SyncPolicyActionClient
 
 __all__ = [
     "PROFILE_CHANNELS",
     "PROFILE_IMAGE_CHANNELS",
     "ProfileRuntimeError",
     "ProfileSnapshotMapper",
+    "PolicyActionError",
+    "SyncPolicyActionClient",
     "SyncPolicyProfileClient",
 ]

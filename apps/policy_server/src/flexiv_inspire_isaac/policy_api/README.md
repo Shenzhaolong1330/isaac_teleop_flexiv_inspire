@@ -29,7 +29,10 @@ External LeRobot environments use the portable Python 3.10+ packages in
 Inspire, or RealSense dependency. `SyncPolicyProfileClient` compiles a named
 profile against `DescribeSystem`, rejects missing/stale channels, and produces
 the exact `observation.state` and image keys declared by the dataset contract.
-It is read-only: P3 exposes no lease or action call.
+`SyncPolicyProfileClient` remains read-only. The separate
+`SyncPolicyActionClient` is opt-in: it lazily obtains the existing v1 lease and
+keeps one v2 action stream, so observation-only consumers never gain motion
+authority.
 
 Smoke the real wire path after starting the policy server:
 

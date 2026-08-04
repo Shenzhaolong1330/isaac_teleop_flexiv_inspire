@@ -658,9 +658,10 @@ Python 3.12 主包，也不替换它现有的 LeRobot：
   -e "$ROOT/libs/policy_client"
 ```
 
-P3 的 `isaac_flexiv_rpc` 强制 `shadow_only: true`：它用 `GetSnapshot` 读取与
-checkpoint metadata 完全一致的观测，策略动作只校验和打印，绝不下发真机。
-本地 Home/Enable/F/T 清零仍由本仓库负责。
+`isaac_flexiv_rpc` 默认 `shadow_only: true`：它用 `GetSnapshot` 读取与 checkpoint
+metadata 完全一致的观测，策略动作只校验和打印，绝不下发真机。P4 动作代码必须
+在完成长时间 shadow 后由操作者显式设置 `shadow_only: false` 才会启用；本地
+Home/Enable/F/T 清零始终由本仓库负责。
 
 远程策略显式绑定机器人地址时必须使用 mTLS：
 
@@ -685,7 +686,9 @@ flexiv-inspire-authorize-control \
   --socket "$RDK_SOCKET"
 ```
 
-远程客户端随后才能 `AcquireControlLease`。lease/heartbeat/TTL 任一失效都
+将旧 LeRobot 配置中的 `shadow_only` 显式改为 `false` 后，客户端会在第一个 action
+到来时申请 lease；连接和加载 checkpoint 本身不会申请运动权限。lease、脚踏、
+heartbeat、TTL 任一失效都
 锁存 hold；观测拥塞丢旧保新，动作不积压。teleop、policy、replay 永远
 互斥。
 

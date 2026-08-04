@@ -12,6 +12,7 @@ from .rotation import (
     rotation6d_to_matrix,
     rotvec_to_matrix,
 )
+from .registry import ActionMappingRegistry
 
 
 class MappingError(ValueError):
@@ -63,6 +64,24 @@ def policy_action24_to_native30(value: Sequence[float]) -> np.ndarray:
         (policy[6:9], matrix_to_rotation6d(rotvec_to_matrix(policy[9:12])))
     )
     return np.concatenate((left, right, _native_hands(policy[12:24])))
+
+
+def flexiv_inspire_action_mappings() -> ActionMappingRegistry:
+    """Build the station mapping registry without importing RPC or hardware code."""
+
+    return (
+        ActionMappingRegistry(canonical_dimension=30)
+        .register(
+            "cartesian_delta_rotvec_v1",
+            input_dimension=24,
+            transform=policy_action24_to_native30,
+        )
+        .register(
+            "flexiv_inspire_native_rot6d_v1",
+            input_dimension=30,
+            transform=lambda value: value,
+        )
+    )
 
 
 def _pose_rotvecs(arm_pose18: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:

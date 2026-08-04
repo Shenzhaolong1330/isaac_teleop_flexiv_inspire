@@ -1,14 +1,22 @@
-"""gRPC PolicyDataService v2 read-only data-plane implementation."""
+"""gRPC PolicyDataService v2 multi-rate data and guarded action plane."""
 
 from __future__ import annotations
 
 import asyncio
 import math
+import secrets
 import time
 from typing import Callable
 
-from policy_contracts import SystemSchema, TensorDescriptor
+import numpy as np
+from policy_contracts import (
+    ActionMappingRegistry,
+    SystemSchema,
+    TensorDescriptor,
+    flexiv_inspire_action_mappings,
+)
 
+from .broker import LatestActionBuffer, PolicyStreamLiveness
 from .channel_broker import (
     ChannelBroker,
     ChannelDataError,
@@ -17,7 +25,8 @@ from .channel_broker import (
 )
 from .generated import policy_data_v2_pb2 as pb
 from .generated import policy_data_v2_pb2_grpc as pb_grpc
-from .lease import LocalControlState
+from .lease import ControlLeaseManager, LocalControlState
+from .models import ActionChunk, ActionPoint, validate_action_chunk
 
 
 _DTYPE_TO_PROTO = {
@@ -35,6 +44,88 @@ _DTYPE_TO_PROTO = {
     "float64": pb.FLOAT64,
     "bytes": pb.BYTES,
 }
+
+_DTYPE_TO_NUMPY = {
+    "float32": np.dtype("<f4"),
+}
+
+
+def _peer_identity(context) -> str:
+    common_names = context.auth_context().get("x509_common_name", ())
+    common_name = (
+        common_names[0].decode("utf-8", errors="replace") if common_names else ""
+    )
+    return f"{context.peer()}|{common_name}"
+
+
+def decode_policy_action_chunk(
+    request,
+    *,
+    schema: SystemSchema,
+    receive_ns: int,
+    action_mappings: ActionMappingRegistry | None = None,
+) -> ActionChunk:
+    """Validate a v2 wire chunk and convert it once to canonical v1 30D.
+
+    Metadata remains outside the policy tensor.  The only currently registered
+    policy action representation is 24D world-frame XYZ + rotation-vector +
+    normalized absolute hand targets.  The native 30D representation is also
+    accepted for existing PolicyService clients.
+    """
+
+    if int(request.schema_version) != schema.schema_version:
+        raise ValueError("unsupported PolicyData schema version")
+    if not request.schema_hash or request.schema_hash != schema.schema_hash:
+        raise ValueError("system schema hash changed")
+    try:
+        descriptor = schema.action(request.action_schema_id)
+    except ValueError as exc:
+        raise ValueError(f"unknown action schema: {request.action_schema_id}") from exc
+    if descriptor.frame_id != "world" or not descriptor.relative:
+        raise ValueError("only relative world-frame actions are supported")
+    try:
+        numpy_dtype = _DTYPE_TO_NUMPY[descriptor.tensor.dtype]
+    except KeyError as exc:
+        raise ValueError(
+            f"action dtype is not executable: {descriptor.tensor.dtype}"
+        ) from exc
+    expected_proto_dtype = _DTYPE_TO_PROTO[descriptor.tensor.dtype]
+    expected_shape = tuple(descriptor.tensor.shape)
+    expected_count = int(math.prod(expected_shape))
+
+    mappings = action_mappings or flexiv_inspire_action_mappings()
+    points: list[ActionPoint] = []
+    for point in request.points:
+        payload = point.action
+        if int(payload.dtype) != expected_proto_dtype:
+            raise ValueError("action tensor dtype differs from its descriptor")
+        if tuple(payload.shape) != expected_shape:
+            raise ValueError("action tensor shape differs from its descriptor")
+        if len(payload.data) != expected_count * numpy_dtype.itemsize:
+            raise ValueError("action tensor byte length differs from its descriptor")
+        policy_values = np.frombuffer(payload.data, dtype=numpy_dtype).astype(
+            np.float64, copy=False
+        )
+        native_values = mappings.map(descriptor.schema_id, policy_values)
+        points.append(
+            ActionPoint(
+                execute_after_s=int(point.execute_after_ns) / 1e9,
+                values=tuple(float(value) for value in native_values),
+            )
+        )
+
+    return ActionChunk(
+        schema_version=1,
+        lease_id=str(request.lease_id),
+        session_id=str(request.session_id),
+        sequence=int(request.sequence),
+        client_issued_monotonic_ns=int(request.client_issued_monotonic_ns),
+        server_receive_monotonic_ns=int(receive_ns),
+        ttl_from_server_receive_ns=int(request.ttl_from_server_receive_ns),
+        frame_id=descriptor.frame_id,
+        deadman=bool(request.deadman),
+        points=tuple(points),
+    )
 
 
 def tensor_descriptor_message(descriptor: TensorDescriptor) -> pb.TensorDescriptor:
@@ -163,10 +254,22 @@ class PolicyDataServicer(pb_grpc.PolicyDataServiceServicer):
         schema: SystemSchema,
         broker: ChannelBroker,
         local_state: Callable[[], LocalControlState],
+        lease_manager: ControlLeaseManager | None = None,
+        action_buffer: LatestActionBuffer[ActionChunk] | None = None,
+        stop_callback: Callable[[str], None] | None = None,
+        action_liveness: PolicyStreamLiveness | None = None,
+        last_sequence_by_lease: dict[str, int] | None = None,
+        action_mappings: ActionMappingRegistry | None = None,
     ) -> None:
         self.schema = schema
         self.broker = broker
         self.local_state = local_state
+        self.lease_manager = lease_manager
+        self.action_buffer = action_buffer
+        self.stop_callback = stop_callback
+        self.action_liveness = action_liveness
+        self.last_sequence_by_lease = last_sequence_by_lease
+        self.action_mappings = action_mappings or flexiv_inspire_action_mappings()
 
     def _validate_expectations(self, schema_hash: str, session_id: str) -> None:
         if schema_hash and schema_hash != self.schema.schema_hash:
@@ -306,6 +409,90 @@ class PolicyDataServicer(pb_grpc.PolicyDataServiceServicer):
         except ChannelDataError as exc:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
+    async def StreamActions(self, request_iterator, context):
+        """Accept v2 policy actions through the existing v1 safety ingress."""
+
+        import grpc
+
+        if (
+            self.lease_manager is None
+            or self.action_buffer is None
+            or self.stop_callback is None
+            or self.action_liveness is None
+            or self.last_sequence_by_lease is None
+        ):
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "PolicyData action plane is not configured",
+            )
+            return
+
+        peer = _peer_identity(context)
+        stream_id = secrets.token_urlsafe(16)
+        accepted_lease_id = ""
+        try:
+            async for request in request_iterator:
+                receive_ns = time.monotonic_ns()
+                try:
+                    state = self.local_state()
+                    if request.session_id != state.session_id:
+                        self.lease_manager.invalidate()
+                        raise PermissionError("hardware session changed")
+                    if not state.policy_lease_allowed:
+                        self.lease_manager.invalidate()
+                        raise PermissionError("local policy authorization lost")
+                    self.lease_manager.validate(
+                        request.lease_id,
+                        peer,
+                        state.session_id,
+                        refresh_ms=10_000,
+                    )
+                    previous = self.last_sequence_by_lease.get(request.lease_id, -1)
+                    if request.sequence <= previous:
+                        raise ValueError(
+                            "action sequence must strictly increase per lease"
+                        )
+                    chunk = decode_policy_action_chunk(
+                        request,
+                        schema=self.schema,
+                        receive_ns=receive_ns,
+                        action_mappings=self.action_mappings,
+                    )
+                    validate_action_chunk(chunk, now_ns=time.monotonic_ns())
+                    self.last_sequence_by_lease[request.lease_id] = request.sequence
+                    accepted_lease_id = str(request.lease_id)
+                    self.action_buffer.put(chunk)
+                    self.action_liveness.arm(
+                        stream_id=stream_id,
+                        lease_id=request.lease_id,
+                        session_id=request.session_id,
+                        sequence=request.sequence,
+                        action_deadline_ns=(
+                            receive_ns + request.ttl_from_server_receive_ns
+                        ),
+                    )
+                    yield pb.PolicyActionResult(
+                        sequence=request.sequence,
+                        accepted=True,
+                        control_state=state.state,
+                    )
+                except (PermissionError, ValueError) as exc:
+                    self.lease_manager.invalidate()
+                    self.last_sequence_by_lease.pop(request.lease_id, None)
+                    if self.action_liveness.disarm(stream_id):
+                        self.stop_callback(f"policy-action-v2-rejected:{exc}")
+                    yield pb.PolicyActionResult(
+                        sequence=request.sequence,
+                        accepted=False,
+                        reason=str(exc),
+                        control_state=self.local_state().state,
+                    )
+        finally:
+            if self.action_liveness.disarm(stream_id):
+                self.lease_manager.invalidate()
+                self.last_sequence_by_lease.pop(accepted_lease_id, None)
+                self.stop_callback("policy-action-v2-stream-ended")
+
 
 def add_policy_data_servicer(
     server,
@@ -313,8 +500,24 @@ def add_policy_data_servicer(
     schema: SystemSchema,
     broker: ChannelBroker,
     local_state: Callable[[], LocalControlState],
+    lease_manager: ControlLeaseManager | None = None,
+    action_buffer: LatestActionBuffer[ActionChunk] | None = None,
+    stop_callback: Callable[[str], None] | None = None,
+    action_liveness: PolicyStreamLiveness | None = None,
+    last_sequence_by_lease: dict[str, int] | None = None,
+    action_mappings: ActionMappingRegistry | None = None,
 ) -> None:
     pb_grpc.add_PolicyDataServiceServicer_to_server(
-        PolicyDataServicer(schema=schema, broker=broker, local_state=local_state),
+        PolicyDataServicer(
+            schema=schema,
+            broker=broker,
+            local_state=local_state,
+            lease_manager=lease_manager,
+            action_buffer=action_buffer,
+            stop_callback=stop_callback,
+            action_liveness=action_liveness,
+            last_sequence_by_lease=last_sequence_by_lease,
+            action_mappings=action_mappings,
+        ),
         server,
     )

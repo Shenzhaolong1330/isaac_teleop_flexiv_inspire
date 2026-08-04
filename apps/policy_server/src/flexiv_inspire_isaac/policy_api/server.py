@@ -15,7 +15,7 @@ from .lease import ControlLeaseManager, LocalControlState
 from .models import ActionChunk, ActionPoint, capabilities_v1, validate_action_chunk
 from .channel_broker import ChannelBroker
 from .data_server import add_policy_data_servicer
-from policy_contracts import SystemSchema
+from policy_contracts import ActionMappingRegistry, SystemSchema
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,7 @@ async def serve(
     action_liveness: PolicyStreamLiveness | None = None,
     channel_broker: ChannelBroker | None = None,
     system_schema: SystemSchema | None = None,
+    action_mappings: ActionMappingRegistry | None = None,
 ) -> None:
     import grpc
     from .generated import policy_service_v1_pb2 as pb
@@ -62,10 +63,13 @@ async def serve(
 
     if action_liveness is None:
         action_liveness = PolicyStreamLiveness()
+    # v1 and v2 share one monotonic sequence domain per lease.  A client cannot
+    # replay a delta by switching endpoints.
+    last_sequence_by_lease: dict[str, int] = {}
 
     class Servicer(pb_grpc.PolicyServiceServicer):
         def __init__(self) -> None:
-            self._last_sequence_by_lease: dict[str, int] = {}
+            self._last_sequence_by_lease = last_sequence_by_lease
 
         async def GetCapabilities(self, request, context):
             values = capabilities_v1()
@@ -246,6 +250,7 @@ async def serve(
             stop_callback(request.reason or "remote-policy-stop")
             lease_manager.invalidate()
             action_liveness.clear()
+            last_sequence_by_lease.pop(request.lease_id, None)
             return pb.StopResult(
                 latched=False,
                 control_state=state.state,
@@ -274,6 +279,12 @@ async def serve(
             schema=system_schema,
             broker=channel_broker,
             local_state=local_state,
+            lease_manager=lease_manager,
+            action_buffer=action_buffer,
+            stop_callback=stop_callback,
+            action_liveness=action_liveness,
+            last_sequence_by_lease=last_sequence_by_lease,
+            action_mappings=action_mappings,
         )
     bound_port = server.add_secure_port(f"{bind_host}:{port}", credentials)
     if bound_port == 0:

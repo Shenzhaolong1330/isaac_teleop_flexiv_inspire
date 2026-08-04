@@ -263,8 +263,10 @@ Home、Enable 和 F/T 清零仍由本机 `robot reset/record` 流程负责。RPC
 LeRobot 0.6/0.3.4 dataset 加载、batch 冒烟和 LeRobot 0.3.4 ACT 单步优化均已完成。
 P3 的 Python 3.10+ 可移植 client 与 `isaac_flexiv_rpc` shadow Robot 已完成，真实跨
 环境 gRPC snapshot 和 TLS 连接已验证；长时间 shadow/checkpoint 现场验收仍待执行。
-P4 真机 action stream 尚未启用。所有新能力均为显式 opt-in，默认
-`config/conversion.yaml`、v1 RPC 和旧直连 Robot 未改。
+P4 的 v2 action stream、共享 v1 lease/TTL/sequence 安全入口和显式 LeRobot
+guarded-action 模式已实现，并已通过真实 loopback gRPC 往返；默认仍为 shadow，
+真机单臂/双臂/双手现场验收尚未执行。所有新能力均为显式 opt-in，默认
+`config/conversion.yaml`、v1 RPC、shadow 配置和旧直连 Robot 未改。
 
 ### P-1：兼容基线
 

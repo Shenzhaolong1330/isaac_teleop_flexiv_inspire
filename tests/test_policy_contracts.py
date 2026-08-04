@@ -8,6 +8,7 @@ import yaml
 
 from flexiv_inspire_isaac.policy_api.models import capabilities_v1
 from policy_contracts import (
+    ActionMappingRegistry,
     ActionSchema,
     ChannelDescriptor,
     DUAL_ARM_LEROBOT_V1_PROFILE,
@@ -17,6 +18,7 @@ from policy_contracts import (
     SystemSchema,
     TensorDescriptor,
     cartesian_minimal_state,
+    flexiv_inspire_action_mappings,
     joint_minimal_state,
     legacy_state38,
     matrix_to_rotvec,
@@ -121,6 +123,35 @@ def test_native_and_policy_action_roundtrip_preserves_se3_and_hands() -> None:
         atol=1e-7,
     )
     assert np.allclose(recovered[18:30], native[18:30])
+
+
+def test_action_mapping_registry_supports_multiple_contracts_without_transport() -> None:
+    registry = flexiv_inspire_action_mappings()
+    policy = native_action30_to_policy24(_native_action())
+
+    mapped_policy = registry.map("cartesian_delta_rotvec_v1", policy)
+    mapped_native = registry.map("flexiv_inspire_native_rot6d_v1", _native_action())
+
+    assert registry.schema_ids == (
+        "cartesian_delta_rotvec_v1",
+        "flexiv_inspire_native_rot6d_v1",
+    )
+    assert np.allclose(mapped_policy, policy_action24_to_native30(policy))
+    assert np.allclose(mapped_native, _native_action())
+
+
+def test_custom_action_mapping_registry_is_dimension_checked() -> None:
+    registry = ActionMappingRegistry(canonical_dimension=3).register(
+        "test_delta_v1",
+        input_dimension=2,
+        transform=lambda value: (value[0], value[1], 0.0),
+    )
+
+    assert np.allclose(registry.map("test_delta_v1", [1.0, 2.0]), [1.0, 2.0, 0.0])
+    with pytest.raises(ValueError, match="2 finite"):
+        registry.map("test_delta_v1", [1.0])
+    with pytest.raises(ValueError, match="no canonical mapping"):
+        registry.map("unknown", [1.0, 2.0])
 
 
 def test_state_profiles_do_not_duplicate_pose_representations() -> None:

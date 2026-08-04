@@ -17,6 +17,8 @@ sed -i 's/^import policy_data_v2_pb2 as /from . import policy_data_v2_pb2 as /' 
   "${OUTPUT_DIR}/policy_data_v2_pb2_grpc.py"
 mkdir -p "${PORTABLE_OUTPUT_DIR}"
 cp \
+  "${OUTPUT_DIR}/policy_service_v1_pb2.py" \
+  "${OUTPUT_DIR}/policy_service_v1_pb2_grpc.py" \
   "${OUTPUT_DIR}/policy_data_v2_pb2.py" \
   "${OUTPUT_DIR}/policy_data_v2_pb2_grpc.py" \
   "${PORTABLE_OUTPUT_DIR}/"

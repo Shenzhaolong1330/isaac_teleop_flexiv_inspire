@@ -35,10 +35,14 @@ chmod 0644 \
   "${POLICY_OUT}/policy_data_v2_pb2_grpc.py"
 mkdir -p "${PORTABLE_POLICY_OUT}"
 cp \
+  "${POLICY_OUT}/policy_service_v1_pb2.py" \
+  "${POLICY_OUT}/policy_service_v1_pb2_grpc.py" \
   "${POLICY_OUT}/policy_data_v2_pb2.py" \
   "${POLICY_OUT}/policy_data_v2_pb2_grpc.py" \
   "${PORTABLE_POLICY_OUT}/"
 chmod 0644 \
+  "${PORTABLE_POLICY_OUT}/policy_service_v1_pb2.py" \
+  "${PORTABLE_POLICY_OUT}/policy_service_v1_pb2_grpc.py" \
   "${PORTABLE_POLICY_OUT}/policy_data_v2_pb2.py" \
   "${PORTABLE_POLICY_OUT}/policy_data_v2_pb2_grpc.py"
 

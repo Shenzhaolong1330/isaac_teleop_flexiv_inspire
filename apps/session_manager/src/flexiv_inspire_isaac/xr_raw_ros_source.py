@@ -303,6 +303,7 @@ def _install_cloudxr_client_overrides(
         )
 
         async def resilient_connect(**kwargs):
+            initial_failed = False
             try:
                 initial_monitor = await original_connect(**kwargs)
             except asyncio.CancelledError:
@@ -316,13 +317,26 @@ def _install_cloudxr_client_overrides(
                     exc,
                 )
                 initial_monitor = None
+                initial_failed = True
+            # A first CONNECT failure means there is no useful XR session to
+            # preserve. Retry promptly instead of applying the normal
+            # mid-stream grace period: Quest Browser can occasionally leave
+            # the first freshly opened page in a failed signalling state even
+            # though the USB reverse ports and WSS proxy are already ready.
+            # Once a session has existed, retain the longer grace so a short
+            # headset/browser scheduling pause does not churn the connection.
+            retry_grace_s = (
+                min(2.0, reconnect_grace_s)
+                if initial_failed
+                else reconnect_grace_s
+            )
             return asyncio.create_task(
                 _maintain_oob_connection(
                     original_connect,
                     dict(kwargs),
                     session_live,
                     initial_monitor,
-                    reconnect_grace_s=reconnect_grace_s,
+                    reconnect_grace_s=retry_grace_s,
                 ),
                 name="flexiv-quest-oob-reconnect-watchdog",
             )

@@ -121,6 +121,52 @@ def test_reset_recovers_fault_by_restarting_bridge_then_retrying(tmp_path, monke
     assert service_starts == [config, config]
 
 
+def test_reset_restarts_stuck_rdk_stack_then_retries_once(tmp_path, monkeypatch):
+    tool_config = tmp_path / "tool_payload.yaml"
+    tool_config.write_text("schema_version: 1\n", encoding="utf-8")
+    calls = 0
+    module = ModuleType("flexiv_inspire_control.zero_ft_local")
+
+    def fake_main(_argv: list[str]) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("timed out")
+        return 0
+
+    module.main = fake_main
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(cli.sys, "stdin", _InteractiveInput())
+    daemon_starts = []
+    monkeypatch.setattr(
+        cli,
+        "_ensure_rdk_daemon",
+        lambda config: daemon_starts.append(config) or tmp_path / "rdk.sock",
+    )
+    service_starts = []
+    monkeypatch.setattr(
+        cli, "_ensure_reset_ros_services", lambda config: service_starts.append(config)
+    )
+    stops = []
+    monkeypatch.setattr(
+        cli,
+        "_stop_managed_services",
+        lambda config, require_existing: stops.append((config, require_existing)) or 3,
+    )
+    config = _Config(tmp_path, tool_config)
+
+    result = cli._run_reset(
+        config,
+        SimpleNamespace(preview_seconds=0.0),
+    )
+
+    assert result == 0
+    assert calls == 2
+    assert daemon_starts == [config, config]
+    assert service_starts == [config, config]
+    assert stops == [(config, False)]
+
+
 def test_reset_parser_needs_no_confirmation_argument():
     args = cli._parser().parse_args(["reset"])
 
@@ -585,7 +631,7 @@ def test_record_keeps_running_when_rtp_bridge_has_no_frame(tmp_path, capsys):
     assert "record 和遥操继续" in capsys.readouterr().out
 
 
-def test_xr_control_gate_requires_encoded_and_displayed_frame(tmp_path):
+def test_optional_xr_video_reports_encoded_and_displayed_frame(tmp_path):
     bridge_log = tmp_path / "bridge.log"
     receiver_log = tmp_path / "receiver.log"
     bridge_log.write_text(
@@ -601,7 +647,7 @@ def test_xr_control_gate_requires_encoded_and_displayed_frame(tmp_path):
         def poll(self):
             return None
 
-    assert cli._wait_for_xr_video_control_gate(
+    assert cli._report_optional_xr_video_status(
         [
             ["flexiv-inspire-xr-bridge"],
             ["run_isaac_camera_receiver.sh"],
@@ -609,11 +655,12 @@ def test_xr_control_gate_requires_encoded_and_displayed_frame(tmp_path):
         [Process(), Process()],
         [bridge_log, receiver_log],
         ("head",),
-        timeout_s=0.1,
+        bridge_timeout_s=0.1,
+        receiver_timeout_s=0.1,
     ) is True
 
 
-def test_xr_control_gate_times_out_without_display(tmp_path, capsys):
+def test_optional_xr_video_does_not_block_without_display(tmp_path, capsys):
     bridge_log = tmp_path / "bridge.log"
     receiver_log = tmp_path / "receiver.log"
     bridge_log.write_text(
@@ -626,7 +673,7 @@ def test_xr_control_gate_times_out_without_display(tmp_path, capsys):
         def poll(self):
             return None
 
-    assert cli._wait_for_xr_video_control_gate(
+    assert cli._report_optional_xr_video_status(
         [
             ["flexiv-inspire-xr-bridge"],
             ["run_isaac_camera_receiver.sh"],
@@ -634,9 +681,10 @@ def test_xr_control_gate_times_out_without_display(tmp_path, capsys):
         [Process(), Process()],
         [bridge_log, receiver_log],
         ("head",),
-        timeout_s=0.01,
+        bridge_timeout_s=0.01,
+        receiver_timeout_s=0.01,
     ) is False
-    assert "机械臂遥操作尚未启用" in capsys.readouterr().out
+    assert "record 和遥操继续" in capsys.readouterr().out
 
 
 def test_foreground_collection_ctrl_c_finalizes_controller_and_stops_pedal(

@@ -86,6 +86,12 @@ case "$TRANSPORT" in
       echo "Quest USB 数据连接未就绪：请解锁头显并允许 USB 调试，然后重试。" >&2
       exit 2
     fi
+    # A crashed CloudXR/WSS run can leave these device-side reverse listeners
+    # behind. Clear only the ports owned by this launcher before recreating
+    # them; otherwise adb reports "cannot bind listener: Address already in use".
+    for cloudxr_port in 8080 48322 49100; do
+      adb reverse --remove "tcp:${cloudxr_port}" >/dev/null 2>&1 || true
+    done
     echo "XR 使用 USB 本地链路：信令、网页和 WebRTC 媒体均经数据线。" >&2
     ;;
   *)

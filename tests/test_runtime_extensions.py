@@ -225,7 +225,7 @@ def test_canonical_yaml_hash_ignores_comments_and_layout(tmp_path):
     assert sha256_file(first) != sha256_file(second)
 
 
-def _episode_session(tmp_path):
+def _episode_session(tmp_path, **kwargs):
     tool = tmp_path / "tool.yaml"
     tool.write_text("schema_version: 1\ntool: test\n")
     digest = canonical_yaml_sha256(tool)
@@ -235,7 +235,12 @@ def _episode_session(tmp_path):
         "tool_payload_config_hash": digest, "connection_generation": 1,
     }) + "\n")
     return EpisodeSession(
-        tmp_path / "episodes", "s", {"calibration": tool}, tool, event
+        tmp_path / "episodes",
+        "s",
+        {"calibration": tool},
+        tool,
+        event,
+        **kwargs,
     )
 
 
@@ -348,6 +353,93 @@ def test_rerecord_without_sent_command_is_retained_but_not_an_error(tmp_path):
     manifest = json.loads(episode.manifest_path.read_text())
     assert manifest["completed"] is False
     assert manifest["completion_reason"] == "rerecord-requested"
+
+
+def test_training_deviceio_profile_drops_diagnostics_but_keeps_training_data(tmp_path):
+    episode = _episode_session(tmp_path)
+    episode._deviceio_profile = "training"
+
+    def envelope(topic: str, sequence: int) -> RecordEnvelope:
+        return RecordEnvelope(
+            topic=topic,
+            source_time_ns=sequence,
+            host_receive_time_ns=sequence,
+            sequence=sequence,
+            valid=True,
+            mapped_host_time_ns=sequence,
+            payload={"value": sequence},
+        )
+
+    episode.submit(envelope("/control/requested_command", 1))
+    episode.submit(envelope("/control/safe_command", 2))
+    episode.submit(envelope("/control/sent_command", 3))
+    episode.submit(envelope("/robot/left_arm/state", 4))
+
+    assert "control/requested_command" not in episode.manifest.streams
+    assert "control/safe_command" not in episode.manifest.streams
+    assert episode.manifest.streams["control/sent_command"].samples == 1
+    assert episode.manifest.streams["robot/left_arm/state"].samples == 1
+    episode.abort(reason="test-complete")
+
+
+def test_motion_only_recording_uses_middle_pedal_gate(tmp_path):
+    episode = _episode_session(
+        tmp_path,
+        deviceio_profile="training",
+        record_only_while_pedal_pressed=True,
+    )
+
+    def envelope(sequence: int) -> RecordEnvelope:
+        return RecordEnvelope(
+            topic="/robot/left_arm/state",
+            source_time_ns=sequence,
+            host_receive_time_ns=sequence,
+            sequence=sequence,
+            valid=True,
+            mapped_host_time_ns=sequence,
+            payload={"value": sequence},
+        )
+
+    episode.submit(envelope(1))
+    assert "robot/left_arm/state" not in episode.manifest.streams
+
+    episode.set_motion_recording(True)
+    episode.submit(envelope(2))
+    assert episode.manifest.streams["robot/left_arm/state"].samples == 1
+
+    episode.set_motion_recording(False)
+    episode.submit(envelope(3))
+    assert episode.manifest.streams["robot/left_arm/state"].samples == 1
+    assert episode.manifest.suppressed_samples == 2
+    episode.abort(reason="test-complete")
+
+
+def test_disabled_ros_mcap_is_absent_from_manifest_and_finish(tmp_path):
+    tool = tmp_path / "tool.yaml"
+    tool.write_text("schema_version: 1\ntool: test\n")
+    digest = canonical_yaml_sha256(tool)
+    event = tmp_path / "ft.jsonl"
+    event.write_text(json.dumps({
+        "event_type": "ft_zero_completed",
+        "session_id": "s",
+        "success": True,
+        "tool_payload_config_hash": digest,
+        "connection_generation": 1,
+    }) + "\n")
+    episode = EpisodeSession(
+        tmp_path / "episodes",
+        "s",
+        {"calibration": tool},
+        tool,
+        event,
+        record_ros_mcap=False,
+    )
+    bag = RosbagProcess(episode.ros_path, enabled=False)
+    bag.start()
+    episode.finish(bag, reason="rerecord-requested")
+
+    assert episode.manifest.ros_mcap == ""
+    assert not episode.ros_path.exists()
 
 
 def test_startup_abort_closes_recorder_and_writes_failed_manifest(tmp_path):

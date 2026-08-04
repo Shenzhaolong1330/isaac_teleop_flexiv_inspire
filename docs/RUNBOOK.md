@@ -258,8 +258,9 @@ adb devices -l
 ```
 
 本系统不使用 NVIDIA 示例的 Sharpa retargeter，也不需要 Sharpa URDF。
-`flexiv-inspire-xr-raw-source` 直接发布 Quest 控制器位姿和 MANUS/OpenXR
-每手 25 个原始关节；Inspire 六路映射由下一层现场标定完成。
+`flexiv-inspire-xr-raw-source` 发布 Quest 控制器腕部位姿；MANUS
+Integrated SDK 的 Ergonomics 回调发布手指关节角。Inspire 六路映射
+由下一层左右手独立现场标定完成。
 在本地交互终端 D 启动：
 
 ```bash
@@ -275,41 +276,41 @@ flexiv-inspire-xr-raw-source --ros-args \
 拥有 CloudXR runtime/WSS proxy；不要同时运行独立
 `python -m isaacteleop.cloudxr`。
 
-CloudXR 运行并生成 `~/.cloudxr/run/cloudxr.env` 后，在终端 E 启动 MANUS：
+`robot record` 会自动启动 MANUS 插件和 Ergonomics ROS 源。单独调试时
+可在终端 E 启动：
 
 ```bash
 source "$ROOT/scripts/env/activate_isaac.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-set -a
-source "$HOME/.cloudxr/run/cloudxr.env"
-set +a
-"$ROOT/third_party/IsaacTeleop/install/manus-isaac/plugins/manus/manus_hand_plugin"
+"$ROOT/orchestration/run_manus_plugin.sh" \
+  --ergonomics-udp 127.0.0.1:15053
 ```
 
-先验证 `/xr_teleop/ee_poses`、`/xr_teleop/controller_data`、`/tf` 和
-50-pose `/xr_teleop/hand`。MANUS SDK 连接成功不等于手套/Quest/坐标映射
-已经标定成功。
+该启动脚本显式跳过插件内的 OpenXR 会话，直接输出 Ergonomics；
+不会因 CloudXR/视频失败禁用手指。验证 `/xr_teleop/ee_poses`、
+`/xr_teleop/controller_data`、`/manus/left/ergonomics` 和
+`/manus/right/ergonomics`。MANUS SDK 连接成功不等于手指标定成功。
 
 保持遥操作为 shadow，用同一操作者和同一副手套分别采集自然完全张开和
 自然握拳，每个姿态保持约两秒：
 
 ```bash
 mkdir -p "$ROOT/artifacts/calibration"
-flexiv-inspire-manus-calibrate capture \
+flexiv-inspire-manus-calibrate capture-ergonomics \
   --pose open \
-  --output "$ROOT/artifacts/calibration/manus_open.yaml"
-flexiv-inspire-manus-calibrate capture \
+  --output "$ROOT/artifacts/calibration/manus_ergonomics_open.yaml"
+flexiv-inspire-manus-calibrate capture-ergonomics \
   --pose closed \
-  --output "$ROOT/artifacts/calibration/manus_closed.yaml"
-flexiv-inspire-manus-calibrate finalize \
-  --open "$ROOT/artifacts/calibration/manus_open.yaml" \
-  --closed "$ROOT/artifacts/calibration/manus_closed.yaml" \
-  --template "$ROOT/ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml" \
-  --output "$ROOT/artifacts/calibration/manus_inspire.yaml"
+  --output "$ROOT/artifacts/calibration/manus_ergonomics_closed.yaml"
+flexiv-inspire-manus-calibrate finalize-ergonomics \
+  --open "$ROOT/artifacts/calibration/manus_ergonomics_open.yaml" \
+  --closed "$ROOT/artifacts/calibration/manus_ergonomics_closed.yaml" \
+  --template "$ROOT/ros2_ws/src/flexiv_inspire_control/config/manus_ergonomics_calibration_template.yaml" \
+  --output "$ROOT/artifacts/calibration/manus_ergonomics_site.yaml"
 ```
 
 检查生成文件后，把 `config/sensors.yaml` 的 `teleop.manus_calibration` 指向
-`artifacts/calibration/manus_inspire.yaml`，重新 `validate`/`render`。
+`artifacts/calibration/manus_ergonomics_site.yaml`，重新 `validate`/`render`。
 采集工具拒绝覆盖已有文件，重做时先保留旧文件并换新文件名。
 
 ### 4.5 控制桥和遥操作映射保持 Shadow

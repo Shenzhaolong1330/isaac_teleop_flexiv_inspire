@@ -1,10 +1,13 @@
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import yaml
-
 from flexiv_inspire_isaac.cli import _commands
-from flexiv_inspire_isaac.system_config import SystemConfigError, load_system_config, render_runtime_configs
+from flexiv_inspire_isaac.system_config import (
+    SystemConfigError,
+    load_system_config,
+    render_runtime_configs,
+)
 
 
 def _example() -> Path:
@@ -19,7 +22,17 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     config = load_system_config(_example())
     rendered = render_runtime_configs(config, tmp_path)
     assert config.document["sampling"]["action_label"] == "sent_command"
-    assert set(rendered) == {"camera.yaml", "xr_bridge.yaml", "isaac_camera_receiver.yaml", "dftp.yaml", "control_bridge.yaml", "teleop.yaml", "pedal.yaml", "lerobot_export.yaml", "snapshot"}
+    assert set(rendered) == {
+        "camera.yaml",
+        "xr_bridge.yaml",
+        "isaac_camera_receiver.yaml",
+        "dftp.yaml",
+        "control_bridge.yaml",
+        "teleop.yaml",
+        "pedal.yaml",
+        "lerobot_export.yaml",
+        "snapshot",
+    }
     camera = yaml.safe_load(rendered["camera.yaml"].read_text())
     assert camera["cameras"]["head"]["width"] == 424
     assert camera["recording"]["depth_enabled"] is True
@@ -46,8 +59,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
         80,
     ]
     assert all(
-        isinstance(value, float)
-        for value in parameters["cartesian_position_stiffness"]
+        isinstance(value, float) for value in parameters["cartesian_position_stiffness"]
     )
     assert all(
         isinstance(value, float)
@@ -55,9 +67,9 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     )
     assert parameters["cartesian_damping_ratio"] == [0.7] * 6
     assert len(parameters["home_left_joints_rad"]) == 7
-    assert parameters["home_max_velocity_rad_s"] <= parameters[
-        "max_joint_velocity_rad_s"
-    ]
+    assert (
+        parameters["home_max_velocity_rad_s"] <= parameters["max_joint_velocity_rad_s"]
+    )
     assert parameters["max_joint_velocity_rad_s"] == 2.0
     assert parameters["home_lift_enabled"] is True
     assert parameters["home_lift_left_safe_z_m"] == -0.377676
@@ -88,15 +100,21 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert teleop["left_pose_index"] == 0
     assert teleop["right_pose_index"] == 1
     assert teleop["axis_rotation"] == [
-        0.0, 0.0, -1.0,
-        -1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
+        0.0,
+        0.0,
+        -1.0,
+        -1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
     ]
     assert teleop["translation_gain"] == 1.0
     assert teleop["rotation_gain"] == 1.0
-    pedal = yaml.safe_load(rendered["pedal.yaml"].read_text())["/**"][
-        "ros__parameters"
-    ]
+    assert teleop["manus_left_ergonomics_topic"] == "/manus/left/ergonomics"
+    assert teleop["manus_right_ergonomics_topic"] == "/manus/right/ergonomics"
+    pedal = yaml.safe_load(rendered["pedal.yaml"].read_text())["/**"]["ros__parameters"]
     assert pedal["foot_pedal"] == "name:input-remapper keyboard"
     assert pedal["enable_key_code"] == 57
     commands = _commands(config, rendered, include_xr_receiver=False)
@@ -115,8 +133,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
         "flexiv_inspire_control.teleop_input_node",
     ]
     xr_source = next(
-        command for command in commands
-        if command[0].endswith("run_xr_raw_source.sh")
+        command for command in commands if command[0].endswith("run_xr_raw_source.sh")
     )
     assert xr_source[xr_source.index("--transport") + 1] == "lan"
     assert xr_source[xr_source.index("--wifi-connection") + 1] == "Deepybo-Prime"
@@ -126,12 +143,23 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert xr_source[xr_source.index("--client-max-bitrate-mbps") + 1] == "80"
     assert xr_source[xr_source.index("--client-codec") + 1] == "h264"
     assert any(command[0].endswith("run_manus_plugin.sh") for command in commands)
+    ergonomics_source = next(
+        command
+        for command in commands
+        if "flexiv_inspire_control.manus_ergonomics_source" in command
+    )
+    assert "udp_host:=127.0.0.1" in ergonomics_source
+    assert "udp_port:=15053" in ergonomics_source
+    manus_plugin = next(
+        command for command in commands if command[0].endswith("run_manus_plugin.sh")
+    )
+    assert manus_plugin[-2:] == ["--ergonomics-udp", "127.0.0.1:15053"]
     episode = next(
         command
         for command in commands
         if "flexiv_inspire_isaac.episode_control" in command
     )
-    assert "home_result_timeout_s:=54.0" in episode
+    assert "home_result_timeout_s:=60.0" in episode
     assert any(
         item.endswith("/apps/flexiv_daemon/config/tool_payload.yaml")
         for item in episode
@@ -139,12 +167,8 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert any(item.endswith("/ft_zero_events.jsonl") for item in episode)
     assert not any(item.startswith("manus_calibration:=") for item in episode)
     assert not any(item.startswith("camera_head_extrinsics:=") for item in episode)
-    assert (
-        f"dataset_name:={config.document['recording']['dataset_name']}" in episode
-    )
-    assert (
-        f"episode_count:={config.document['recording']['episode_count']}" in episode
-    )
+    assert f"dataset_name:={config.document['recording']['dataset_name']}" in episode
+    assert f"episode_count:={config.document['recording']['episode_count']}" in episode
     assert any(
         item.startswith('task_description:="')
         and len(item) > len('task_description:=""')
@@ -158,6 +182,13 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     assert config.document["recording"]["dataset_name"] == "pick_place_demo"
     assert config.document["recording"]["episode_count"] == 20
     assert config.document["recording"]["auto_reset_before_record"] is True
+    assert config.document["recording"]["ros_mcap_enabled"] is False
+    assert config.document["recording"]["deviceio_profile"] == "training"
+    assert config.document["recording"]["record_only_while_pedal_pressed"] is True
+    assert config.document["sampling"]["arm_observation_hz"] == 300.0
+    assert config.document["sampling"]["hand_state_hz"] == 15.0
+    assert config.document["sampling"]["tactile_hz"] == 15.0
+    assert config.document["sampling"]["camera_hz"] == 15.0
     assert config.document["recording"]["live_rerun"] == {
         "enabled": True,
         "viewer_port": 9876,
@@ -166,9 +197,7 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "image_hz": 10.0,
         "pointcloud_hz": 2.0,
     }
-    assert config.document["flexiv"]["home"]["quest_button"] == (
-        "right_primary_click"
-    )
+    assert config.document["flexiv"]["home"]["quest_button"] == ("right_primary_click")
     assert config.document["cameras"]["streams"]["head"]["serial"]
     assert config.document["xr_video"]["streams"]["head"]["enabled"] is True
     assert config.document["xr_video"]["streams"]["left_wrist"]["enabled"] is False
@@ -183,22 +212,32 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "enable_tex_sub_image_2d": True,
     }
     assert config.document["xr_video"]["display"]["lock_mode"] == "world"
+    assert config.document["teleop"]["manus_ergonomics"] == {
+        "enabled": True,
+        "udp_host": "127.0.0.1",
+        "udp_port": 15053,
+        "left_topic": "/manus/left/ergonomics",
+        "right_topic": "/manus/right/ergonomics",
+    }
     assert "--mock" not in config.document["commands"]["rdk_daemon"]
-    assert config.document["flexiv"]["safety"][
-        "max_linear_velocity_m_s"
-    ] == 0.20
-    assert config.document["flexiv"]["safety"][
-        "software_safety_limits_enabled"
-    ] is False
+    assert config.document["flexiv"]["safety"]["max_linear_velocity_m_s"] == 0.20
+    assert (
+        config.document["flexiv"]["safety"]["software_safety_limits_enabled"] is False
+    )
 
     rendered = render_runtime_configs(config, tmp_path)
+    camera = yaml.safe_load(rendered["camera.yaml"].read_text())
+    assert camera["cameras"]["head"]["fps"] == 15
+    assert camera["cameras"]["head"]["recording_hz"] == 15.0
+    assert camera["cameras"]["left_wrist"]["recording_hz"] == 15.0
+    lerobot = yaml.safe_load(rendered["lerobot_export.yaml"].read_text())
+    assert lerobot["timeline"]["fps"] == 15.0
+    assert lerobot["high_rate_arm_samples_per_frame"] == 20
     dftp = yaml.safe_load(rendered["dftp.yaml"].read_text())[
         "flexiv_inspire_dftp_driver"
     ]["ros__parameters"]
     assert dftp["hardware_write_enabled"] is True
-    assert dftp["local_write_confirmation"] == (
-        "DFTP-LOCAL-CONTROL-AUTHORIZED"
-    )
+    assert dftp["local_write_confirmation"] == ("DFTP-LOCAL-CONTROL-AUTHORIZED")
     assert dftp["hand_reset_enabled"] is True
     assert dftp["hand_reset_pause_s"] == 0.35
     rdk = _commands(config, rendered, include_xr_receiver=False)[0]
@@ -252,18 +291,13 @@ def test_system_config_rejects_invalid_joint_limits(tmp_path):
 
 def test_system_config_rejects_command_limit_above_daemon_ceiling(tmp_path):
     data = yaml.safe_load(_example().read_text())
-    daemon_source = (
-        Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
-    )
+    daemon_source = Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
     tool_source = (
-        Path(__file__).parents[1]
-        / "apps/flexiv_daemon/config/tool_payload.yaml"
+        Path(__file__).parents[1] / "apps/flexiv_daemon/config/tool_payload.yaml"
     )
     daemon_data = yaml.safe_load(daemon_source.read_text(encoding="utf-8"))
     daemon_path = tmp_path / "robots.yaml"
-    daemon_path.write_text(
-        yaml.safe_dump(daemon_data), encoding="utf-8"
-    )
+    daemon_path.write_text(yaml.safe_dump(daemon_data), encoding="utf-8")
     (tmp_path / "tool_payload.yaml").write_text(
         tool_source.read_text(encoding="utf-8"), encoding="utf-8"
     )

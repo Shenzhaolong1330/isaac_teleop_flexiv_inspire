@@ -7,13 +7,13 @@ session:
 
 # All rates are requested rates; the manifest stores achieved rate and drops.
 sampling:
-  arm_observation_hz: 200.0
+  arm_observation_hz: 300.0
   teleop_command_hz: 60.0
-  hand_state_hz: 50.0
-  tactile_hz: 30.0
-  camera_hz: 30.0
-  policy_observation_hz: 30.0
-  training_timeline_hz: 30.0
+  hand_state_hz: 15.0
+  tactile_hz: 15.0
+  camera_hz: 15.0
+  policy_observation_hz: 15.0
+  training_timeline_hz: 15.0
   action_label: sent_command # the command accepted by hardware, never requested/safe alone
 
 pedal:
@@ -77,8 +77,8 @@ flexiv:
       max_angular_velocity_rad_s: 0.50
       max_linear_acceleration_m_s2: 0.50
       max_angular_acceleration_rad_s2: 1.0
-      tolerance_m: 0.005
-      timeout_s: 12.0
+      tolerance_m: 0.03
+      timeout_s: 15.0
       parallel: false
 
 inspire:
@@ -103,24 +103,23 @@ cameras:
   depth_enabled: true
   depth_width: 424
   depth_height: 240
-  depth_fps: 30
+  depth_fps: 15
   pointcloud_enabled: true
   # Keeps RGB + z16 depth + XYZ in one DeviceIO record under 2 MiB.
   pointcloud_stride: 2
   streams:
-    head:        {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: true}}
-    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
-    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
+    head:        {serial: "346522072347", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: true}}
+    left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
 
 
 # Quest video return uses the same CameraFrame messages that enter MCAP.
-# `robot record` keeps pedal/episode control stopped until OpenXR confirms a
-# decoded frame; after startup, XR congestion still does not alter MCAP data.
+# `robot record` starts this display opportunistically. OpenXR/video failure
+# does not stop collection; Quest pose freshness still gates arm commands.
 xr_video:
   enabled: true
   auto_start_with_record: true
-  # Set auto_start_with_record=false (or use --no-xr) for an intentional
-  # no-headset run. When enabled, live Quest display is a control prerequisite.
+  # Set auto_start_with_record=false (or use --no-xr) to skip video display.
   transport: lan              # lan | usb_tcp (USB-local WebRTC via adb reverse)
   wifi_connection: Deepybo-Prime
   ffmpeg: /usr/bin/ffmpeg
@@ -158,6 +157,12 @@ teleop:
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
   manus_calibration: ""
+  manus_ergonomics:
+    enabled: true
+    udp_host: 127.0.0.1
+    udp_port: 15053
+    left_topic: /manus/left/ergonomics
+    right_topic: /manus/right/ergonomics
   control_enabled: false # always shadow at startup; local authorization is separate
   deadman_source: external_bool
   mapping:
@@ -172,7 +177,8 @@ lerobot_export:
   schema_version: 1
   timeline:
     source: camera/head/jpeg
-    fps: 30.0
+    fps: 15.0
+  high_rate_arm_samples_per_frame: 20
   action:
     # sent_command (30-D) | absolute_joint_position (14-D) | absolute_cartesian_pose (18-D)
     view: sent_command
@@ -187,6 +193,9 @@ recording:
   task_description: "Pick up the object and place it in the target area."
   camera_recording_mode: jpeg
   deviceio_mode: native
+  ros_mcap_enabled: false
+  deviceio_profile: training
+  record_only_while_pedal_pressed: true
   # Immutable during an active episode.  Re-render/restart producers to change resolution/rate.
   snapshot_config: true
   # Keep false with the mock daemon below; hardware site configs may enable it.

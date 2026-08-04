@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -40,6 +41,28 @@ _ROUTINE_CONTROL_HOLD_REASONS = {
     "hand_offline",
     "safety_limit",
 }
+_EMPTY_ACTION_COMPLETION_REASON = (
+    "operator-stop; required streams have no valid samples: control/sent_command"
+)
+
+
+def _is_empty_action_attempt(manifest: dict[str, object]) -> bool:
+    """Return true only for a normally stopped episode with no sent action."""
+
+    if bool(manifest.get("completed", False)):
+        return False
+    if str(manifest.get("completion_reason", "")) != _EMPTY_ACTION_COMPLETION_REASON:
+        return False
+    streams = manifest.get("streams", {})
+    if not isinstance(streams, dict):
+        return False
+    stats = streams.get("control/sent_command")
+    if not isinstance(stats, dict):
+        return True
+    try:
+        return int(stats.get("samples", 0)) - int(stats.get("invalid", 0)) <= 0
+    except (TypeError, ValueError):
+        return False
 
 
 class EpisodeController(Node):
@@ -63,6 +86,9 @@ class EpisodeController(Node):
             "rdk_socket": "",
             "camera_recording_mode": "jpeg",
             "deviceio_mode": "native",
+            "ros_mcap_enabled": True,
+            "deviceio_profile": "full",
+            "record_only_while_pedal_pressed": False,
             "home_result_timeout_s": 30.0,
             "recorder_state_timeout_s": 10.0,
             "control_authorization_refresh_s": 10.0,
@@ -165,8 +191,7 @@ class EpisodeController(Node):
         self._sequence += 1
         collection_timestamp = local_minute_timestamp()
         base_episode_name = (
-            f"episode_{self._episode_index:06d}_attempt_{self._attempt:02d}_"
-            f"{collection_timestamp}"
+            f"episode_{self._episode_index:06d}_{collection_timestamp}"
         )
         root = Path(self._required("sessions_root")).expanduser().resolve()
         dataset = str(self.get_parameter("dataset_name").value).strip()
@@ -210,11 +235,19 @@ class EpisodeController(Node):
             str(self.get_parameter("camera_recording_mode").value),
             "--deviceio-mode",
             str(self.get_parameter("deviceio_mode").value),
+            "--deviceio-profile",
+            str(self.get_parameter("deviceio_profile").value),
             "--deviceio-socket",
             self._required("deviceio_socket"),
             "--control-state-file",
             str(self._state_file()),
         ]
+        if not bool(self.get_parameter("ros_mcap_enabled").value):
+            command.append("--no-ros-mcap")
+        if bool(
+            self.get_parameter("record_only_while_pedal_pressed").value
+        ):
+            command.append("--record-only-while-pedal-pressed")
         manus = str(self.get_parameter("manus_calibration").value).strip()
         if manus:
             command.extend(("--calibration", f"manus={manus}"))
@@ -284,6 +317,34 @@ class EpisodeController(Node):
             raise
         self._publish_progress("RECORDING")
 
+    def _delete_discarded_episode(self) -> None:
+        """Delete only the exact episode directory owned by this controller."""
+
+        manifest_path = self._current_manifest
+        if manifest_path is None:
+            return
+        root = Path(self._required("sessions_root")).expanduser().resolve()
+        dataset = str(self.get_parameter("dataset_name").value).strip()
+        dataset_root = (root / dataset).resolve()
+        episode_directory = manifest_path.parent.resolve()
+        try:
+            episode_directory.relative_to(dataset_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"refusing to delete episode outside dataset: {episode_directory}"
+            ) from exc
+        if (
+            episode_directory.parent != dataset_root
+            or not episode_directory.name.startswith("episode_")
+        ):
+            raise RuntimeError(
+                f"refusing unexpected episode deletion target: {episode_directory}"
+            )
+        if episode_directory.exists():
+            shutil.rmtree(episode_directory)
+            self.get_logger().info(f"已删除丢弃的数据: {episode_directory}")
+        self._current_manifest = None
+
     def _stop(self, *, rerecord: bool) -> bool:
         with self._lock:
             process = self._process
@@ -307,6 +368,14 @@ class EpisodeController(Node):
         completed = bool(manifest.get("completed", False))
         if rerecord and completed:
             raise RuntimeError("discarded episode was incorrectly marked completed")
+        if rerecord:
+            self._delete_discarded_episode()
+        if not rerecord and _is_empty_action_attempt(manifest):
+            # The recorder has already stopped, so this cannot be recovered by
+            # sending it SIGHUP. Treat it exactly like an operator discard and
+            # let the episode workflow start a fresh attempt at the same index.
+            self._delete_discarded_episode()
+            return False
         if not rerecord and not completed:
             raise RuntimeError(
                 f"episode finalization failed: {manifest.get('completion_reason', 'manifest missing')}"
@@ -636,8 +705,17 @@ class EpisodeController(Node):
                 self._start()
                 self._authorize_control()
             elif action == "next":
-                if self._stop(rerecord=False):
-                    self._completed_episodes += 1
+                completed = self._stop(rerecord=False)
+                if not completed:
+                    self.get_logger().warning(
+                        "右踏板：当前 episode 没有实际发送的机械臂命令，"
+                        "本条不计数；已丢弃并自动重新录制当前条"
+                    )
+                    self._attempt += 1
+                    self._start()
+                    self._authorize_control()
+                    return
+                self._completed_episodes += 1
                 target = int(self.get_parameter("episode_count").value)
                 if self._completed_episodes >= target:
                     self._publish_progress("COMPLETE")

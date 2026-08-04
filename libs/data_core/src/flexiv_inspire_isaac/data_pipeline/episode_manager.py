@@ -4,21 +4,23 @@ from __future__ import annotations
 
 import argparse
 import base64
-from dataclasses import asdict
-import json
 import importlib.metadata
-import platform
+import json
 import os
-from pathlib import Path
+import platform
 import re
 import signal
 import subprocess
 import sys
 import threading
-import tomllib
 import time
+import tomllib
 import uuid
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
+
+from isaac_teleop_core.deviceio import default_deviceio_socket
 
 from .manifest import (
     EpisodeManifest,
@@ -29,42 +31,87 @@ from .manifest import (
 )
 from .native_deviceio import NativeDeviceIOIngress
 from .recorder import AsyncMcapRecorder, McapJsonSink, RecordEnvelope
-from isaac_teleop_core.deviceio import default_deviceio_socket
-
 
 ROS_BAG_TOPICS = (
-    "/robot/left_arm/state", "/robot/right_arm/state",
-    "/robot/left_arm/joint_states", "/robot/right_arm/joint_states",
-    "/robot/left_arm/tcp_pose", "/robot/right_arm/tcp_pose",
-    "/robot/left_arm/tcp_twist", "/robot/right_arm/tcp_twist",
-    "/robot/left_arm/raw_ft", "/robot/right_arm/raw_ft",
-    "/robot/left_arm/tcp_wrench", "/robot/right_arm/tcp_wrench",
-    "/robot/left_hand/state", "/robot/right_hand/state",
-    "/robot/left_hand/joint_states", "/robot/right_hand/joint_states",
-    "/robot/left_hand/dynamic_joint_states", "/robot/right_hand/dynamic_joint_states",
-    "/robot/left_hand/tactile_raw", "/robot/right_hand/tactile_raw",
-    "/camera/head/color/frame", "/camera/left_wrist/color/frame", "/camera/right_wrist/color/frame",
+    "/robot/left_arm/state",
+    "/robot/right_arm/state",
+    "/robot/left_arm/joint_states",
+    "/robot/right_arm/joint_states",
+    "/robot/left_arm/tcp_pose",
+    "/robot/right_arm/tcp_pose",
+    "/robot/left_arm/tcp_twist",
+    "/robot/right_arm/tcp_twist",
+    "/robot/left_arm/raw_ft",
+    "/robot/right_arm/raw_ft",
+    "/robot/left_arm/tcp_wrench",
+    "/robot/right_arm/tcp_wrench",
+    "/robot/left_hand/state",
+    "/robot/right_hand/state",
+    "/robot/left_hand/joint_states",
+    "/robot/right_hand/joint_states",
+    "/robot/left_hand/dynamic_joint_states",
+    "/robot/right_hand/dynamic_joint_states",
+    "/robot/left_hand/tactile_raw",
+    "/robot/right_hand/tactile_raw",
+    "/camera/head/color/frame",
+    "/camera/left_wrist/color/frame",
+    "/camera/right_wrist/color/frame",
     "/camera/head/color/image_raw/compressed",
     "/camera/left_wrist/color/image_raw/compressed",
     "/camera/right_wrist/color/image_raw/compressed",
-    "/camera/head/depth/image_rect_raw", "/camera/left_wrist/depth/image_rect_raw", "/camera/right_wrist/depth/image_rect_raw",
-    "/camera/head/depth/points", "/camera/left_wrist/depth/points", "/camera/right_wrist/depth/points",
-    "/control/state", "/control/requested_command", "/control/safe_command",
-    "/control/sent_command", "/control/command_trace", "/control/stop",
-    "/xr_teleop/ee_poses", "/xr_teleop/controller_data", "/xr_teleop/hand",
-    "/tf", "/tf_static", "/teleop/deadman",
-    "/command_sources/teleop/command", "/command_sources/teleop/heartbeat",
-    "/command_sources/policy/command", "/command_sources/policy/heartbeat",
-    "/command_sources/replay/command", "/command_sources/replay/heartbeat",
-    "/maintenance/events", "/episode/events",
+    "/camera/head/depth/image_rect_raw",
+    "/camera/left_wrist/depth/image_rect_raw",
+    "/camera/right_wrist/depth/image_rect_raw",
+    "/camera/head/depth/points",
+    "/camera/left_wrist/depth/points",
+    "/camera/right_wrist/depth/points",
+    "/control/state",
+    "/control/requested_command",
+    "/control/safe_command",
+    "/control/sent_command",
+    "/control/command_trace",
+    "/control/stop",
+    "/xr_teleop/ee_poses",
+    "/xr_teleop/controller_data",
+    "/xr_teleop/hand",
+    "/manus/left/ergonomics",
+    "/manus/right/ergonomics",
+    "/tf",
+    "/tf_static",
+    "/teleop/deadman",
+    "/command_sources/teleop/command",
+    "/command_sources/teleop/heartbeat",
+    "/command_sources/policy/command",
+    "/command_sources/policy/heartbeat",
+    "/command_sources/replay/command",
+    "/command_sources/replay/heartbeat",
+    "/maintenance/events",
+    "/episode/events",
 )
 
 EXPECTED_HZ = {
-    "robot/left_arm/state": 200.0, "robot/right_arm/state": 200.0,
-    "robot/left_hand/state": 50.0, "robot/right_hand/state": 50.0,
-    "robot/left_hand/tactile_raw": 30.0, "robot/right_hand/tactile_raw": 30.0,
-    "camera/head/color/image_raw/compressed": 30.0, "camera/left_wrist/color/image_raw/compressed": 30.0,
-    "camera/right_wrist/color/image_raw/compressed": 30.0,
+    "robot/left_arm/state": 300.0,
+    "robot/right_arm/state": 300.0,
+    "robot/left_hand/state": 15.0,
+    "robot/right_hand/state": 15.0,
+    "robot/left_hand/tactile_raw": 15.0,
+    "robot/right_hand/tactile_raw": 15.0,
+    "camera/head/color/image_raw/compressed": 15.0,
+    "camera/left_wrist/color/image_raw/compressed": 15.0,
+    "camera/right_wrist/color/image_raw/compressed": 15.0,
+}
+
+TRAINING_DEVICEIO_TOPICS = {
+    "/robot/left_arm/state",
+    "/robot/right_arm/state",
+    "/robot/left_hand/state",
+    "/robot/right_hand/state",
+    "/robot/left_hand/tactile_raw",
+    "/robot/right_hand/tactile_raw",
+    "/camera/head/color/image_raw/compressed",
+    "/camera/left_wrist/color/image_raw/compressed",
+    "/camera/right_wrist/color/image_raw/compressed",
+    "/control/sent_command",
 }
 
 
@@ -84,6 +131,7 @@ def _json_safe(value: Any) -> Any:
 
 def _message_dict(message: Any) -> dict:
     from rosidl_runtime_py.convert import message_to_ordereddict
+
     return _json_safe(message_to_ordereddict(message))
 
 
@@ -128,15 +176,21 @@ def _runtime_versions() -> dict[str, str]:
             return importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             return fallback
+
     try:
         project_file = Path(__file__).resolve().parents[3] / "pyproject.toml"
-        project_version = str(tomllib.loads(project_file.read_text())["project"]["version"])
+        project_version = str(
+            tomllib.loads(project_file.read_text())["project"]["version"]
+        )
     except Exception:
         project_version = package("flexiv-inspire-isaac", "unknown")
     try:
         git_commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True,
-            cwd=project_file.parent
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            cwd=project_file.parent,
         ).stdout.strip()
     except Exception:
         git_commit = "unknown"
@@ -198,10 +252,12 @@ def _load_ft_zero_event(path: Path, session_id: str, tool_hash: str) -> dict:
         if str(event.get("session_id", "")) != session_id:
             continue
         event_type = str(event.get("event_type", ""))
-        event_hash = str(event.get(
-            "tool_payload_config_hash",
-            event.get("tool_configuration_hash", ""),
-        ))
+        event_hash = str(
+            event.get(
+                "tool_payload_config_hash",
+                event.get("tool_configuration_hash", ""),
+            )
+        )
         if event_type == "ft_zero_completed":
             if bool(event.get("success")) and event_hash == tool_hash:
                 selected = event
@@ -214,9 +270,7 @@ def _load_ft_zero_event(path: Path, session_id: str, tool_hash: str) -> dict:
                 selected_generation = None
             continue
         raw_generation = event.get("connection_generation")
-        event_generation = (
-            None if raw_generation is None else int(raw_generation)
-        )
+        event_generation = None if raw_generation is None else int(raw_generation)
         if (
             selected is not None
             and selected_generation is not None
@@ -251,17 +305,25 @@ def _load_ft_zero_event(path: Path, session_id: str, tool_hash: str) -> dict:
 def _critical_envelope(topic: str, sequence: int, payload: dict) -> RecordEnvelope:
     now = time.monotonic_ns()
     return RecordEnvelope(
-        topic=topic, source_time_ns=now, host_receive_time_ns=now,
-        sequence=sequence, valid=True, payload=payload,
-        source_clock_domain="host_monotonic", host_clock_domain="host_monotonic",
+        topic=topic,
+        source_time_ns=now,
+        host_receive_time_ns=now,
+        sequence=sequence,
+        valid=True,
+        payload=payload,
+        source_clock_domain="host_monotonic",
+        host_clock_domain="host_monotonic",
         mapped_host_time_ns=now,
     )
 
 
 class RosbagProcess:
-    def __init__(self, output: Path, extra_topics: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, output: Path, extra_topics: tuple[str, ...] = (), *, enabled: bool = True
+    ) -> None:
         self.output = output
         self.extra_topics = extra_topics
+        self.enabled = enabled
         self.node_name = f"flexiv_inspire_rosbag_{uuid.uuid4().hex[:12]}"
         self.process: subprocess.Popen | None = None
         self._started = False
@@ -269,11 +331,22 @@ class RosbagProcess:
         self._early_exit_code: int | None = None
 
     def start(self) -> None:
+        if not self.enabled:
+            return
         command = [
-            "ros2", "bag", "record", "--disable-keyboard-controls",
-            "--node-name", self.node_name,
-            "-s", "mcap", "-o", str(self.output),
-            "--topics", *ROS_BAG_TOPICS, *self.extra_topics,
+            "ros2",
+            "bag",
+            "record",
+            "--disable-keyboard-controls",
+            "--node-name",
+            self.node_name,
+            "-s",
+            "mcap",
+            "-o",
+            str(self.output),
+            "--topics",
+            *ROS_BAG_TOPICS,
+            *self.extra_topics,
         ]
         self.process = subprocess.Popen(command, start_new_session=True)
         self._started = False
@@ -297,14 +370,10 @@ class RosbagProcess:
 
         service_type = Pause if paused else Resume
         operation = "pause" if paused else "resume"
-        client = node.create_client(
-            service_type, f"/{self.node_name}/{operation}"
-        )
+        client = node.create_client(service_type, f"/{self.node_name}/{operation}")
         try:
             if not client.wait_for_service(timeout_sec=timeout_s):
-                raise TimeoutError(
-                    f"rosbag {operation} service was not available"
-                )
+                raise TimeoutError(f"rosbag {operation} service was not available")
             future = client.call_async(service_type.Request())
             rclpy.spin_until_future_complete(node, future, timeout_sec=timeout_s)
             if not future.done():
@@ -324,15 +393,17 @@ class RosbagProcess:
     def resume(self, node: Any, timeout_s: float = 5.0) -> None:
         self._set_paused(node, paused=False, timeout_s=timeout_s)
 
-
     @property
     def started(self) -> bool:
-        return self._started and self.process is not None and self.process.poll() is None
+        return (
+            self._started and self.process is not None and self.process.poll() is None
+        )
 
     def stop_and_validate(self, timeout_s: float = 15.0) -> None:
         if self.process is None:
             detail = (
-                "" if self._early_exit_code is None
+                ""
+                if self._early_exit_code is None
                 else f"; early exit {self._early_exit_code}"
             )
             raise RuntimeError(f"rosbag was not started{detail}")
@@ -356,7 +427,11 @@ class RosbagProcess:
             raise RuntimeError(f"rosbag exited with {return_code}")
         metadata = self.output / "metadata.yaml"
         storage = list(self.output.glob("*.mcap"))
-        if not metadata.is_file() or not storage or any(path.stat().st_size == 0 for path in storage):
+        if (
+            not metadata.is_file()
+            or not storage
+            or any(path.stat().st_size == 0 for path in storage)
+        ):
             raise RuntimeError("rosbag MCAP metadata/storage validation failed")
 
 
@@ -378,11 +453,16 @@ class EpisodeSession:
         episode_directory_name: str = "",
         collection_timestamp_local: str = "",
         recording_gate: threading.Event | None = None,
+        record_ros_mcap: bool = True,
+        deviceio_profile: str = "full",
+        record_only_while_pedal_pressed: bool = False,
     ) -> None:
         if camera_recording_mode != "jpeg":
             raise ValueError(
                 "episode manager records the atomic ROS JPEG mirror only; raw_rgb must be recorded by the camera DeviceIO sink"
             )
+        if deviceio_profile not in {"training", "full"}:
+            raise ValueError("deviceio_profile must be training or full")
         # Complete every read-only authorization/hash check before creating an
         # episode directory, so a rejected F/T record cannot leave an orphan.
         tool_hash = canonical_yaml_sha256(tool_config)
@@ -397,13 +477,10 @@ class EpisodeSession:
             collection_timestamp_local or local_minute_timestamp()
         )
         if not re.fullmatch(r"\d{8}_\d{4}", collection_timestamp_local):
-            raise ValueError(
-                "collection_timestamp_local must use YYYYMMDD_HHMM"
-            )
+            raise ValueError("collection_timestamp_local must use YYYYMMDD_HHMM")
         dataset_root = root / dataset_name if dataset_name else root
         self.directory = dataset_root / (
-            episode_directory_name
-            or f"episode_{collection_timestamp_local}"
+            episode_directory_name or f"episode_{collection_timestamp_local}"
         )
         self.directory.mkdir(parents=True, exist_ok=False)
         self.manifest_path = self.directory / "manifest.json"
@@ -416,7 +493,7 @@ class EpisodeSession:
             episode_uuid=self.episode_uuid,
             session_id=session_id,
             deviceio_mcap=self.device_path.name,
-            ros_mcap=self.ros_path.name,
+            ros_mcap=self.ros_path.name if record_ros_mcap else "",
             software_versions=versions,
             calibration_hashes=calibration_hashes,
             tool_configuration_hash=tool_hash,
@@ -431,6 +508,12 @@ class EpisodeSession:
         )
         self.manifest.write_atomic(self.manifest_path)
         self._critical_sequence = 0
+        self._deviceio_profile = deviceio_profile
+        self._record_ros_mcap = record_ros_mcap
+        self._record_only_while_pedal_pressed = bool(record_only_while_pedal_pressed)
+        # Start closed in motion-only mode. The first physical middle-pedal
+        # press opens this gate through /teleop/deadman.
+        self._motion_recording_enabled = not self._record_only_while_pedal_pressed
         self._last_sequence_by_topic: dict[str, int] = {}
         self._stats_lock = threading.Lock()
         self._recording_gate = recording_gate or threading.Event()
@@ -440,16 +523,28 @@ class EpisodeSession:
         try:
             self.recorder = AsyncMcapRecorder(McapJsonSink(self.device_path))
             self.recorder.start()
-            self._submit_unchecked(_critical_envelope(
-                "/maintenance/ft_zero_event",
-                self._next_critical_sequence(),
-                ft_event,
-            ), critical=True)
-            self._submit_unchecked(_critical_envelope("/episode/events", self._next_critical_sequence(), {
-                "event_type": "episode_started", "episode_uuid": self.episode_uuid,
-                "session_id": session_id, "camera_recording_mode_declared": camera_recording_mode,
-                "capture_layer": deviceio_capture_layer,
-            }), critical=True)
+            self._submit_unchecked(
+                _critical_envelope(
+                    "/maintenance/ft_zero_event",
+                    self._next_critical_sequence(),
+                    ft_event,
+                ),
+                critical=True,
+            )
+            self._submit_unchecked(
+                _critical_envelope(
+                    "/episode/events",
+                    self._next_critical_sequence(),
+                    {
+                        "event_type": "episode_started",
+                        "episode_uuid": self.episode_uuid,
+                        "session_id": session_id,
+                        "camera_recording_mode_declared": camera_recording_mode,
+                        "capture_layer": deviceio_capture_layer,
+                    },
+                ),
+                critical=True,
+            )
         except Exception as exc:
             close_error = ""
             try:
@@ -467,11 +562,24 @@ class EpisodeSession:
         return self._critical_sequence
 
     def submit(self, envelope: RecordEnvelope, *, critical: bool = False) -> None:
+        if (
+            self._deviceio_profile == "training"
+            and envelope.topic not in TRAINING_DEVICEIO_TOPICS
+        ):
+            return
+        if self._record_only_while_pedal_pressed and not self._motion_recording_enabled:
+            with self._stats_lock:
+                self.manifest.suppressed_samples += 1
+            return
         if not self._recording_gate.is_set():
             with self._stats_lock:
                 self.manifest.suppressed_samples += 1
             return
         self._submit_unchecked(envelope, critical=critical)
+
+    def set_motion_recording(self, enabled: bool) -> None:
+        """Open or close the data gate from the physical middle pedal."""
+        self._motion_recording_enabled = bool(enabled)
 
     def _submit_unchecked(
         self, envelope: RecordEnvelope, *, critical: bool = True
@@ -502,16 +610,18 @@ class EpisodeSession:
         self._recording_gate.clear()
         self._pause_started_ns = time.monotonic_ns()
         self.manifest.pause_count += 1
-        self._submit_unchecked(_critical_envelope(
-            "/episode/events",
-            self._next_critical_sequence(),
-            {
-                "event_type": "episode_paused",
-                "episode_uuid": self.episode_uuid,
-                "session_id": self.manifest.session_id,
-                "reason": reason,
-            },
-        ))
+        self._submit_unchecked(
+            _critical_envelope(
+                "/episode/events",
+                self._next_critical_sequence(),
+                {
+                    "event_type": "episode_paused",
+                    "episode_uuid": self.episode_uuid,
+                    "session_id": self.manifest.session_id,
+                    "reason": reason,
+                },
+            )
+        )
 
     def resume(self, *, reason: str) -> None:
         if self._recording_gate.is_set():
@@ -520,16 +630,18 @@ class EpisodeSession:
         if self._pause_started_ns:
             self.manifest.paused_duration_ns += now - self._pause_started_ns
         self._pause_started_ns = 0
-        self._submit_unchecked(_critical_envelope(
-            "/episode/events",
-            self._next_critical_sequence(),
-            {
-                "event_type": "episode_resumed",
-                "episode_uuid": self.episode_uuid,
-                "session_id": self.manifest.session_id,
-                "reason": reason,
-            },
-        ))
+        self._submit_unchecked(
+            _critical_envelope(
+                "/episode/events",
+                self._next_critical_sequence(),
+                {
+                    "event_type": "episode_resumed",
+                    "episode_uuid": self.episode_uuid,
+                    "session_id": self.manifest.session_id,
+                    "reason": reason,
+                },
+            )
+        )
         self._recording_gate.set()
 
     def _finish_pause_interval(self) -> None:
@@ -542,6 +654,18 @@ class EpisodeSession:
     def submit_native(self, document: Any) -> None:
         """Accept one validated producer-native envelope from the local ingress."""
         topic = str(document["topic"])
+        if topic.startswith("/_deviceio/source_stats/"):
+            producer = str(document["producer"])
+            payload = document.get("payload")
+            if isinstance(payload, dict):
+                with self._stats_lock:
+                    self.manifest.native_source_stats[producer] = dict(payload)
+            return
+        if (
+            self._deviceio_profile == "training"
+            and topic not in TRAINING_DEVICEIO_TOPICS
+        ):
+            return
         mapped = document.get("mapped_host_time_ns")
         if not bool(document.get("timing_valid", False)):
             mapped = None
@@ -559,12 +683,6 @@ class EpisodeSession:
         )
         critical = topic.startswith(("/control/", "/episode/", "/maintenance/"))
         self.submit(envelope, critical=critical)
-        if topic.startswith("/_deviceio/source_stats/"):
-            producer = str(document["producer"])
-            payload = document.get("payload")
-            if isinstance(payload, dict):
-                with self._stats_lock:
-                    self.manifest.native_source_stats[producer] = dict(payload)
 
     def _update_stream_stats(self) -> None:
         recorder_stats = self.recorder.stats()
@@ -581,8 +699,10 @@ class EpisodeSession:
                 and stats.last_source_time_ns is not None
                 and stats.last_source_time_ns > stats.first_source_time_ns
             ):
-                stats.observed_hz = (stats.samples - 1) * 1e9 / (
-                    stats.last_source_time_ns - stats.first_source_time_ns
+                stats.observed_hz = (
+                    (stats.samples - 1)
+                    * 1e9
+                    / (stats.last_source_time_ns - stats.first_source_time_ns)
                 )
 
     def _required_stream_errors(self) -> list[str]:
@@ -610,16 +730,19 @@ class EpisodeSession:
         errors: list[str] = []
         self._finish_pause_interval()
         try:
-            self._submit_unchecked(_critical_envelope(
-                "/episode/events",
-                self._next_critical_sequence(),
-                {
-                    "event_type": "episode_failed",
-                    "episode_uuid": self.episode_uuid,
-                    "session_id": self.manifest.session_id,
-                    "reason": reason,
-                },
-            ), critical=True)
+            self._submit_unchecked(
+                _critical_envelope(
+                    "/episode/events",
+                    self._next_critical_sequence(),
+                    {
+                        "event_type": "episode_failed",
+                        "episode_uuid": self.episode_uuid,
+                        "session_id": self.manifest.session_id,
+                        "reason": reason,
+                    },
+                ),
+                critical=True,
+            )
         except Exception as exc:
             errors.append(f"episode-failure-event: {exc}")
         try:
@@ -635,16 +758,28 @@ class EpisodeSession:
         errors: list[str] = []
         self._finish_pause_interval()
         try:
-            self._submit_unchecked(_critical_envelope("/episode/events", self._next_critical_sequence(), {
-                "event_type": (
-                    "episode_rerecord_requested"
-                    if reason == "rerecord-requested" else "episode_stopped"
-                ), "episode_uuid": self.episode_uuid,
-                "session_id": self.manifest.session_id, "reason": reason,
-            }), critical=True)
+            self._submit_unchecked(
+                _critical_envelope(
+                    "/episode/events",
+                    self._next_critical_sequence(),
+                    {
+                        "event_type": (
+                            "episode_rerecord_requested"
+                            if reason == "rerecord-requested"
+                            else "episode_stopped"
+                        ),
+                        "episode_uuid": self.episode_uuid,
+                        "session_id": self.manifest.session_id,
+                        "reason": reason,
+                    },
+                ),
+                critical=True,
+            )
         except Exception as exc:
             errors.append(f"episode-stop-event: {exc}")
-        if rosbag.started:
+        if not getattr(rosbag, "enabled", True):
+            pass
+        elif rosbag.started:
             try:
                 rosbag.stop_and_validate()
             except Exception as exc:
@@ -668,8 +803,7 @@ class EpisodeSession:
             and not rerecord_requested
         ):
             errors.append(
-                "required streams have no valid samples: "
-                + ",".join(missing_streams)
+                "required streams have no valid samples: " + ",".join(missing_streams)
             )
         # Preserve the raw capture for audit but never label a re-record as a
         # completed demonstration eligible for training or replay.
@@ -686,14 +820,21 @@ class EpisodeSession:
 
 
 def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
+    from flexiv_inspire_interfaces.msg import (
+        ArmState,
+        BimanualCommand,
+        CameraFrame,
+        CommandTrace,
+        ControlState,
+        EpisodeEvent,
+        HandState,
+        TactileFrame,
+    )
+    from geometry_msgs.msg import PoseArray
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
-    from geometry_msgs.msg import PoseArray
+    from sensor_msgs.msg import JointState
     from std_msgs.msg import Bool, ByteMultiArray
-    from flexiv_inspire_interfaces.msg import (
-        ArmState, BimanualCommand, CameraFrame, CommandTrace, ControlState,
-        EpisodeEvent, HandState, TactileFrame,
-    )
 
     class EpisodeRecorderNode(Node):
         def __init__(self) -> None:
@@ -701,51 +842,121 @@ def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
             # DeviceIO captures producer-side robot observations in native mode.
             # XR/raw command inputs have no DeviceIO producer, so always record
             # them here into the same MCAP truth file.
-            self.create_subscription(PoseArray, "/xr_teleop/ee_poses",
-                lambda msg: self._record("/xr_teleop/ee_poses", msg), qos_profile_sensor_data)
-            self.create_subscription(ByteMultiArray, "/xr_teleop/controller_data",
-                lambda msg: self._record("/xr_teleop/controller_data", msg), qos_profile_sensor_data)
-            self.create_subscription(PoseArray, "/xr_teleop/hand",
-                lambda msg: self._record("/xr_teleop/hand", msg), qos_profile_sensor_data)
-            self.create_subscription(Bool, "/teleop/deadman",
-                lambda msg: self._record("/teleop/deadman", msg), qos_profile_sensor_data)
+            self.create_subscription(
+                PoseArray,
+                "/xr_teleop/ee_poses",
+                lambda msg: self._record("/xr_teleop/ee_poses", msg),
+                qos_profile_sensor_data,
+            )
+            self.create_subscription(
+                ByteMultiArray,
+                "/xr_teleop/controller_data",
+                lambda msg: self._record("/xr_teleop/controller_data", msg),
+                qos_profile_sensor_data,
+            )
+            self.create_subscription(
+                PoseArray,
+                "/xr_teleop/hand",
+                lambda msg: self._record("/xr_teleop/hand", msg),
+                qos_profile_sensor_data,
+            )
+            for side in ("left", "right"):
+                topic = f"/manus/{side}/ergonomics"
+                self.create_subscription(
+                    JointState,
+                    topic,
+                    lambda msg, selected=topic: self._record(selected, msg),
+                    qos_profile_sensor_data,
+                )
+            self.create_subscription(
+                Bool,
+                "/teleop/deadman",
+                self._deadman,
+                qos_profile_sensor_data,
+            )
             for source in ("teleop", "policy", "replay"):
-                self.create_subscription(BimanualCommand, f"/command_sources/{source}/command",
-                    lambda msg, selected=source: self._record(f"/command_sources/{selected}/command", msg, True), 1)
+                self.create_subscription(
+                    BimanualCommand,
+                    f"/command_sources/{source}/command",
+                    lambda msg, selected=source: self._record(
+                        f"/command_sources/{selected}/command", msg, True
+                    ),
+                    1,
+                )
             if not record_ros_mirror:
                 return
             for side in ("left", "right"):
                 self.create_subscription(
-                    ArmState, f"/robot/{side}_arm/state",
-                    lambda msg, selected=side: self._arm(selected, msg), qos_profile_sensor_data,
-                )
-                self.create_subscription(
-                    HandState, f"/robot/{side}_hand/state",
-                    lambda msg, selected=side: self._record(f"/robot/{selected}_hand/state", msg),
+                    ArmState,
+                    f"/robot/{side}_arm/state",
+                    lambda msg, selected=side: self._arm(selected, msg),
                     qos_profile_sensor_data,
                 )
                 self.create_subscription(
-                    TactileFrame, f"/robot/{side}_hand/tactile_raw",
-                    lambda msg, selected=side: self._record(f"/robot/{selected}_hand/tactile_raw", msg),
+                    HandState,
+                    f"/robot/{side}_hand/state",
+                    lambda msg, selected=side: self._record(
+                        f"/robot/{selected}_hand/state", msg
+                    ),
+                    qos_profile_sensor_data,
+                )
+                self.create_subscription(
+                    TactileFrame,
+                    f"/robot/{side}_hand/tactile_raw",
+                    lambda msg, selected=side: self._record(
+                        f"/robot/{selected}_hand/tactile_raw", msg
+                    ),
                     qos_profile_sensor_data,
                 )
             for camera in ("head", "left_wrist", "right_wrist"):
                 self.create_subscription(
-                    CameraFrame, f"/camera/{camera}/color/frame",
-                    lambda msg, selected=camera: self._camera(selected, msg), qos_profile_sensor_data,
+                    CameraFrame,
+                    f"/camera/{camera}/color/frame",
+                    lambda msg, selected=camera: self._camera(selected, msg),
+                    qos_profile_sensor_data,
                 )
-            self.create_subscription(ControlState, "/control/state", lambda msg: self._record("/control/state", msg, True), 1)
+            self.create_subscription(
+                ControlState,
+                "/control/state",
+                lambda msg: self._record("/control/state", msg, True),
+                1,
+            )
             for topic in ("requested_command", "safe_command", "sent_command"):
                 self.create_subscription(
-                    BimanualCommand, f"/control/{topic}",
-                    lambda msg, selected=topic: self._record(f"/control/{selected}", msg, True), 1,
+                    BimanualCommand,
+                    f"/control/{topic}",
+                    lambda msg, selected=topic: self._record(
+                        f"/control/{selected}", msg, True
+                    ),
+                    1,
                 )
-            self.create_subscription(CommandTrace, "/control/command_trace", lambda msg: self._record("/control/command_trace", msg, True), 1)
-            self.create_subscription(EpisodeEvent, "/episode/events", lambda msg: self._record("/episode/events", msg, True), 10)
-            self.create_subscription(EpisodeEvent, "/maintenance/events", lambda msg: self._record("/maintenance/events", msg, True), 10)
+            self.create_subscription(
+                CommandTrace,
+                "/control/command_trace",
+                lambda msg: self._record("/control/command_trace", msg, True),
+                1,
+            )
+            self.create_subscription(
+                EpisodeEvent,
+                "/episode/events",
+                lambda msg: self._record("/episode/events", msg, True),
+                10,
+            )
+            self.create_subscription(
+                EpisodeEvent,
+                "/maintenance/events",
+                lambda msg: self._record("/maintenance/events", msg, True),
+                10,
+            )
 
         def _record(self, topic: str, message: Any, critical: bool = False) -> None:
             session.submit(_envelope(topic, message), critical=critical)
+
+        def _deadman(self, message: Any) -> None:
+            # Update before submitting so a press starts capture immediately
+            # and a release stops capture immediately.
+            session.set_motion_recording(bool(message.data))
+            self._record("/teleop/deadman", message)
 
         def _arm(self, side: str, message: Any) -> None:
             common = _envelope(f"/robot/{side}_arm/state", message)
@@ -753,30 +964,83 @@ def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
             pose = message.tcp_pose
             pose_payload = {
                 "xyz": [pose.position.x, pose.position.y, pose.position.z],
-                "quaternion_xyzw": [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w],
+                "quaternion_xyzw": [
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w,
+                ],
             }
-            session.submit(_envelope(f"/robot/{side}_arm/tcp_pose", message, pose_payload))
+            session.submit(
+                _envelope(f"/robot/{side}_arm/tcp_pose", message, pose_payload)
+            )
             twist = message.tcp_twist
-            session.submit(_envelope(f"/robot/{side}_arm/tcp_twist", message, {
-                "values": [twist.linear.x, twist.linear.y, twist.linear.z, twist.angular.x, twist.angular.y, twist.angular.z]
-            }))
-            for name, wrench in (("raw_ft", message.raw_ft), ("tcp_wrench", message.tcp_wrench)):
-                session.submit(_envelope(f"/robot/{side}_arm/{name}", message, {
-                    "values": [wrench.force.x, wrench.force.y, wrench.force.z, wrench.torque.x, wrench.torque.y, wrench.torque.z]
-                }))
+            session.submit(
+                _envelope(
+                    f"/robot/{side}_arm/tcp_twist",
+                    message,
+                    {
+                        "values": [
+                            twist.linear.x,
+                            twist.linear.y,
+                            twist.linear.z,
+                            twist.angular.x,
+                            twist.angular.y,
+                            twist.angular.z,
+                        ]
+                    },
+                )
+            )
+            for name, wrench in (
+                ("raw_ft", message.raw_ft),
+                ("tcp_wrench", message.tcp_wrench),
+            ):
+                session.submit(
+                    _envelope(
+                        f"/robot/{side}_arm/{name}",
+                        message,
+                        {
+                            "values": [
+                                wrench.force.x,
+                                wrench.force.y,
+                                wrench.force.z,
+                                wrench.torque.x,
+                                wrench.torque.y,
+                                wrench.torque.z,
+                            ]
+                        },
+                    )
+                )
 
         def _camera(self, camera: str, message: Any) -> None:
             valid_name = str(message.camera) == camera
             payload = {
                 "jpeg_b64": base64.b64encode(bytes(message.image.data)).decode("ascii"),
-                "encoding": "jpeg", "width": int(message.width), "height": int(message.height),
+                "encoding": "jpeg",
+                "width": int(message.width),
+                "height": int(message.height),
             }
-            envelope = _envelope(f"/camera/{camera}/color/image_raw/compressed", message, payload)
-            if not valid_name or not str(message.image.format).lower().startswith("jpeg"):
-                envelope = RecordEnvelope(**{
-                    **asdict(envelope), "valid": False,
-                    "invalid_reason": ";".join(filter(None, (envelope.invalid_reason, "camera-name-or-encoding-mismatch"))),
-                })
+            envelope = _envelope(
+                f"/camera/{camera}/color/image_raw/compressed", message, payload
+            )
+            if not valid_name or not str(message.image.format).lower().startswith(
+                "jpeg"
+            ):
+                envelope = RecordEnvelope(
+                    **{
+                        **asdict(envelope),
+                        "valid": False,
+                        "invalid_reason": ";".join(
+                            filter(
+                                None,
+                                (
+                                    envelope.invalid_reason,
+                                    "camera-name-or-encoding-mismatch",
+                                ),
+                            )
+                        ),
+                    }
+                )
             session.submit(envelope)
 
     return EpisodeRecorderNode()
@@ -796,20 +1060,33 @@ def _parse_mapping(values: list[str]) -> dict[str, Path]:
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Atomic DeviceIO+ROS MCAP episode recorder")
+    parser = argparse.ArgumentParser(
+        description="Atomic DeviceIO+ROS MCAP episode recorder"
+    )
     parser.add_argument("--root", type=Path, default=Path("episodes"))
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--tool-config", type=Path, required=True)
     parser.add_argument("--ft-zero-record", type=Path, required=True)
-    parser.add_argument("--calibration", action="append", default=[], metavar="NAME=PATH")
-    parser.add_argument("--camera-recording-mode", choices=("jpeg", "raw_rgb"), default="jpeg")
+    parser.add_argument(
+        "--calibration", action="append", default=[], metavar="NAME=PATH"
+    )
+    parser.add_argument(
+        "--camera-recording-mode", choices=("jpeg", "raw_rgb"), default="jpeg"
+    )
     parser.add_argument(
         "--deviceio-mode",
         choices=("native", "post-dds-mirror"),
         default="native",
         help="native records producer-side observations before DDS; mirror is compatibility mode",
     )
-    parser.add_argument("--deviceio-socket", type=Path, default=default_deviceio_socket())
+    parser.add_argument(
+        "--deviceio-socket", type=Path, default=default_deviceio_socket()
+    )
+    parser.add_argument(
+        "--deviceio-profile", choices=("training", "full"), default="full"
+    )
+    parser.add_argument("--no-ros-mcap", action="store_true")
+    parser.add_argument("--record-only-while-pedal-pressed", action="store_true")
     parser.add_argument("--extra-topic", action="append", default=[])
     parser.add_argument("--duration-s", type=float, default=0.0)
     parser.add_argument("--dataset-name", default="")
@@ -861,13 +1138,21 @@ def main(argv=None) -> int:
         path = options.control_state_file
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps({
-            "pid": os.getpid(),
-            "state": state,
-            "reason": reason_text,
-            "episode_uuid": "" if episode is None else episode.episode_uuid,
-            "episode_directory": "" if episode is None else str(episode.directory),
-        }, separators=(",", ":")), encoding="utf-8")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "state": state,
+                    "reason": reason_text,
+                    "episode_uuid": "" if episode is None else episode.episode_uuid,
+                    "episode_directory": ""
+                    if episode is None
+                    else str(episode.directory),
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
         os.replace(temporary, path)
 
     try:
@@ -886,7 +1171,9 @@ def main(argv=None) -> int:
             tool_config,
             ft_record,
             options.camera_recording_mode,
-            "native-pre-dds" if options.deviceio_mode == "native" else "post-dds-typed-mirror",
+            "native-pre-dds"
+            if options.deviceio_mode == "native"
+            else "post-dds-typed-mirror",
             dataset_name=options.dataset_name,
             episode_index=options.episode_index,
             attempt=options.attempt,
@@ -894,12 +1181,22 @@ def main(argv=None) -> int:
             episode_directory_name=options.episode_directory_name,
             collection_timestamp_local=options.collection_timestamp_local,
             recording_gate=recording_gate,
+            record_ros_mcap=not options.no_ros_mcap,
+            deviceio_profile=options.deviceio_profile,
+            record_only_while_pedal_pressed=(options.record_only_while_pedal_pressed),
         )
         if options.deviceio_mode == "native":
-            ingress = NativeDeviceIOIngress(options.deviceio_socket, episode.submit_native)
+            ingress = NativeDeviceIOIngress(
+                options.deviceio_socket, episode.submit_native
+            )
             ingress.start()
-        rosbag = RosbagProcess(episode.ros_path, tuple(options.extra_topic))
+        rosbag = RosbagProcess(
+            episode.ros_path,
+            tuple(options.extra_topic),
+            enabled=not options.no_ros_mcap,
+        )
         import rclpy as rclpy_module
+
         rclpy_module.init(args=None)
         node = build_node(episode, record_ros_mirror=options.deviceio_mode != "native")
         rosbag.start()
@@ -909,12 +1206,14 @@ def main(argv=None) -> int:
             rclpy_module.spin_once(node, timeout_sec=0.1)
             if pause_requested.is_set():
                 pause_requested.clear()
-                rosbag.pause(node)
+                if rosbag.enabled:
+                    rosbag.pause(node)
                 episode.pause(reason="guarded-home")
                 _write_control_state("PAUSED")
             if resume_requested.is_set():
                 resume_requested.clear()
-                rosbag.resume(node)
+                if rosbag.enabled:
+                    rosbag.resume(node)
                 episode.resume(reason="guarded-home-complete")
                 _write_control_state("RECORDING")
             if rerecord_requested.is_set():
@@ -970,7 +1269,7 @@ def main(argv=None) -> int:
             reason = "fault:" + "; ".join(cleanup_errors)
         if episode is not None:
             try:
-                if rosbag is not None and rosbag.started:
+                if rosbag is not None and (rosbag.started or not rosbag.enabled):
                     episode.finish(rosbag, reason=reason)
                 else:
                     episode.abort(reason=reason)

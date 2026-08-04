@@ -46,7 +46,13 @@ def main(args=None) -> int:
             self._status_queue: deque[CameraStatus] = deque(maxlen=100)
             self._latest_status: dict[str, CameraStatus] = {}
             self._frame_counts = {name: 0 for name in self._configs}
+            self._record_counts = {name: 0 for name in self._configs}
+            self._last_capture_ns: dict[str, int | None] = {
+                name: None for name in self._configs
+            }
+            self._record_tokens = {name: 1.0 for name in self._configs}
             self._last_health_counts = dict(self._frame_counts)
+            self._last_health_record_counts = dict(self._record_counts)
             self._last_health_time = time.monotonic()
             self._image_publishers = {}
             self._depth_publishers = {}
@@ -100,7 +106,12 @@ def main(args=None) -> int:
             self._capture.start()
             self.get_logger().info(
                 "three independent RealSense RGB+depth pipelines started; "
-                f"424x240@30, ROS JPEG90, DeviceIO mode={recording_mode}"
+                "capture/record rates="
+                + ", ".join(
+                    f"{name}:{camera.fps}/{camera.recording_hz or camera.fps:g}Hz"
+                    for name, camera in self._configs.items()
+                )
+                + f", DeviceIO mode={recording_mode}"
             )
 
         def destroy_node(self):
@@ -116,6 +127,28 @@ def main(args=None) -> int:
 
         def _on_frame(self, frame: CapturedCameraFrame) -> None:
             self._frame_counts[frame.camera_name] += 1
+            config = self._configs[frame.camera_name]
+            recording_hz = float(config.recording_hz or config.fps)
+            if recording_hz < config.fps:
+                now_ns = frame.host_receive_time_ns
+                previous_ns = self._last_capture_ns[frame.camera_name]
+                self._last_capture_ns[frame.camera_name] = now_ns
+                if previous_ns is not None and now_ns >= previous_ns:
+                    elapsed_s = (now_ns - previous_ns) / 1e9
+                    self._record_tokens[frame.camera_name] = min(
+                        2.0,
+                        self._record_tokens[frame.camera_name]
+                        + elapsed_s * recording_hz,
+                    )
+                else:
+                    self._record_tokens[frame.camera_name] = 1.0
+                # Fractional token selection gives an average 20 Hz from a
+                # 30 Hz source (and remains correct when the camera actually
+                # delivers 27--29 Hz); every-other-frame would yield 15 Hz.
+                if self._record_tokens[frame.camera_name] < 1.0:
+                    return
+                self._record_tokens[frame.camera_name] -= 1.0
+            self._record_counts[frame.camera_name] += 1
             native = frame.to_record_envelope()
             try:
                 self._deviceio.emit(record_envelope(
@@ -166,10 +199,19 @@ def main(args=None) -> int:
                 / elapsed
                 for name in self._configs
             }
+            record_rates = {
+                name: (
+                    self._record_counts[name]
+                    - self._last_health_record_counts[name]
+                )
+                / elapsed
+                for name in self._configs
+            }
             self._last_health_counts = dict(self._frame_counts)
+            self._last_health_record_counts = dict(self._record_counts)
             self._last_health_time = now
             summary = ", ".join(
-                f"{name}={rates[name]:.1f}fps"
+                f"{name}=capture {rates[name]:.1f}/record {record_rates[name]:.1f}fps"
                 + (
                     ""
                     if self._latest_status.get(name, None) is not None

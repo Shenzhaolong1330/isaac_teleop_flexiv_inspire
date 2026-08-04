@@ -253,6 +253,43 @@ def test_oob_watchdog_reconnects_until_openxr_session_is_live():
     asyncio.run(scenario())
 
 
+def test_initial_oob_failure_uses_fast_reconnect_grace(monkeypatch):
+    from isaacteleop.cloudxr import oob_teleop_adb, wss
+    import flexiv_inspire_isaac.xr_raw_ros_source as source
+
+    observed_grace = []
+
+    async def failed_connect(**_kwargs):
+        raise RuntimeError("Signaling connection failed")
+
+    async def observe_maintainer(
+        _connect,
+        _connect_kwargs,
+        _session_live,
+        _initial_monitor,
+        *,
+        reconnect_grace_s,
+    ):
+        observed_grace.append(reconnect_grace_s)
+
+    monkeypatch.setattr(oob_teleop_adb, "run_oob_connect", failed_connect)
+    monkeypatch.setattr(wss, "run_oob_connect", failed_connect)
+    monkeypatch.setattr(source, "_maintain_oob_connection", observe_maintainer)
+
+    _install_cloudxr_client_overrides(
+        {"codec": "h264"},
+        session_live=threading.Event(),
+        reconnect_grace_s=15.0,
+    )
+
+    async def scenario():
+        task = await oob_teleop_adb.run_oob_connect(resolved_port=48322)
+        await task
+
+    asyncio.run(scenario())
+    assert observed_grace == [2.0]
+
+
 @pytest.mark.parametrize(
     "message",
     (

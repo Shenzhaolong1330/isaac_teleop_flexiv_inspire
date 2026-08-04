@@ -5,22 +5,24 @@ cameras:
   depth_enabled: true
   depth_width: 424
   depth_height: 240
-  depth_fps: 30
+  depth_fps: 15
   pointcloud_enabled: true
   pointcloud_stride: 2
   streams:
     # Fill these optional extrinsics paths after running camera calibration.
     # Raw depth/point clouds remain in each camera optical frame when blank.
-    head: {serial: "346522072347", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
-    left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
-    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 30, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
+    # fps/depth_fps 是 RealSense 采集档位；最终写盘频率由
+    # hardware.yaml 的 sampling.camera_hz 控制。
+    head: {serial: "346522072347", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
+    left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
+    right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
 
 xr_video:
   enabled: true
   auto_start_with_record: true
-  # During `robot record`, RTP + OpenXR decoded-frame readiness gates startup
-  # of the episode controller and pedal router. The arms cannot be armed until
-  # the operator has a live Quest image.
+  # RTP/OpenXR video is an optional operator display. Failure does not stop
+  # recording or teleoperation; Quest pose freshness and the middle pedal gate
+  # arm motion independently.
   # This station keeps Quest on USB. Isaac Teleop usb_local routes signalling,
   # the web client and WebRTC media through adb reverse + local TURN.
   transport: usb_tcp
@@ -70,7 +72,15 @@ xr_video:
 teleop:
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
-  manus_calibration: artifacts/calibration/manus_inspire_v2.yaml
+  # Operator-specific left/right MANUS Ergonomics calibration. The tracked
+  # bootstrap remains available for comparison or rollback.
+  manus_calibration: artifacts/calibration/manus_ergonomics_site_20260803.yaml
+  manus_ergonomics:
+    enabled: true
+    udp_host: 127.0.0.1
+    udp_port: 15053
+    left_topic: /manus/left/ergonomics
+    right_topic: /manus/right/ergonomics
   # Teleop may command the arms only after Reset, local authorization, valid
   # tracking, and the physical deadman pedal are all simultaneously active.
   control_enabled: true

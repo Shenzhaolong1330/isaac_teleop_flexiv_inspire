@@ -34,7 +34,9 @@ def test_rendered_bridge_and_receiver_use_identical_ports_and_rates(tmp_path):
     receiver = yaml.safe_load(rendered["isaac_camera_receiver.yaml"].read_text())
     assert receiver["source"] == "rtp"
     for name, camera in config.document["cameras"]["streams"].items():
-        assert bridge[f"streams.{name}.fps"] == float(camera["fps"])
+        assert bridge[f"streams.{name}.fps"] == float(
+            config.document["sampling"]["camera_hz"]
+        )
         enabled = bool(config.document["xr_video"]["streams"][name]["enabled"])
         assert bridge[f"streams.{name}.enabled"] is enabled
         if enabled:

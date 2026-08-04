@@ -77,6 +77,9 @@ class _FakeController:
             "manus_calibration": manus_calibration,
             "camera_recording_mode": "jpeg",
             "deviceio_mode": "native",
+            "deviceio_profile": "training",
+            "ros_mcap_enabled": False,
+            "record_only_while_pedal_pressed": True,
             "deviceio_socket": "/tmp/deviceio.sock",
             "runtime_dir": "/tmp/runtime",
         }
@@ -94,7 +97,7 @@ class _FakeController:
         return SimpleNamespace(value=self.values[name])
 
 
-def test_episode_command_contains_configured_identity_prompt_and_attempt() -> None:
+def test_episode_command_contains_configured_identity_prompt_and_internal_attempt() -> None:
     fake = _FakeController("")
     command = EpisodeController._command(fake)
 
@@ -102,12 +105,15 @@ def test_episode_command_contains_configured_identity_prompt_and_attempt() -> No
     assert command[command.index("--dataset-name") + 1] == "pick_place"
     assert command[command.index("--episode-index") + 1] == "3"
     assert command[command.index("--attempt") + 1] == "2"
+    assert command[command.index("--deviceio-profile") + 1] == "training"
+    assert "--no-ros-mcap" in command
+    assert "--record-only-while-pedal-pressed" in command
     assert command[command.index("--task-description") + 1] == (
         "Pick up the red block."
     )
     episode_name = command[command.index("--episode-directory-name") + 1]
     match = re.fullmatch(
-        r"episode_000003_attempt_02_(\d{8}_\d{4})",
+        r"episode_000003_(\d{8}_\d{4})",
         episode_name,
     )
     assert match is not None
@@ -122,16 +128,36 @@ def test_episode_command_adds_suffix_when_minute_directory_exists(
     fake = _FakeController("")
     fake.values["sessions_root"] = str(tmp_path)
     timestamp = "20260802_1349"
-    existing = tmp_path / "pick_place" / f"episode_000003_attempt_02_{timestamp}"
+    existing = tmp_path / "pick_place" / f"episode_000003_{timestamp}"
     existing.mkdir(parents=True)
     monkeypatch.setattr(episode_control, "local_minute_timestamp", lambda: timestamp)
 
     command = EpisodeController._command(fake)
 
     assert command[command.index("--episode-directory-name") + 1] == (
-        f"episode_000003_attempt_02_{timestamp}_01"
+        f"episode_000003_{timestamp}_01"
     )
     assert command[command.index("--collection-timestamp-local") + 1] == timestamp
+
+
+def test_discard_deletes_only_current_episode_directory(tmp_path: Path) -> None:
+    fake = _FakeController("")
+    fake.values["sessions_root"] = str(tmp_path)
+    episode = tmp_path / "pick_place" / "episode_000003_20260803_1500"
+    episode.mkdir(parents=True)
+    (episode / "manifest.json").write_text("{}", encoding="utf-8")
+    sibling = tmp_path / "pick_place" / "episode_000002_20260803_1459"
+    sibling.mkdir()
+    fake._current_manifest = episode / "manifest.json"
+    logger = _Logger()
+    fake.get_logger = lambda: logger
+
+    EpisodeController._delete_discarded_episode(fake)
+
+    assert not episode.exists()
+    assert sibling.is_dir()
+    assert fake._current_manifest is None
+    assert "已删除丢弃的数据" in logger.infos[-1]
 
 
 def test_manus_calibration_is_recorded_when_configured() -> None:
@@ -175,6 +201,7 @@ class _EpisodeWorkflow:
         self.authorize_home_calls = 0
         self.authorize_home_clear_flags = []
         self.authorize_control_calls = 0
+        self.commit_result = True
         self.statuses = []
         self.faults = []
         self.events = []
@@ -205,7 +232,7 @@ class _EpisodeWorkflow:
     def _stop(self, *, rerecord: bool) -> bool:
         self.stops.append(rerecord)
         self.events.append(f"stop:{rerecord}")
-        return not rerecord
+        return self.commit_result and not rerecord
 
     def _start(self) -> None:
         self.starts += 1
@@ -279,6 +306,35 @@ def test_right_pedal_finishes_at_configured_episode_count() -> None:
     assert fake.starts == 0
     assert fake._finished is True
     assert fake.statuses[-1] == "COMPLETE"
+
+
+def test_right_pedal_empty_action_discards_and_restarts_same_episode() -> None:
+    fake = _EpisodeWorkflow(episode_count=1)
+    fake.commit_result = False
+
+    EpisodeController._on_control(fake, _control("stop"))
+    _authorize_and_complete_home(fake)
+
+    assert fake.stops == [False]
+    assert fake._completed_episodes == 0
+    assert fake._episode_index == 1
+    assert fake._attempt == 2
+    assert fake.starts == 1
+    assert fake._finished is False
+    assert fake.events[-2:] == ["start", "authorize"]
+    assert "没有实际发送的机械臂命令" in fake.logger.warnings[-1]
+
+
+def test_only_missing_sent_command_is_classified_as_empty_action() -> None:
+    manifest = {
+        "completed": False,
+        "completion_reason": episode_control._EMPTY_ACTION_COMPLETION_REASON,
+        "streams": {},
+    }
+
+    assert episode_control._is_empty_action_attempt(manifest) is True
+    manifest["completion_reason"] += "; rosbag: write failed"
+    assert episode_control._is_empty_action_attempt(manifest) is False
 
 
 def test_left_pedal_discards_homes_and_restarts_same_index() -> None:
@@ -394,6 +450,24 @@ def test_pedal_router_maps_right_press_to_stop() -> None:
 
     assert publisher.messages[-1].data == "stop"
     assert logger.infos == ["右踏板：保存本条并进入下一条"]
+
+
+def test_middle_pedal_reports_physical_press_until_control_confirms_active() -> None:
+    logger = _Logger()
+    deadman_states = []
+    fake = SimpleNamespace(
+        _enabled=False,
+        _publish_deadman=lambda: deadman_states.append(fake._enabled),
+        get_logger=lambda: logger,
+    )
+
+    PedalRouter._on_enable(fake, True)
+
+    assert deadman_states == [True]
+    assert logger.infos == [
+        "中踏板：已踩下，正在等待 Quest 双腕追踪和控制端确认"
+    ]
+    assert "机械臂运动已启用" not in logger.infos[-1]
 
 
 class _ClutchRearm:

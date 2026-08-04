@@ -69,7 +69,9 @@ class PedalRouter(Node):
         self._enabled = bool(enabled)
         self._publish_deadman()
         self.get_logger().info(
-            "中踏板：机械臂运动已启用" if enabled else "中踏板：机械臂运动已停止"
+            "中踏板：已踩下，正在等待 Quest 双腕追踪和控制端确认"
+            if enabled
+            else "中踏板：已松开，机械臂运动已停止"
         )
 
     def _publish_deadman(self) -> None:

@@ -33,6 +33,7 @@ class CameraConfig:
     pointcloud_enabled: bool = False
     pointcloud_stride: int = 2
     record_depth: bool = True
+    recording_hz: float | None = None
     extrinsics_path: str = ""
     extrinsics_sha256: str = ""
     extrinsics_mode: str = ""
@@ -60,6 +61,8 @@ class CameraConfig:
             raise ValueError("pointcloud_stride must be in 1..32")
         if not 1 <= self.jpeg_quality <= 100:
             raise ValueError("JPEG quality must be in 1..100")
+        if self.recording_hz is not None and not 0.0 < self.recording_hz <= self.fps:
+            raise ValueError("recording_hz must be positive and no greater than capture fps")
 
 
 def load_camera_configs(path: str | Path) -> Mapping[str, CameraConfig]:

@@ -33,6 +33,21 @@ def test_lerobot_uses_head_clock_sent_command_and_explicit_invalids():
     assert len(row["observation.left_arm.pose"].rotation6d) == 6
 
 
+def test_wrist_images_accept_nearly_simultaneous_later_camera_frames():
+    row = EpisodeAligner(
+        {
+            "camera/head/jpeg": [s(b"head", 100)],
+            "camera/left_wrist/jpeg": [s(b"left", 95)],
+            "camera/right_wrist/jpeg": [s(b"right", 110)],
+        }
+    ).rows()[0]
+
+    assert row["observation.images.left_wrist"] == b"left"
+    assert row["observation.images.right_wrist"] == b"right"
+    assert row["observation.images.right_wrist.valid"]
+    assert row["observation.images.right_wrist.age_ns"] == -10
+
+
 def test_absolute_joint_action_view_uses_timestamp_aligned_robot_q():
     streams = {
         "camera/head/jpeg": [s(b"head", 100)],

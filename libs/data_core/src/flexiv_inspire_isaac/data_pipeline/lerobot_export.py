@@ -158,6 +158,7 @@ class EpisodeAligner:
                     f"camera/{camera}/jpeg",
                     timestamp,
                     self.tolerance.image_ns,
+                    allow_future=True,
                 )
             for camera in self.depth_cameras:
                 self._put_nearest(
@@ -166,6 +167,7 @@ class EpisodeAligner:
                     f"camera/{camera}/depth_z16",
                     timestamp,
                     self.tolerance.image_ns,
+                    allow_future=True,
                 )
             for side in ("left", "right"):
                 pose_stream = f"robot/{side}_arm/tcp_pose"
@@ -304,9 +306,62 @@ class EpisodeAligner:
         stream_name: str,
         timestamp_ns: int,
         tolerance_ns: int,
+        *,
+        allow_future: bool = False,
     ) -> None:
-        aligned = self._causal(stream_name, timestamp_ns, tolerance_ns)
+        aligned = (
+            self._nearest(stream_name, timestamp_ns, tolerance_ns)
+            if allow_future
+            else self._causal(stream_name, timestamp_ns, tolerance_ns)
+        )
         self._put(row, output_name, aligned)
+
+    def _nearest(
+        self, stream_name: str, timestamp_ns: int, tolerance_ns: int
+    ) -> AlignedValue:
+        """Match camera observations to the closest frame on either side.
+
+        Cameras are independent producers.  A wrist frame can legitimately
+        arrive a few milliseconds after the head frame that defines the
+        training timeline, so requiring a causal image wrongly selects the
+        previous (one-frame-old) wrist image.
+        """
+
+        samples = self._mapped_streams.get(stream_name, ())
+        times = self._stream_times.get(stream_name, ())
+        if not samples:
+            return AlignedValue(None, None, None, False, "timing-unmapped")
+        right = bisect_left(times, timestamp_ns)
+        indices = [
+            index for index in (right - 1, right) if 0 <= index < len(samples)
+        ]
+        if not indices:
+            return AlignedValue(None, None, None, False, "no-nearby-sample")
+        # Prefer the earlier sample on an exact tie, while still accepting an
+        # almost simultaneous frame produced just after the head camera.
+        index = min(
+            indices,
+            key=lambda item: (
+                abs(times[item] - timestamp_ns),
+                times[item] > timestamp_ns,
+            ),
+        )
+        sample = samples[index]
+        sample_time = times[index]
+        offset = timestamp_ns - sample_time
+        if not sample.valid:
+            return AlignedValue(
+                None,
+                sample_time,
+                offset,
+                False,
+                sample.invalid_reason or "invalid",
+            )
+        if abs(offset) > tolerance_ns:
+            return AlignedValue(
+                None, sample_time, offset, False, "outside-tolerance"
+            )
+        return AlignedValue(sample.value, sample_time, offset, True)
 
     def _causal(
         self, stream_name: str, timestamp_ns: int, tolerance_ns: int

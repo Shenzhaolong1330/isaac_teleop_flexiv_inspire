@@ -25,6 +25,11 @@ class ExportTolerance:
     force_ns: int = 20_000_000
     tactile_ns: int = 50_000_000
     state_ns: int = 20_000_000
+    # Inspire state is nominally 15 Hz and the real capture rate can be
+    # 12--14 Hz.  A 20 ms arm-state tolerance therefore rejects most valid hand
+    # samples.  Keep hand causal and bounded, but allow up to two nominal
+    # periods, matching the online policy client's hand age limit.
+    hand_ns: int = 150_000_000
     pose_bracket_ns: int = 20_000_000
     action_ns: int = 40_000_000
 
@@ -206,7 +211,7 @@ class EpisodeAligner:
                     f"observation.{side}_hand.state",
                     f"robot/{side}_hand/state",
                     timestamp,
-                    self.tolerance.state_ns,
+                    self.tolerance.hand_ns,
                 )
                 self._put_nearest(
                     row,

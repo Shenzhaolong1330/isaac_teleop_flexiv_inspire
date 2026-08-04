@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 from typing import Any, Mapping, Sequence
+import uuid
 
 import numpy as np
 
@@ -54,7 +56,25 @@ class ProfileExportResult:
     frames_written: int
     frames_dropped_invalid_action: int
     frames_dropped_invalid_image: int
+    frames_dropped_invalid_observation: int
     reload_length: int
+
+
+class InvalidPolicyFrame(ValueError):
+    """One aligned row is unusable without fabricating a policy feature."""
+
+    def __init__(self, category: str, reason: str) -> None:
+        super().__init__(reason)
+        self.category = category
+
+
+def _required_row_value(
+    row: Mapping[str, Any], name: str, *, category: str
+) -> Any:
+    if not bool(row.get(f"{name}.valid", False)) or row.get(name) is None:
+        reason = str(row.get(f"{name}.invalid_reason", "invalid"))
+        raise InvalidPolicyFrame(category, f"required {name} is invalid: {reason}")
+    return row[name]
 
 
 def profile_features(
@@ -105,42 +125,76 @@ def aligned_row_to_policy_frame(
     images: dict[str, np.ndarray] = {}
     for target in profile.image_keys:
         source = SOURCE_IMAGE_KEYS[target]
-        if not row.get(f"{source}.valid", False):
-            raise ValueError(f"required image {source} is invalid")
-        images[target] = _decode_image(row.get(source), image_shapes[target])
+        try:
+            images[target] = _decode_image(
+                _required_row_value(row, source, category="image"),
+                image_shapes[target],
+            )
+        except InvalidPolicyFrame:
+            raise
+        except ValueError as exc:
+            raise InvalidPolicyFrame(
+                "image", f"required {source} cannot be decoded: {exc}"
+            ) from exc
 
-    arm_states = [
-        row.get(f"observation.{side}_arm.state")
-        for side in ("left", "right")
-    ]
-    arm_q = np.concatenate(
-        [_field_vector(state, "q", 7) for state in arm_states]
-    )
-    arm_pose = np.concatenate(
-        [
-            _pose_vector(row.get(f"observation.{side}_arm.pose"))
-            for side in ("left", "right")
-        ]
-    )
-    hand_angle = np.concatenate(
-        [
-            _field_vector(
-                row.get(f"observation.{side}_hand.state"), "angle", 6
+    try:
+        arm_states = [
+            _required_row_value(
+                row, f"observation.{side}_arm.state", category="observation"
             )
             for side in ("left", "right")
         ]
-    )
-    if profile_id == "dual_arm_lerobot_v1":
-        state = legacy_state38(arm_q, arm_pose, hand_angle)
-    elif profile_id == "joint_proprio_cartesian_v1":
-        state = joint_minimal_state(arm_q, hand_angle)
-    elif profile_id == "cartesian_proprio_v1":
-        state = cartesian_minimal_state(arm_pose, hand_angle)
-    else:  # get_profile() above should make this unreachable.
-        raise ValueError(f"unsupported policy profile: {profile_id}")
+        arm_poses = [
+            _required_row_value(
+                row, f"observation.{side}_arm.pose", category="observation"
+            )
+            for side in ("left", "right")
+        ]
+        hand_states = [
+            _required_row_value(
+                row, f"observation.{side}_hand.state", category="observation"
+            )
+            for side in ("left", "right")
+        ]
+        arm_q = np.concatenate(
+            [_field_vector(state, "q", 7) for state in arm_states]
+        )
+        arm_pose = np.concatenate([_pose_vector(pose) for pose in arm_poses])
+        hand_angle = np.concatenate(
+            [_field_vector(state, "angle", 6) for state in hand_states]
+        )
+        if not (
+            np.all(np.isfinite(arm_q))
+            and np.all(np.isfinite(arm_pose))
+            and np.all(np.isfinite(hand_angle))
+        ):
+            raise ValueError("required state contains NaN/Inf")
+        if profile_id == "dual_arm_lerobot_v1":
+            state = legacy_state38(arm_q, arm_pose, hand_angle)
+        elif profile_id == "joint_proprio_cartesian_v1":
+            state = joint_minimal_state(arm_q, hand_angle)
+        elif profile_id == "cartesian_proprio_v1":
+            state = cartesian_minimal_state(arm_pose, hand_angle)
+        else:  # get_profile() above should make this unreachable.
+            raise ValueError(f"unsupported policy profile: {profile_id}")
+    except InvalidPolicyFrame:
+        raise
+    except ValueError as exc:
+        raise InvalidPolicyFrame(
+            "observation", f"required policy observation is invalid: {exc}"
+        ) from exc
 
-    native_action = _validated_action(row.get("action"), ActionView())
-    action = native_action30_to_policy24(native_action)
+    try:
+        native_action = _validated_action(
+            _required_row_value(row, "action", category="action"), ActionView()
+        )
+        action = native_action30_to_policy24(native_action)
+    except InvalidPolicyFrame:
+        raise
+    except ValueError as exc:
+        raise InvalidPolicyFrame(
+            "action", f"required policy action is invalid: {exc}"
+        ) from exc
     if state.shape != (profile.state_dimension,):
         raise ValueError("profile state mapper returned the wrong dimension")
     if action.shape != (profile.action_dimension,):
@@ -214,33 +268,32 @@ def export_policy_episodes(
                 f"refusing to overwrite existing dataset root: {root}"
             )
         root.rmdir()
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = root.with_name(f".{root.name}.incomplete-{uuid.uuid4().hex}")
     robot_type = (
         "flexiv_dual_arm"
         if profile.compatibility_only
         else "flexiv_rizon4s_dual_inspire"
     )
-    dataset = dataset_class.create(
-        repo_id=repo_id,
-        fps=int(fps),
-        features=features,
-        root=root,
-        robot_type=robot_type,
-        use_videos=True,
-    )
+    dataset = None
     written = 0
     episodes_written = 0
     dropped_action = 0
     dropped_image = 0
+    dropped_observation = 0
     try:
+        dataset = dataset_class.create(
+            repo_id=repo_id,
+            fps=int(fps),
+            features=features,
+            root=staging_root,
+            robot_type=robot_type,
+            use_videos=True,
+        )
         for episode in episodes:
             episode_written = 0
             for row in episode.rows:
-                validity = row.get("valid", {})
-                explicitly_invalid = (
-                    isinstance(validity, Mapping)
-                    and "action" in validity
-                    and not bool(validity["action"])
-                )
+                explicitly_invalid = row.get("action.valid") is False
                 if row.get("action") is None or explicitly_invalid:
                     dropped_action += 1
                     continue
@@ -251,11 +304,19 @@ def export_policy_episodes(
                         profile_id=profile_id,
                         image_shapes=image_shapes,
                     )
-                except ValueError as exc:
-                    if "required image" in str(exc):
+                except InvalidPolicyFrame as exc:
+                    if exc.category == "image":
                         dropped_image += 1
                         continue
-                    raise
+                    if exc.category == "observation":
+                        dropped_observation += 1
+                        continue
+                    if exc.category == "action":
+                        dropped_action += 1
+                        continue
+                    raise RuntimeError(
+                        f"unknown invalid policy frame category: {exc.category}"
+                    ) from exc
                 dataset.add_frame(frame)
                 episode_written += 1
                 written += 1
@@ -268,30 +329,40 @@ def export_policy_episodes(
             episodes_written += 1
         dataset.finalize()
     except Exception:
-        dataset.finalize()
+        if dataset is not None:
+            try:
+                dataset.finalize()
+            except Exception:
+                pass
+        shutil.rmtree(staging_root, ignore_errors=True)
         raise
 
-    reloaded = dataset_class(repo_id=repo_id, root=root)
-    reload_length = len(reloaded)
-    if reload_length != written:
-        raise RuntimeError(
-            f"LeRobot reload validation failed: wrote {written}, "
-            f"loaded {reload_length}"
-        )
-    sample = reloaded[0]
-    expected_keys = {"task", "observation.state", "action", *profile.image_keys}
-    # Real LeRobot adds indexing/timestamp columns on reload. Validate profile
-    # tensor/image keys, while allowing those framework-owned metadata fields.
-    if not expected_keys.issubset(sample):
-        raise RuntimeError("reloaded dataset is missing profile features")
-    if tuple(np.asarray(sample["observation.state"]).shape) != (
-        profile.state_dimension,
-    ):
-        raise RuntimeError("reloaded observation.state has the wrong shape")
-    if tuple(np.asarray(sample["action"]).shape) != (
-        profile.action_dimension,
-    ):
-        raise RuntimeError("reloaded action has the wrong shape")
+    try:
+        reloaded = dataset_class(repo_id=repo_id, root=staging_root)
+        reload_length = len(reloaded)
+        if reload_length != written:
+            raise RuntimeError(
+                f"LeRobot reload validation failed: wrote {written}, "
+                f"loaded {reload_length}"
+            )
+        sample = reloaded[0]
+        expected_keys = {"task", "observation.state", "action", *profile.image_keys}
+        # Real LeRobot adds indexing/timestamp columns on reload. Validate profile
+        # tensor/image keys, while allowing those framework-owned metadata fields.
+        if not expected_keys.issubset(sample):
+            raise RuntimeError("reloaded dataset is missing profile features")
+        if tuple(np.asarray(sample["observation.state"]).shape) != (
+            profile.state_dimension,
+        ):
+            raise RuntimeError("reloaded observation.state has the wrong shape")
+        if tuple(np.asarray(sample["action"]).shape) != (
+            profile.action_dimension,
+        ):
+            raise RuntimeError("reloaded action has the wrong shape")
+        staging_root.rename(root)
+    except Exception:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise
     return ProfileExportResult(
         output_root=str(root.resolve()),
         profile=profile_id,
@@ -300,5 +371,6 @@ def export_policy_episodes(
         frames_written=written,
         frames_dropped_invalid_action=dropped_action,
         frames_dropped_invalid_image=dropped_image,
+        frames_dropped_invalid_observation=dropped_observation,
         reload_length=reload_length,
     )

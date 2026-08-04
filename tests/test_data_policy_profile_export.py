@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from flexiv_inspire_isaac.data_pipeline.alignment import InterpolatedPose, Pose
 from flexiv_inspire_isaac.data_pipeline.profile_export import (
@@ -52,6 +55,9 @@ def _row() -> dict:
         key = f"observation.images.{camera}"
         row[key] = np.zeros((12, 16, 3), dtype=np.uint8)
         row[f"{key}.valid"] = True
+    for side in ("left", "right"):
+        for suffix in ("arm.pose", "arm.state", "hand.state"):
+            row[f"observation.{side}_{suffix}.valid"] = True
     return row
 
 
@@ -60,6 +66,7 @@ class CountingDataset:
 
     @classmethod
     def create(cls, **kwargs):
+        Path(kwargs["root"]).mkdir(parents=True, exist_ok=False)
         instance = cls(**kwargs)
         cls.instances.append(instance)
         return instance
@@ -86,6 +93,13 @@ class CountingDataset:
 
     def __getitem__(self, index):
         return self.frames[index]
+
+
+class FailingReloadDataset(CountingDataset):
+    def __init__(self, **kwargs):
+        if "fps" not in kwargs:
+            raise RuntimeError("reload failed")
+        super().__init__(**kwargs)
 
 
 def test_profile_features_are_exact_and_compile_against_contract():
@@ -164,3 +178,43 @@ def test_multiple_sources_become_multiple_episodes_in_one_dataset(tmp_path):
     assert len(created.frames) == 3
     assert result.source_episodes == result.episodes_written == 2
     assert result.frames_written == result.reload_length == 3
+    assert result.frames_dropped_invalid_observation == 0
+    assert (tmp_path / "merged").is_dir()
+    assert not list(tmp_path.glob(".merged.incomplete-*"))
+
+
+def test_invalid_required_hand_frame_is_dropped_without_fabricating_state(tmp_path):
+    CountingDataset.instances.clear()
+    invalid = _row()
+    invalid["observation.left_hand.state"] = None
+    invalid["observation.left_hand.state.valid"] = False
+    invalid["observation.left_hand.state.invalid_reason"] = "no-causal-sample"
+
+    result = export_policy_episodes(
+        [PolicyEpisode([invalid, _row()], "task", "manifest.json")],
+        output_root=tmp_path / "merged",
+        repo_id="local/test-invalid-observation",
+        profile_id="joint_proprio_cartesian_v1",
+        fps=15,
+        dataset_class=CountingDataset,
+    )
+
+    assert result.frames_written == 1
+    assert result.frames_dropped_invalid_observation == 1
+
+
+def test_reload_failure_removes_staging_dataset_and_never_publishes(tmp_path):
+    FailingReloadDataset.instances.clear()
+
+    with pytest.raises(RuntimeError, match="reload failed"):
+        export_policy_episodes(
+            [PolicyEpisode([_row()], "task", "manifest.json")],
+            output_root=tmp_path / "merged",
+            repo_id="local/test-reload-failure",
+            profile_id="joint_proprio_cartesian_v1",
+            fps=15,
+            dataset_class=FailingReloadDataset,
+        )
+
+    assert not (tmp_path / "merged").exists()
+    assert not list(tmp_path.glob(".merged.incomplete-*"))

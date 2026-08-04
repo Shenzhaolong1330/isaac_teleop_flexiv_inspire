@@ -48,6 +48,25 @@ def test_wrist_images_accept_nearly_simultaneous_later_camera_frames():
     assert row["observation.images.right_wrist.age_ns"] == -10
 
 
+def test_low_rate_hand_state_uses_its_own_bounded_causal_tolerance():
+    row = EpisodeAligner(
+        {
+            "camera/head/jpeg": [s(b"head", 100_000_000)],
+            "robot/left_hand/state": [
+                s({"angle": [500.0] * 6}, 40_000_000)
+            ],
+            "robot/right_hand/state": [
+                s({"angle": [500.0] * 6}, 30_000_000)
+            ],
+        }
+    ).rows()[0]
+
+    assert row["observation.left_hand.state.valid"]
+    assert row["observation.right_hand.state.valid"]
+    assert row["observation.left_hand.state.age_ns"] == 60_000_000
+    assert row["observation.right_hand.state.age_ns"] == 70_000_000
+
+
 def test_absolute_joint_action_view_uses_timestamp_aligned_robot_q():
     streams = {
         "camera/head/jpeg": [s(b"head", 100)],

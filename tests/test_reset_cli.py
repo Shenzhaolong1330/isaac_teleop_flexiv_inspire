@@ -204,6 +204,15 @@ def test_reset_parser_needs_no_confirmation_argument():
     assert args.preview_seconds == 2.0
 
 
+def test_policy_serve_parser_has_independent_server_config():
+    args = cli._parser().parse_args(["policy-serve"])
+
+    assert args.operation == "policy-serve"
+    assert args.policy_config == "config/policy_server.yaml"
+    assert args.dry_run is False
+    assert args.no_reset is False
+
+
 def test_replay_automatically_prepares_rdk_and_ros_stack(tmp_path, monkeypatch):
     prepared: list[object] = []
     monkeypatch.setattr(
@@ -321,6 +330,35 @@ def test_record_failure_still_stops_all_managed_services(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="recorder failed"):
         cli.main(["record"])
+
+    assert cleanup_calls == [(config, False), (config, False)]
+
+
+def test_policy_server_failure_still_stops_all_managed_services(
+    tmp_path, monkeypatch
+):
+    config = SimpleNamespace(
+        document={"session": {"runtime_root": str(tmp_path / "runtime")}}
+    )
+    cleanup_calls = []
+    monkeypatch.setattr(cli, "load_system_config", lambda path: config)
+
+    def fail_server(args, selected_config):
+        assert selected_config is config
+        raise RuntimeError("policy server failed")
+
+    monkeypatch.setattr(cli, "_main", fail_server)
+    monkeypatch.setattr(
+        cli,
+        "_stop_managed_services",
+        lambda selected_config, require_existing: cleanup_calls.append(
+            (selected_config, require_existing)
+        )
+        or 7,
+    )
+
+    with pytest.raises(RuntimeError, match="policy server failed"):
+        cli.main(["policy-serve"])
 
     assert cleanup_calls == [(config, False), (config, False)]
 

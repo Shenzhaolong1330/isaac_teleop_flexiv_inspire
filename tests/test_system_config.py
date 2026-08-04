@@ -8,6 +8,8 @@ from flexiv_inspire_isaac.cli import (
     _commands,
     _conversion_manifest,
     _conversion_manifests,
+    _load_policy_server_config,
+    _policy_serve_commands,
     _run_convert,
 )
 from flexiv_inspire_isaac.system_config import (
@@ -23,6 +25,42 @@ def _example() -> Path:
 
 def _site() -> Path:
     return Path(__file__).parents[1] / "config" / "site.yaml"
+
+
+def _policy_server() -> Path:
+    return Path(__file__).parents[1] / "config" / "policy_server.yaml"
+
+
+def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
+    config = load_system_config(_site())
+    rendered = render_runtime_configs(config, tmp_path / "rendered")
+    settings = _load_policy_server_config(config, _policy_server())
+    commands = _policy_serve_commands(config, rendered, settings)
+    joined = [" ".join(command) for command in commands]
+
+    assert settings["bind"] == "127.0.0.1"
+    assert settings["rates"] == {
+        "arm_hz": 200.0,
+        "hand_hz": 15.0,
+        "tactile_hz": 15.0,
+        "camera_hz": 15.0,
+        "action_hz": 30.0,
+    }
+    assert len(commands) == 6
+    assert any("flexiv-rdk-daemon" in command for command in joined)
+    assert any("flexiv_inspire_control.node" in command for command in joined)
+    assert any("flexiv-inspire-camera-node" in command for command in joined)
+    assert any("flexiv-inspire-dftp-node" in command for command in joined)
+    assert any("flexiv-inspire-pedal-router" in command for command in joined)
+    assert any("policy_api.ros_adapter" in command for command in joined)
+    forbidden = (
+        "teleop_input_node",
+        "episode_control",
+        "xr_raw",
+        "run_manus_plugin",
+        "rerun_viz",
+    )
+    assert not any(marker in command for marker in forbidden for command in joined)
 
 
 def test_conversion_manifest_discovers_raw_and_legacy_episodes(tmp_path) -> None:

@@ -1,0 +1,23 @@
+schema_version: 1
+
+# This repository is the only hardware owner. The LeRobot process in
+# dual_arm_teleop is a pure RPC client and never opens RDK, Inspire or cameras.
+server:
+  bind: 127.0.0.1
+  port: 50051
+  server_cert: certs/server.crt
+  server_key: certs/private/server.key
+  # Required when bind is changed to a non-loopback address.
+  client_ca: ""
+
+rates:
+  arm_hz: 200.0
+  hand_hz: 15.0
+  tactile_hz: 15.0
+  camera_hz: 15.0
+  action_hz: 30.0
+
+startup:
+  # One-command local preparation. Use --no-reset only for read-only shadow
+  # diagnostics when moving/Home is intentionally undesired.
+  auto_reset_before_serve: true

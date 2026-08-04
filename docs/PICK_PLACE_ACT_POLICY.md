@@ -1,76 +1,94 @@
-# Pick/place ACT checkpoint 与推理
+# Pick/place 数据与策略 RPC 边界
 
-这套配置只服务于 `pick_place_demo` 的 10 条、15 Hz 数据，不修改
-`dual_arm_teleop` 原有训练、直连推理或 checkpoint。状态/动作契约固定为
-`dual_arm_lerobot_v1`：38D state、24D action 和三路 RGB。
+两个仓库保持明确的 server/client 分工：
 
-## 1. 训练
+- `isaac_teleop_flexiv_inspire`：采集、转换后的 LeRobot dataset、Flexiv RDK、
+  Inspire、相机、脚踏、安全监督器和 Policy RPC server；它是唯一硬件 owner。
+- `dual_arm_teleop`：LeRobot train/reason 配置、checkpoint、RPC Robot client 和
+  policy rollout；它不直接打开 RDK、Modbus 或 RealSense。
+
+## 1. 数据（server 仓库）
+
+数据集保持在：
+
+```text
+/home/hb/isaac_teleop_flexiv_inspire/sessions/pick_place_demo/lerobot_merged/dual_arm_lerobot_v1
+```
+
+重新转换新版本时仍在本仓库运行：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
-./scripts/policy/train_pick_place_act.sh
+source scripts/env/activate_ros.sh
+robot convert --conversion-config config/conversion_dual_arm.yaml
 ```
 
-训练配置为 `config/policies/pick_place_act_train.yaml`。RTX 5070 使用 batch 8，
-训练 10,000 step，每 1,000 step 保存一次。输出目录：
+## 2. 训练与 checkpoint（client 仓库）
+
+专属配置位于：
 
 ```text
-artifacts/policies/pick_place_demo_act_v1/
-  checkpoints/
-    001000/ ... 010000/
-    last -> 010000
+/home/hb/flexiv_inspire_ws/src/dual_arm_teleop/scripts/config/experiments/pick_place_act_v1/
 ```
 
-推理始终引用：
+从 client 仓库训练：
+
+```bash
+cd /home/hb/flexiv_inspire_ws/src/dual_arm_teleop
+conda activate flexiv_teleop
+robot-train --config scripts/config/experiments/pick_place_act_v1/train_cfg.yaml
+```
+
+checkpoint 只写入 client 仓库：
 
 ```text
-artifacts/policies/pick_place_demo_act_v1/checkpoints/last/pretrained_model
+/home/hb/flexiv_inspire_ws/src/dual_arm_teleop/outputs/train/pick_place_demo_act_v1/
 ```
 
-脚本不会覆盖已有输出。如果检测到完整的 `checkpoints/last/training_state`，再次运行
-同一条命令会自动 resume；若目录存在却没有可恢复 checkpoint，则停止并要求人工
-检查，不能删除一个仍需使用的 checkpoint 后从头覆盖。
-
-## 2. Shadow 推理
-
-先让本仓库作为唯一硬件 owner 运行，使 RDK、Inspire 和三路相机持续发布。当前
-数采流程可直接使用：
+## 3. RPC server（本仓库）
 
 ```bash
 cd /home/hb/isaac_teleop_flexiv_inspire
 source scripts/env/activate_ros.sh
-robot record
+robot policy-serve
 ```
 
-另开终端启动只绑定 loopback 的 TLS 策略服务：
+该命令以前台方式运行，默认先执行本机 Reset，然后启动 RDK、控制桥、Inspire、
+三路相机、脚踏和 loopback TLS Policy RPC。它不会启动 Quest、MANUS、Episode
+Controller、LeRobot 或训练/推理程序。`Ctrl-C` 关闭 server 及其硬件服务。
+
+只做不允许运动的 shadow 诊断且不希望自动 Home 时，可以使用：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
-./scripts/policy/start_pick_place_policy_server.sh
+robot policy-serve --no-reset
 ```
 
-第三个终端运行 checkpoint：
+RPC 地址、证书和频率在 `config/policy_server.yaml`。非 loopback 监听必须配置
+client CA 并使用双向 TLS。
+
+## 4. 推理（client 仓库）
+
+server 就绪后，在另一个终端运行：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
-./scripts/policy/run_pick_place_act_shadow.sh
+cd /home/hb/flexiv_inspire_ws/src/dual_arm_teleop
+conda activate flexiv_teleop
+robot-record --config scripts/config/experiments/pick_place_act_v1/run_policy_shadow.yaml
 ```
 
-`pick_place_rpc_robot.yaml` 默认 `shadow_only: true`。策略会以 15 Hz 获取与训练完全
-同名、同顺序的观测，完成 ACT 推理、反归一化和 24D action 契约校验；终端会打印
-`[ISAAC RPC SHADOW]`，但不会申请 lease 或发送动作。每次 rollout 仍会生成一份
-LeRobot 记录，便于离线检查预测。
+默认配置为 `shadow_only: true`：client 读取 RPC observation、加载本仓库数据训练出的
+checkpoint、执行 ACT 并验证 24D action，但不申请 lease、不向真机发送动作。
 
-## 3. 真机前验收
+真机模式必须在完成 shadow 验收后使用单独的 guarded 配置；server 端还必须由本机
+TTY 授权 policy source，并保持中踏板按下：
 
-至少先完成：
+```bash
+flexiv-inspire-authorize-control \
+  --session-id flexiv-inspire-site \
+  --source policy \
+  --confirm FLEXIV-CONTROL-ARM \
+  --clear-hold-latched \
+  --socket /run/user/1000/isaac_teleop/rdk.sock
+```
 
-1. 连续 shadow 运行 10 条 episode，无 stale/schema/NaN 错误；
-2. 可视化预测的左右臂 XYZ/旋转向量及双手 0..1 命令，确认方向、尺度和手序一致；
-3. 从 001000、002000 等 checkpoint 中根据离线 loss 和 shadow 行为选择，而不是
-   默认认为最后一步最好；
-4. 再复制 RPC robot 配置，将副本的 `shadow_only` 显式改成 `false`，并在本机完成
-   policy source 授权、F/T zero、Home 和中踏板测试。
-
-真机动作仍经过本仓库的 lease、TTL、脚踏、软限位和 source-exclusive 控制。不要
-把 `shadow_only: false` 写进默认 shadow 配置。
+然后启动 `run_policy_guarded.yaml`。动作继续经过 lease、TTL、heartbeat、脚踏、
+软限位和 source-exclusive 控制。

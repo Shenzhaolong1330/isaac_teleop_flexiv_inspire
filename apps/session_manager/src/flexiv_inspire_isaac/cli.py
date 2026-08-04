@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -53,6 +54,8 @@ _MANAGED_PROCESS_MARKERS = (
     "run_manus_plugin.sh",
     "manus_hand_plugin",
     "run_isaac_camera_receiver.sh",
+    "flexiv_inspire_isaac.policy_api.ros_adapter",
+    "flexiv-inspire-policy-server",
 )
 
 
@@ -1233,6 +1236,158 @@ def _live_rerun_command(config) -> list[str] | None:
     ]
 
 
+def _load_policy_server_config(config, raw_path: str | Path) -> dict:
+    """Load the standalone hardware-owner RPC server configuration."""
+
+    path = config.resolve(str(raw_path))
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise SystemConfigError(f"policy server config cannot be read: {path}: {exc}") from exc
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise SystemConfigError("policy server config must declare schema_version: 1")
+    server = document.get("server")
+    if not isinstance(server, dict):
+        raise SystemConfigError("policy server config requires a server mapping")
+    bind = str(server.get("bind", "127.0.0.1")).strip()
+    if not bind:
+        raise SystemConfigError("policy server bind cannot be empty")
+    try:
+        port = int(server.get("port", 50051))
+    except (TypeError, ValueError) as exc:
+        raise SystemConfigError("policy server port must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise SystemConfigError("policy server port must be in [1,65535]")
+    server_cert = config.resolve(str(server.get("server_cert", "")))
+    server_key = config.resolve(str(server.get("server_key", "")))
+    client_ca_raw = str(server.get("client_ca", "")).strip()
+    client_ca = config.resolve(client_ca_raw) if client_ca_raw else None
+    for label, selected in (("server_cert", server_cert), ("server_key", server_key)):
+        if not selected.is_file():
+            raise SystemConfigError(f"policy server {label} is not a file: {selected}")
+    if client_ca is not None and not client_ca.is_file():
+        raise SystemConfigError(f"policy server client_ca is not a file: {client_ca}")
+    if bind not in {"127.0.0.1", "::1", "localhost"} and client_ca is None:
+        raise SystemConfigError(
+            "non-loopback policy server bind requires client_ca for mutual TLS"
+        )
+    rates = document.get("rates", {})
+    if not isinstance(rates, dict):
+        raise SystemConfigError("policy server rates must be a mapping")
+    normalized_rates = {}
+    for name, default in (
+        ("arm_hz", 200.0),
+        ("hand_hz", 15.0),
+        ("tactile_hz", 15.0),
+        ("camera_hz", 15.0),
+        ("action_hz", 30.0),
+    ):
+        try:
+            value = float(rates.get(name, default))
+        except (TypeError, ValueError) as exc:
+            raise SystemConfigError(f"policy server {name} must be numeric") from exc
+        if not math.isfinite(value) or value <= 0.0:
+            raise SystemConfigError(f"policy server {name} must be positive and finite")
+        normalized_rates[name] = value
+    startup = document.get("startup", {})
+    if not isinstance(startup, dict):
+        raise SystemConfigError("policy server startup must be a mapping")
+    return {
+        "path": path,
+        "bind": bind,
+        "port": port,
+        "server_cert": server_cert,
+        "server_key": server_key,
+        "client_ca": client_ca,
+        "rates": normalized_rates,
+        "auto_reset_before_serve": bool(
+            startup.get("auto_reset_before_serve", True)
+        ),
+    }
+
+
+def _policy_server_command(settings: dict) -> list[str]:
+    rates = settings["rates"]
+    command = [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_isaac.policy_api.ros_adapter",
+        "--bind",
+        str(settings["bind"]),
+        "--port",
+        str(int(settings["port"])),
+        "--server-cert",
+        str(settings["server_cert"]),
+        "--server-key",
+        str(settings["server_key"]),
+        "--arm-rate-hz",
+        str(float(rates["arm_hz"])),
+        "--hand-rate-hz",
+        str(float(rates["hand_hz"])),
+        "--tactile-rate-hz",
+        str(float(rates["tactile_hz"])),
+        "--camera-rate-hz",
+        str(float(rates["camera_hz"])),
+        "--action-rate-hz",
+        str(float(rates["action_hz"])),
+    ]
+    if settings["client_ca"] is not None:
+        command.extend(("--client-ca", str(settings["client_ca"])))
+    return command
+
+
+def _policy_serve_commands(
+    config, rendered: dict[str, Path], settings: dict
+) -> list[list[str]]:
+    """Return the hardware owner stack required by an external policy client."""
+
+    return [
+        _rdk_command(config),
+        _control_command(config, rendered),
+        [
+            "flexiv-inspire-camera-node",
+            "--ros-args",
+            "-p",
+            f"config:={rendered['camera.yaml']}",
+        ],
+        [
+            "flexiv-inspire-dftp-node",
+            "--ros-args",
+            "--params-file",
+            str(rendered["dftp.yaml"]),
+        ],
+        [
+            "flexiv-inspire-pedal-router",
+            "--ros-args",
+            "--params-file",
+            str(rendered["pedal.yaml"]),
+        ],
+        _policy_server_command(settings),
+    ]
+
+
+def _wait_for_policy_services(
+    processes: Sequence[subprocess.Popen], logs: Sequence[Path]
+) -> None:
+    """Keep the policy owner foregrounded and fail if an owned service exits."""
+
+    while True:
+        for index, process in enumerate(processes):
+            status = process.poll()
+            if status is None:
+                continue
+            tail = (
+                logs[index].read_text(encoding="utf-8", errors="replace")[-4000:]
+                if logs[index].is_file()
+                else ""
+            )
+            raise RuntimeError(
+                f"policy service-{index} exited with status {status}; "
+                f"log={logs[index]}\n{tail}"
+            )
+        time.sleep(0.1)
+
+
 def _commands(
     config, rendered: dict[str, Path], *, include_xr_receiver: bool
 ) -> list[list[str]]:
@@ -1354,6 +1509,23 @@ def _parser() -> argparse.ArgumentParser:
         "--no-xr",
         action="store_true",
         help="do not start Quest video; controller teleoperation remains enabled",
+    )
+    policy_serve = sub.add_parser(
+        "policy-serve",
+        help="run the hardware owner and TLS policy RPC server in the foreground",
+    )
+    policy_serve.add_argument(
+        "--policy-config",
+        default="config/policy_server.yaml",
+        help="standalone policy server YAML",
+    )
+    policy_serve.add_argument(
+        "--dry-run", action="store_true", help="render and print commands only"
+    )
+    policy_serve.add_argument(
+        "--no-reset",
+        action="store_true",
+        help="start without F/T zero or Home; guarded actions remain unavailable until locally prepared",
     )
     sub.add_parser("stop", help="recover and stop leftover managed services")
     sub.add_parser(
@@ -1659,6 +1831,96 @@ def _main(args, config) -> int:
         finally:
             _stop_started_processes(processes)
             _remove_state_pids(runtime, {process.pid for process in processes})
+    if args.operation == "policy-serve":
+        rendered = render_runtime_configs(config, runtime / config.sha256[:12])
+        settings = _load_policy_server_config(config, args.policy_config)
+        commands = _policy_serve_commands(config, rendered, settings)
+        if args.dry_run:
+            print(json.dumps(commands, indent=2))
+            return 0
+        _require_camera_devices_available(config)
+        reset_requested = settings["auto_reset_before_serve"] and not args.no_reset
+        if reset_requested:
+            print(
+                "Policy server: 自动准备真机（F/T 清零 -> 安全抬升 -> Home -> 双手张开）",
+                flush=True,
+            )
+            reset_result = _run_reset(
+                config, argparse.Namespace(preview_seconds=2.0)
+            )
+            if reset_result != 0:
+                raise SystemExit(f"Policy server 真机准备失败，Reset 退出码 {reset_result}")
+        rdk_socket = (
+            Path(config.document["session"]["runtime_root"]).expanduser()
+            / "rdk.sock"
+        )
+        if _rdk_socket_live(rdk_socket):
+            commands = [
+                command
+                for command in commands
+                if "flexiv-rdk-daemon" not in " ".join(command)
+            ]
+            print("Policy server 复用已运行的 RDK daemon", flush=True)
+        reusable_services = (
+            (
+                (
+                    "flexiv_inspire_control.node",
+                    "flexiv-inspire-control-bridge",
+                    "flexiv_inspire_control/control_bridge",
+                ),
+                ("flexiv_inspire_control.node", "flexiv-inspire-control-bridge"),
+            ),
+            (
+                (
+                    "flexiv_inspire_isaac.dftp.ros_node",
+                    "flexiv-inspire-dftp-node",
+                    "flexiv_inspire_dftp/dftp_node",
+                ),
+                ("flexiv-inspire-dftp-node",),
+            ),
+        )
+        for process_markers, command_markers in reusable_services:
+            if _process_running(*process_markers):
+                commands = [
+                    command
+                    for command in commands
+                    if not any(
+                        marker in " ".join(command) for marker in command_markers
+                    )
+                ]
+        log_prefix = f"policy-serve-{time.time_ns()}"
+        logs = [runtime / f"{log_prefix}-{index}.log" for index in range(len(commands))]
+        processes = _start(commands, runtime, log_prefix=log_prefix)
+        _write_state(runtime, config, processes)
+        try:
+            _verify_process_startup(processes, logs)
+            _wait_for_rdk_socket(rdk_socket, processes, logs)
+            _wait_for_camera_streams(
+                commands,
+                processes,
+                logs,
+                tuple(config.document["cameras"]["streams"]),
+            )
+            session_id = str(config.document["session"]["id"])
+            print(
+                f"Policy RPC ready: {settings['bind']}:{settings['port']}\n"
+                "hardware owner=isaac_teleop_flexiv_inspire; "
+                "training/inference client=dual_arm_teleop\n"
+                "Shadow 可直接连接；真机动作请在另一个本地终端授权：\n"
+                "  flexiv-inspire-authorize-control "
+                f"--session-id {session_id} --source policy "
+                "--confirm FLEXIV-CONTROL-ARM --clear-hold-latched "
+                f"--socket {rdk_socket}\n"
+                "Ctrl-C stops server",
+                flush=True,
+            )
+            try:
+                _wait_for_policy_services(processes, logs)
+            except KeyboardInterrupt:
+                return 130
+        finally:
+            _stop_started_processes(processes)
+            _remove_state_pids(runtime, {process.pid for process in processes})
     if args.operation == "collect":
         rendered = render_runtime_configs(config, runtime / config.sha256[:12])
         return _run_collection(config, rendered)
@@ -1777,17 +2039,19 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, SystemConfigError) as exc:
         raise SystemExit(f"invalid system config: {exc}")
 
-    if args.operation != "record" or args.dry_run:
+    foreground_operations = {"record", "policy-serve"}
+    if args.operation not in foreground_operations or args.dry_run:
         return _main(args, config)
 
     runtime_root = Path(config.document["session"]["runtime_root"]).expanduser()
     runtime_root.mkdir(parents=True, exist_ok=True)
-    record_lock = (runtime_root / "record.lock").open("a+", encoding="utf-8")
+    lock_name = "record.lock" if args.operation == "record" else "policy-serve.lock"
+    operation_lock = (runtime_root / lock_name).open("a+", encoding="utf-8")
     try:
-        fcntl.flock(record_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(operation_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        record_lock.close()
-        raise SystemExit("another robot record process is already active")
+        operation_lock.close()
+        raise SystemExit(f"another robot {args.operation} process is already active")
 
     failure: BaseException | None = None
     try:
@@ -1805,7 +2069,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _stop_managed_services(config, require_existing=False)
             print(
-                "record 已退出；本次启动的全部后台服务已关闭",
+                f"{args.operation} 已退出；本次启动的全部后台服务已关闭",
                 flush=True,
             )
         except Exception as cleanup_error:
@@ -1817,8 +2081,8 @@ def main(argv: list[str] | None = None) -> int:
             if failure is None:
                 raise
         finally:
-            fcntl.flock(record_lock.fileno(), fcntl.LOCK_UN)
-            record_lock.close()
+            fcntl.flock(operation_lock.fileno(), fcntl.LOCK_UN)
+            operation_lock.close()
 
 
 def _episode_manifest_paths(dataset_root: Path) -> list[Path]:

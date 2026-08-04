@@ -213,14 +213,6 @@ def test_policy_serve_parser_has_independent_server_config():
     assert args.no_reset is False
 
 
-def test_policy_run_parser_needs_no_runtime_arguments():
-    args = cli._parser().parse_args(["policy-run"])
-
-    assert args.operation == "policy-run"
-    assert args.run_config == "config/policy_run.yaml"
-    assert args.dry_run is False
-
-
 def test_replay_automatically_prepares_rdk_and_ros_stack(tmp_path, monkeypatch):
     prepared: list[object] = []
     monkeypatch.setattr(

@@ -1307,189 +1307,6 @@ def _load_policy_server_config(config, raw_path: str | Path) -> dict:
     }
 
 
-def _load_policy_run_config(config, raw_path: str | Path) -> dict:
-    """Load the single-command local policy rollout configuration."""
-
-    path = config.resolve(str(raw_path))
-    try:
-        document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise SystemConfigError(
-            f"policy run config cannot be read: {path}: {exc}"
-        ) from exc
-    if not isinstance(document, dict) or document.get("schema_version") != 1:
-        raise SystemConfigError("policy run config must declare schema_version: 1")
-    client = document.get("client")
-    if not isinstance(client, dict):
-        raise SystemConfigError("policy run config requires a client mapping")
-    working_directory_raw = str(client.get("working_directory", "")).strip()
-    if not working_directory_raw:
-        raise SystemConfigError("policy client working_directory cannot be empty")
-    working_directory = Path(working_directory_raw).expanduser()
-    if not working_directory.is_dir():
-        raise SystemConfigError(
-            f"policy client working directory does not exist: {working_directory}"
-        )
-    raw_command = client.get("command")
-    if (
-        not isinstance(raw_command, list)
-        or not raw_command
-        or any(not isinstance(item, str) or not item.strip() for item in raw_command)
-    ):
-        raise SystemConfigError("policy client command must be a non-empty string list")
-    command = [str(item) for item in raw_command]
-    executable = Path(command[0]).expanduser()
-    if executable.is_absolute():
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise SystemConfigError(
-                f"policy client executable is unavailable: {executable}"
-            )
-        command[0] = str(executable)
-    elif shutil.which(command[0]) is None:
-        raise SystemConfigError(f"policy client executable is unavailable: {command[0]}")
-    raw_environment = client.get("environment", {})
-    if not isinstance(raw_environment, dict) or any(
-        not isinstance(key, str) or not isinstance(value, (str, int, float, bool))
-        for key, value in raw_environment.items()
-    ):
-        raise SystemConfigError("policy client environment must contain scalar values")
-    try:
-        timeout_s = float(document.get("rpc_ready_timeout_s", 180.0))
-    except (TypeError, ValueError) as exc:
-        raise SystemConfigError("rpc_ready_timeout_s must be numeric") from exc
-    if not math.isfinite(timeout_s) or timeout_s <= 0.0:
-        raise SystemConfigError("rpc_ready_timeout_s must be positive and finite")
-    server_config = config.resolve(
-        str(document.get("policy_server_config", "config/policy_server.yaml"))
-    )
-    return {
-        "path": path,
-        "policy_server_config": server_config,
-        "rpc_ready_timeout_s": timeout_s,
-        "working_directory": working_directory,
-        "command": command,
-        "environment": {
-            str(key): str(value) for key, value in raw_environment.items()
-        },
-    }
-
-
-def _wait_for_policy_rpc(
-    host: str,
-    port: int,
-    server_process: subprocess.Popen,
-    *,
-    timeout_s: float,
-) -> None:
-    """Wait until the nested policy server accepts TCP connections."""
-
-    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        status = server_process.poll()
-        if status is not None:
-            raise RuntimeError(f"policy server exited before RPC ready: {status}")
-        try:
-            with socket.create_connection((connect_host, int(port)), timeout=0.2):
-                return
-        except OSError:
-            time.sleep(0.1)
-    raise TimeoutError(
-        f"policy RPC {connect_host}:{port} was not ready in {timeout_s:.0f}s"
-    )
-
-
-def _interrupt_process(process: subprocess.Popen | None, *, timeout_s: float = 10.0) -> None:
-    """Deliver Ctrl-C semantics to one child group, then stop it boundedly."""
-
-    if process is None or process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGINT)
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=timeout_s)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    _stop_started_processes((process,))
-
-
-def _run_policy_one_command(config, args) -> int:
-    """Own the hardware server and LeRobot inference client in one terminal."""
-
-    settings = _load_policy_run_config(config, args.run_config)
-    server_settings = _load_policy_server_config(
-        config, settings["policy_server_config"]
-    )
-    robot_executable = Path(sys.executable).with_name("robot")
-    if not robot_executable.is_file():
-        raise SystemConfigError(f"robot launcher is unavailable: {robot_executable}")
-    server_command = [
-        str(robot_executable),
-        "--config",
-        str(config.path),
-        "policy-serve",
-        "--policy-config",
-        str(settings["policy_server_config"]),
-    ]
-    client_command = list(settings["command"])
-    if args.dry_run:
-        print(
-            json.dumps(
-                {
-                    "server": server_command,
-                    "client": client_command,
-                    "client_cwd": str(settings["working_directory"]),
-                },
-                indent=2,
-            )
-        )
-        return 0
-
-    server_process: subprocess.Popen | None = None
-    client_process: subprocess.Popen | None = None
-    try:
-        server_process = subprocess.Popen(server_command, start_new_session=True)
-        _wait_for_policy_rpc(
-            server_settings["bind"],
-            server_settings["port"],
-            server_process,
-            timeout_s=settings["rpc_ready_timeout_s"],
-        )
-        client_environment = os.environ.copy()
-        client_environment.update(settings["environment"])
-        print(
-            "Policy RPC 已就绪，正在加载 checkpoint 并直接执行策略（无需踏板）",
-            flush=True,
-        )
-        client_process = subprocess.Popen(
-            client_command,
-            cwd=settings["working_directory"],
-            env=client_environment,
-            start_new_session=True,
-        )
-        print("策略正在运行；按 Ctrl-C 一次即可停止推理和全部后台服务", flush=True)
-        while True:
-            client_status = client_process.poll()
-            if client_status is not None:
-                return int(client_status)
-            server_status = server_process.poll()
-            if server_status is not None:
-                raise RuntimeError(
-                    f"policy server exited while inference was running: {server_status}"
-                )
-            time.sleep(0.1)
-    except KeyboardInterrupt:
-        return 130
-    finally:
-        # Stop inference first so it releases its lease and finalizes Rerun;
-        # then stop the hardware owner and its child services.
-        _interrupt_process(client_process)
-        _interrupt_process(server_process)
-
-
 def _policy_server_command(settings: dict) -> list[str]:
     rates = settings["rates"]
     command = [
@@ -1887,18 +1704,6 @@ def _parser() -> argparse.ArgumentParser:
         "--no-reset",
         action="store_true",
         help="start without F/T zero or Home; guarded actions remain unavailable until locally prepared",
-    )
-    policy_run = sub.add_parser(
-        "policy-run",
-        help="prepare hardware, start RPC and run the configured policy in one terminal",
-    )
-    policy_run.add_argument(
-        "--run-config",
-        default="config/policy_run.yaml",
-        help="single-command policy rollout YAML",
-    )
-    policy_run.add_argument(
-        "--dry-run", action="store_true", help="validate and print both commands"
     )
     sub.add_parser("stop", help="recover and stop leftover managed services")
     sub.add_parser(
@@ -2316,8 +2121,6 @@ def _main(args, config) -> int:
                 authorizer.close()
             _stop_started_processes(processes)
             _remove_state_pids(runtime, {process.pid for process in processes})
-    if args.operation == "policy-run":
-        return _run_policy_one_command(config, args)
     if args.operation == "collect":
         rendered = render_runtime_configs(config, runtime / config.sha256[:12])
         return _run_collection(config, rendered)
@@ -2436,17 +2239,13 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, SystemConfigError) as exc:
         raise SystemExit(f"invalid system config: {exc}")
 
-    foreground_operations = {"record", "policy-serve", "policy-run"}
+    foreground_operations = {"record", "policy-serve"}
     if args.operation not in foreground_operations or args.dry_run:
         return _main(args, config)
 
     runtime_root = Path(config.document["session"]["runtime_root"]).expanduser()
     runtime_root.mkdir(parents=True, exist_ok=True)
-    lock_name = {
-        "record": "record.lock",
-        "policy-serve": "policy-serve.lock",
-        "policy-run": "policy-run.lock",
-    }[args.operation]
+    lock_name = "record.lock" if args.operation == "record" else "policy-serve.lock"
     operation_lock = (runtime_root / lock_name).open("a+", encoding="utf-8")
     try:
         fcntl.flock(operation_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -9,7 +9,6 @@ from flexiv_inspire_isaac.cli import (
     _commands,
     _conversion_manifest,
     _conversion_manifests,
-    _load_policy_run_config,
     _load_policy_server_config,
     _policy_authorization_command,
     _policy_serve_commands,
@@ -32,20 +31,6 @@ def _site() -> Path:
 
 def _policy_server() -> Path:
     return Path(__file__).parents[1] / "config" / "policy_server.yaml"
-
-
-def _policy_run() -> Path:
-    return Path(__file__).parents[1] / "config" / "policy_run.yaml"
-
-
-def test_policy_run_config_is_one_command_guarded_client() -> None:
-    config = load_system_config(_site())
-    settings = _load_policy_run_config(config, _policy_run())
-
-    assert settings["working_directory"].name == "dual_arm_teleop"
-    assert settings["command"][0].endswith("/flexiv_teleop/bin/robot-record")
-    assert settings["command"][-1].endswith("run_policy_guarded.yaml")
-    assert settings["environment"]["DUAL_ARM_TELEOP_INCOMPLETE_DATASET"] == "delete"
 
 
 def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:

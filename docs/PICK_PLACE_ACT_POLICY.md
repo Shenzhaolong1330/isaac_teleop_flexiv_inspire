@@ -44,23 +44,7 @@ checkpoint 只写入 client 仓库：
 /home/hb/flexiv_inspire_ws/src/dual_arm_teleop/outputs/train/pick_place_demo_act_v1/
 ```
 
-## 3. 日常一键推理（本仓库）
-
-真机策略推理只运行一个命令：
-
-```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
-source scripts/env/activate_ros.sh
-robot policy-run
-```
-
-它依次完成 Reset、启动硬件和 RPC、等待服务就绪、调用 `flexiv_teleop`
-环境加载配置的 checkpoint，并直接执行策略，不需要踏板。按一次 `Ctrl-C` 会先
-停止策略并释放 lease，再关闭全部硬件后台；未完成的临时 rollout 自动丢弃，不再询问。
-
-checkpoint/推理配置入口集中在 `config/policy_run.yaml`，日常命令不带参数。
-
-## 4. 单独启动 RPC server（调试用）
+## 3. RPC server（本仓库）
 
 ```bash
 cd /home/hb/isaac_teleop_flexiv_inspire
@@ -83,7 +67,7 @@ robot policy-serve --no-reset
 RPC 地址、证书和频率在 `config/policy_server.yaml`。非 loopback 监听必须配置
 client CA 并使用双向 TLS。
 
-## 5. 单独启动推理 client（调试用）
+## 4. 推理 client（client 仓库）
 
 server 就绪后，在另一个终端运行：
 
@@ -96,8 +80,8 @@ robot-record --config scripts/config/experiments/pick_place_act_v1/run_policy_sh
 默认配置为 `shadow_only: true`：client 读取 RPC observation、加载本仓库数据训练出的
 checkpoint、执行 ACT 并验证 24D action，但不申请 lease、不向真机发送动作。
 
-真机模式必须在完成 shadow 验收后使用单独的 `run_policy_guarded.yaml`。Client 可以
-先启动；Server 完成自动授权后，Client 直接申请 lease 并下发。动作仍经过
+真机模式使用单独的 `run_policy_guarded.yaml`。Server 完成自动授权后，Client 每发送
+一帧 action，Server 就立即映射和下发，不需要踏板或逐帧授权。动作仍经过
 lease、TTL、heartbeat、软限位和
 source-exclusive 控制。
 

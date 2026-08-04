@@ -1943,6 +1943,11 @@ def _run_convert(config, args) -> int:
         if not manifest.is_file():
             raise SystemExit(f"manifest 不存在: {manifest}")
     export = conversion.get("lerobot_export", {})
+    profile = (
+        str(export.get("profile", "")).strip()
+        if isinstance(export, dict)
+        else ""
+    )
     configured_view = (
         export.get("action", {}).get("view")
         if isinstance(export, dict) and isinstance(export.get("action", {}), dict)
@@ -1962,15 +1967,20 @@ def _run_convert(config, args) -> int:
             else root / "sessions" / dataset_name / "lerobot"
         )
     )
-    if len(manifests) > 1 and not episode_subdirectory:
+    if len(manifests) > 1 and not episode_subdirectory and not profile:
         raise SystemExit("批量转换要求 output.episode_subdirectory: true")
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", dataset_name).strip("-") or "dataset"
     repo_id = (
         str(args.repo_id).strip()
         or str(output.get("repo_id", "")).strip()
-        or f"local/{slug}-{action_view}"
+        or f"local/{slug}-{profile or action_view}"
     )
-    executable = root / "envs/data-py312/bin/flexiv-inspire-lerobot-export"
+    executable_name = (
+        "flexiv-inspire-policy-profile-export"
+        if profile
+        else "flexiv-inspire-lerobot-export"
+    )
+    executable = root / "envs/data-py312/bin" / executable_name
     if not executable.is_file():
         raise SystemExit("data 环境不存在；先运行 scripts/env/create_envs.sh")
     mcap_files = source.get("mcap_files", [])
@@ -1980,6 +1990,44 @@ def _run_convert(config, args) -> int:
     for mcap in mcaps:
         if not mcap.is_file():
             raise SystemExit(f"MCAP 不存在: {mcap}")
+
+    if profile:
+        if action_view != "sent_command":
+            raise SystemExit("policy profile 只支持 action.view: sent_command")
+        if episode_subdirectory:
+            raise SystemExit(
+                "policy profile 合并导出要求 output.episode_subdirectory: false"
+            )
+        if mcaps:
+            raise SystemExit(
+                "policy profile 批量导出从每个 manifest 解析 MCAP；"
+                "请删除 source.mcap_files"
+            )
+        if base.exists() and (not base.is_dir() or any(base.iterdir())):
+            raise SystemExit(f"输出目录已存在且非空: {base}；请指定 --output-root")
+        command = [str(executable)]
+        for manifest in manifests:
+            command.extend(("--manifest", str(manifest)))
+        command.extend(
+            (
+                "--output-root",
+                str(base),
+                "--repo-id",
+                repo_id,
+                "--export-config",
+                str(conversion_path),
+            )
+        )
+        print(
+            f"合并转换 {len(manifests)} 条 episode -> {profile} -> {base}",
+            flush=True,
+        )
+        status = subprocess.call(command)
+        if status:
+            print(f"合并转换失败（退出码 {status}）", flush=True)
+            return 1
+        print(f"转换完成：成功合并 {len(manifests)} 条 episode", flush=True)
+        return 0
 
     failed = 0
     converted = 0

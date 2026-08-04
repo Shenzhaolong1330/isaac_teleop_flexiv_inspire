@@ -80,6 +80,23 @@ robot convert --action-view absolute_cartesian_pose
 `sessions/<dataset>/lerobot/<episode>/<action-view>/`，与原始 MCAP 的 `raw/`
 平行；已有非空目录不会被覆盖。已有旧的平铺 episode 仍可被转换和回放。
 
+需要把多条轨迹合并成一个可直接训练的 LeRobot dataset 时，使用显式 profile
+配置；这不会改变上面的默认转换：
+
+```bash
+# 旧 dual_arm_teleop 的 38D state / 24D action 兼容格式
+robot convert --conversion-config config/conversion_dual_arm.yaml
+
+# 推荐的新策略格式：q(14)+hand(12) state，24D 笛卡尔 action
+robot convert --conversion-config config/conversion_policy_minimal.yaml
+```
+
+两个配置都读取所有已完成 raw episode，并在同一个 dataset 中保留各自的 episode
+边界。profile 严格拥有字段白名单，因此不能再配置 `fields`、深度或高频 history。
+兼容 profile 只写 `observation.state`、`action` 和三路旧名称图像；minimal profile
+不会同时放 q 和 TCP pose，也不把时间戳、validity 等传输元数据拼进 state。
+输出目录拒绝覆盖，重新导出时应更换 `output.root` 或先人工归档原结果。
+
 中踏板松开时若启用了 `record_only_while_pedal_pressed`，源 MCAP 会保留真实
 时间空档。转换不会复制旧图像或跨空档插值；每帧额外导出源时间戳、空档时长、
 片段编号和片段内帧号。`segments.split_episodes: false` 保留原始任务 episode；

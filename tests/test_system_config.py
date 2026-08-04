@@ -125,6 +125,94 @@ def test_batch_conversion_skips_existing_episode_output(tmp_path, monkeypatch) -
     )
 
 
+def test_profile_conversion_merges_manifests_with_one_exporter_call(
+    tmp_path, monkeypatch
+) -> None:
+    dataset = tmp_path / "sessions" / "pick_place"
+    manifests = []
+    for index in (1, 2):
+        episode = dataset / "raw" / f"episode_{index:06d}"
+        episode.mkdir(parents=True)
+        manifest = episode / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {"completed": True, "episode_index": index, "attempt": 1}
+            ),
+            encoding="utf-8",
+        )
+        manifests.append(manifest)
+    output_root = dataset / "merged"
+    conversion = tmp_path / "conversion-profile.yaml"
+    conversion.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "source": {
+                    "dataset_root": str(dataset),
+                    "episode": "all",
+                    "mcap_files": [],
+                },
+                "output": {
+                    "root": str(output_root),
+                    "episode_subdirectory": False,
+                },
+                "lerobot_export": {
+                    "profile": "joint_proprio_cartesian_v1",
+                    "action": {"view": "sent_command"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    exporter = (
+        tmp_path
+        / "envs"
+        / "data-py312"
+        / "bin"
+        / "flexiv-inspire-policy-profile-export"
+    )
+    exporter.parent.mkdir(parents=True)
+    exporter.touch()
+    calls = []
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.subprocess.call",
+        lambda command: calls.append(command) or 0,
+    )
+
+    class Config:
+        root = tmp_path
+        document = {
+            "recording": {"dataset_name": "pick_place"},
+            "lerobot_export": {"action": {"view": "sent_command"}},
+        }
+
+        @staticmethod
+        def resolve(raw_path: str) -> Path:
+            return Path(raw_path).resolve()
+
+    status = _run_convert(
+        Config(),
+        SimpleNamespace(
+            conversion_config=str(conversion),
+            manifest="",
+            action_view=None,
+            output_root="",
+            repo_id="",
+        ),
+    )
+
+    assert status == 0
+    assert len(calls) == 1
+    command = calls[0]
+    assert command[0] == str(exporter)
+    assert [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--manifest"
+    ] == [str(path) for path in manifests]
+    assert command[command.index("--output-root") + 1] == str(output_root)
+
+
 def test_example_system_config_renders_all_runtime_children(tmp_path):
     config = load_system_config(_example())
     rendered = render_runtime_configs(config, tmp_path)

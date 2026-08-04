@@ -1,0 +1,33 @@
+# 将当前系统采集的全部已完成 episode 合并成旧 dual_arm_teleop 可直接读取的
+# LeRobot v3 数据集。该 profile 严格保留旧版 38D state / 24D action / 三路图像。
+schema_version: 1
+
+source:
+  dataset_root: sessions/pick_place_demo
+  episode: all
+  manifest: ""
+  mcap_files: []
+
+output:
+  root: sessions/pick_place_demo/lerobot_merged/dual_arm_lerobot_v1
+  # profile exporter 把每条源轨迹保存为同一个 dataset 内的一条 episode。
+  episode_subdirectory: false
+  repo_id: local/pick-place-demo-dual-arm-v1
+
+lerobot_export:
+  schema_version: 1
+  profile: dual_arm_lerobot_v1
+  timeline:
+    source: camera/head/jpeg
+    fps: 15.0
+    resample: false
+  action:
+    view: sent_command
+  high_rate_arm_samples_per_frame: 0
+  depth:
+    enabled: false
+    cameras: []
+  segments:
+    gap_threshold_s: 0.25
+    split_episodes: false
+  channels: {}

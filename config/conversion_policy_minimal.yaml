@@ -1,0 +1,32 @@
+# 通用策略训练的默认精简数据：14 个关节位置 + 12 个归一化手部位置；
+# action 为双腕 XYZ+旋转向量增量和双手绝对目标，共 24D，无重复 TCP state。
+schema_version: 1
+
+source:
+  dataset_root: sessions/pick_place_demo
+  episode: all
+  manifest: ""
+  mcap_files: []
+
+output:
+  root: sessions/pick_place_demo/lerobot_merged/joint_proprio_cartesian_v1
+  episode_subdirectory: false
+  repo_id: local/pick-place-demo-policy-minimal-v1
+
+lerobot_export:
+  schema_version: 1
+  profile: joint_proprio_cartesian_v1
+  timeline:
+    source: camera/head/jpeg
+    fps: 15.0
+    resample: false
+  action:
+    view: sent_command
+  high_rate_arm_samples_per_frame: 0
+  depth:
+    enabled: false
+    cameras: []
+  segments:
+    gap_threshold_s: 0.25
+    split_episodes: false
+  channels: {}

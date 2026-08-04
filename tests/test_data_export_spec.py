@@ -234,3 +234,51 @@ depth: {enabled: false}
 
     with pytest.raises(ExportSpecError, match="depth fields"):
         load_export_spec(config)
+
+
+def test_export_spec_selects_strict_policy_profile(tmp_path: Path):
+    config = tmp_path / "export.yaml"
+    config.write_text(
+        """
+schema_version: 1
+profile: joint_proprio_cartesian_v1
+timeline: {source: camera/head/jpeg, fps: 15.0, resample: false}
+action: {view: sent_command}
+depth: {enabled: false, cameras: []}
+channels: {}
+""",
+        encoding="utf-8",
+    )
+
+    spec = load_export_spec(config)
+
+    assert spec.profile == "joint_proprio_cartesian_v1"
+    assert spec.action.name == "sent_command"
+    assert not spec.depth.enabled
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("fields: [observation.arm_q, action]", "owns its exact fields"),
+        ("depth: {enabled: true, cameras: [head]}", "do not include depth"),
+        ("high_rate_arm_samples_per_frame: 20", "high-rate"),
+    ],
+)
+def test_policy_profile_rejects_redundant_fields(
+    tmp_path: Path, extra: str, message: str
+):
+    config = tmp_path / "export.yaml"
+    config.write_text(
+        f"""
+schema_version: 1
+profile: joint_proprio_cartesian_v1
+timeline: {{source: camera/head/jpeg, fps: 15.0}}
+action: {{view: sent_command}}
+{extra}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ExportSpecError, match=message):
+        load_export_spec(config)

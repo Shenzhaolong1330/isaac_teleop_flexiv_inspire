@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Mapping
 import yaml
 
+from policy_contracts import get_profile
+
 
 class ExportSpecError(ValueError):
     pass
@@ -131,6 +133,9 @@ class SegmentExport:
 
 @dataclass(frozen=True)
 class ExportSpec:
+    # None preserves the original rich/native LeRobot export. A non-empty
+    # profile selects one exact, versioned and deliberately minimal contract.
+    profile: str | None = None
     timeline_source: str = "camera/head/jpeg"
     fps: float = 30.0
     resample_timeline: bool = True
@@ -163,6 +168,17 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
     fps = float(timeline.get("fps", 0.0))
     resample = timeline.get("resample", True)
     view = str(action.get("view", ""))
+    raw_profile = raw.get("profile")
+    profile = (
+        None
+        if raw_profile is None or str(raw_profile).strip() in {"", "native"}
+        else str(raw_profile).strip()
+    )
+    if profile is not None:
+        try:
+            get_profile(profile)
+        except ValueError as exc:
+            raise ExportSpecError(str(exc)) from exc
     high_rate_samples = int(raw.get("high_rate_arm_samples_per_frame", 0))
     if not source or not 0.0 < fps <= 1000.0 or not fps.is_integer():
         raise ExportSpecError("timeline.source and timeline.fps are required")
@@ -170,14 +186,24 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
         raise ExportSpecError("timeline.resample must be boolean")
     if view not in {"sent_command", "absolute_joint_position", "absolute_cartesian_pose"}:
         raise ExportSpecError("action.view is unsupported")
+    if profile is not None and view != "sent_command":
+        raise ExportSpecError("policy profiles require action.view: sent_command")
     if not 0 <= high_rate_samples <= 128:
         raise ExportSpecError(
             "high_rate_arm_samples_per_frame must be in [0,128]"
+        )
+    if profile is not None and high_rate_samples != 0:
+        raise ExportSpecError(
+            "policy profiles do not include high-rate arm history"
         )
     raw_channels = raw.get("channels", {})
     if not isinstance(raw_channels, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw_channels.items()):
         raise ExportSpecError("channels must map canonical stream names to recorded stream names")
     raw_fields = raw.get("fields")
+    if profile is not None and raw_fields is not None:
+        raise ExportSpecError(
+            "policy profile owns its exact fields; omit lerobot_export.fields"
+        )
     if raw_fields is None:
         fields = CORE_LEROBOT_FIELDS
     elif not isinstance(raw_fields, list) or not all(
@@ -202,6 +228,8 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
     depth_enabled = raw_depth.get("enabled", False)
     if not isinstance(depth_enabled, bool):
         raise ExportSpecError("depth.enabled must be boolean")
+    if profile is not None and depth_enabled:
+        raise ExportSpecError("policy profiles do not include depth")
     raw_depth_cameras = raw_depth.get("cameras", [])
     if not isinstance(raw_depth_cameras, list) or not all(
         isinstance(item, str) and item in CAMERA_NAMES
@@ -270,6 +298,7 @@ def load_export_spec(path: str | Path | None) -> ExportSpec:
             "arm_high_rate fields require high_rate_arm_samples_per_frame > 0"
         )
     return ExportSpec(
+        profile=profile,
         timeline_source=source,
         fps=fps,
         resample_timeline=resample,

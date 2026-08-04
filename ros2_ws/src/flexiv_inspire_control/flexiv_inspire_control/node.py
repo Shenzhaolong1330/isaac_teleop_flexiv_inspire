@@ -786,6 +786,12 @@ class ControlBridge(Node):
             self._update_gates(receive_ns)
             self._arbiter.submit(command, now_monotonic_ns=receive_ns)
         except Exception as exc:
+            logger = getattr(self, "_logger", None)
+            if logger is not None:
+                logger.error(
+                    f"{source.value} command sequence={int(message.sequence)} "
+                    f"rejected before execution: {type(exc).__name__}: {exc}"
+                )
             self._arbiter.reject_invalid_command(source, now_monotonic_ns=receive_ns)
             # A malformed non-neutral packet still latches fail-closed. Record
             # a released deadman so a later local authorization can clear it.
@@ -946,6 +952,12 @@ class ControlBridge(Node):
                 self._sent_pub.publish(point_message)
                 self._publish_trace(point_message, point_message, point_message, "", receive_ns)
             except Exception as exc:
+                logger = getattr(self, "_logger", None)
+                if logger is not None:
+                    logger.error(
+                        f"{command.source.value} command sequence={int(command.sequence)} "
+                        f"point={index} execution rejected: {type(exc).__name__}: {exc}"
+                    )
                 if self._is_expired_control_authorization(exc):
                     # A token can expire in the few microseconds between the
                     # local preflight and daemon-side consume.  It is an

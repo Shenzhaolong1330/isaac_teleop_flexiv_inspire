@@ -34,6 +34,25 @@ from flexiv_inspire_isaac.dftp.protocol import TACTILE_LAYOUT, TOTAL_TAXELS
 from isaac_teleop_core.command import ROTATION_ORDER
 
 
+def initial_policy_command_sequence(monotonic_ns: int | None = None) -> int:
+    """Seed ROS policy ordering above earlier clients and adapter processes.
+
+    RPC action sequences are scoped to a lease and restart at one after a
+    reconnect. The control bridge instead owns one long-lived hardware session
+    and requires every command from a source to increase monotonically. Use the
+    host monotonic clock as the ROS-side epoch while retaining six bits for the
+    bridge's trajectory expansion.
+    """
+
+    now = time.monotonic_ns() if monotonic_ns is None else int(monotonic_ns)
+    if now < 0:
+        raise ValueError("monotonic_ns cannot be negative")
+    sequence = now // 1_000
+    if sequence > ((1 << 64) - 1) >> 6:
+        raise OverflowError("monotonic policy sequence exceeds uint64 headroom")
+    return sequence
+
+
 def _time_ns(value: Any) -> int:
     return int(value.sec) * 1_000_000_000 + int(value.nanosec)
 
@@ -321,6 +340,7 @@ def build_ros_node(
         def __init__(self) -> None:
             super().__init__("flexiv_inspire_policy_service")
             self._sequence = 0
+            self._command_sequence = initial_policy_command_sequence()
             self._broker = broker
             self._action_buffer = action_buffer
             self._grpc_loop = grpc_loop
@@ -594,7 +614,10 @@ def build_ros_node(
             message.schema_version = 1
             message.session_id = chunk.session_id
             message.source = "policy"
-            message.sequence = chunk.sequence
+            # The RPC sequence is lease-local. Reusing it after reconnect would
+            # look older than an earlier command to the persistent bridge.
+            self._command_sequence += 1
+            message.sequence = self._command_sequence
             message.ttl.sec = int(remaining_ns // 1_000_000_000)
             message.ttl.nanosec = int(remaining_ns % 1_000_000_000)
             message.representation = BimanualCommand.CARTESIAN_ROT6D

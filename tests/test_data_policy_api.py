@@ -6,7 +6,10 @@ from flexiv_inspire_isaac.policy_api.lease import (
     ControlLeaseManager,
     LocalControlState,
 )
-from flexiv_inspire_isaac.policy_api.ros_adapter import policy_heartbeat_sequence
+from flexiv_inspire_isaac.policy_api.ros_adapter import (
+    initial_policy_command_sequence,
+    policy_heartbeat_sequence,
+)
 from flexiv_inspire_isaac.policy_api.models import (
     ActionChunk,
     ActionPoint,
@@ -60,6 +63,15 @@ def test_capabilities_fix_rotation_order_30d_layout_and_relative_time():
     ]
     assert capabilities["default_action_dimension"] == 30
     assert "robot-host receipt" in capabilities["action_clock_semantics"]
+
+
+def test_policy_ros_sequence_uses_process_independent_monotonic_epoch():
+    previous = initial_policy_command_sequence(100_000_000_000)
+    replacement = initial_policy_command_sequence(101_000_000_000)
+
+    assert previous == 100_000_000
+    assert replacement > previous
+    assert replacement <= ((1 << 64) - 1) >> 6
 
 
 def test_client_monotonic_epoch_is_never_compared_with_server_epoch():

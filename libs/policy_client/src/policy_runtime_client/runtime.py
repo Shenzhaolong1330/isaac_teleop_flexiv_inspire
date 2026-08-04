@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from io import BytesIO
 import ipaddress
+import logging
 from pathlib import Path
+import time
 from typing import Mapping
 
 import numpy as np
@@ -29,6 +31,9 @@ from policy_contracts import (
 from .data_client import decode_tensor
 from .generated import policy_data_v2_pb2 as pb
 from .generated import policy_data_v2_pb2_grpc as pb_grpc
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProfileRuntimeError(RuntimeError):
@@ -319,6 +324,8 @@ class SyncPolicyProfileClient:
         state_max_age_ms: float = 50.0,
         hand_max_age_ms: float = 150.0,
         image_max_age_ms: float = 150.0,
+        snapshot_ready_timeout_s: float = 0.0,
+        snapshot_retry_interval_s: float = 0.1,
     ) -> None:
         self.target = str(target)
         self.profile_id = str(profile_id)
@@ -332,6 +339,12 @@ class SyncPolicyProfileClient:
         self.state_max_age_ns = int(float(state_max_age_ms) * 1e6)
         self.hand_max_age_ns = int(float(hand_max_age_ms) * 1e6)
         self.image_max_age_ns = int(float(image_max_age_ms) * 1e6)
+        self.snapshot_ready_timeout_s = float(snapshot_ready_timeout_s)
+        self.snapshot_retry_interval_s = float(snapshot_retry_interval_s)
+        if self.snapshot_ready_timeout_s < 0.0:
+            raise ValueError("snapshot_ready_timeout_s must be non-negative")
+        if self.snapshot_retry_interval_s <= 0.0:
+            raise ValueError("snapshot_retry_interval_s must be positive")
         self.channel = None
         self.stub = None
         self.mapper: ProfileSnapshotMapper | None = None
@@ -400,16 +413,43 @@ class SyncPolicyProfileClient:
                     max_age_ns=max_age_ns,
                 )
             )
-        snapshot = self.stub.GetSnapshot(
-            pb.SnapshotRequest(
-                expected_schema_hash=self.mapper.schema_hash,
-                expected_session_id=self.mapper.session_id,
-                target_monotonic_ns=0,
-                channels=channels,
-            ),
-            timeout=self.request_timeout_s,
+        request = pb.SnapshotRequest(
+            expected_schema_hash=self.mapper.schema_hash,
+            expected_session_id=self.mapper.session_id,
+            target_monotonic_ns=0,
+            channels=channels,
         )
-        return self.mapper.frame_from_snapshot(snapshot)
+        deadline = time.monotonic() + self.snapshot_ready_timeout_s
+        waiting_reported = False
+        while True:
+            snapshot = self.stub.GetSnapshot(
+                request,
+                timeout=self.request_timeout_s,
+            )
+            try:
+                return self.mapper.frame_from_snapshot(snapshot)
+            except ProfileRuntimeError as exc:
+                transient = str(exc).startswith("RPC snapshot is incomplete:")
+                if not transient or time.monotonic() >= deadline:
+                    if transient and self.snapshot_ready_timeout_s > 0.0:
+                        raise ProfileRuntimeError(
+                            "RPC observations did not become ready within "
+                            f"{self.snapshot_ready_timeout_s:.1f}s: {exc}"
+                        ) from exc
+                    raise
+                if not waiting_reported:
+                    logger.info(
+                        "RPC observations are starting; waiting for complete "
+                        "clock-mapped arm/hand/camera samples: %s",
+                        exc,
+                    )
+                    waiting_reported = True
+                time.sleep(
+                    min(
+                        self.snapshot_retry_interval_s,
+                        max(0.0, deadline - time.monotonic()),
+                    )
+                )
 
     def close(self) -> None:
         channel, self.channel = self.channel, None

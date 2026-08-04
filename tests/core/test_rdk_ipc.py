@@ -167,6 +167,7 @@ def test_typed_codec_roundtrips_home_and_cartesian_impedance_fields() -> None:
     ]
     target = {
         "tcp_pose_rdk": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "control_mode": "position",
         "max_linear_velocity": 0.05,
         "max_angular_velocity": 0.15,
         "max_linear_acceleration": 0.25,
@@ -191,6 +192,7 @@ def test_typed_codec_roundtrips_home_and_cartesian_impedance_fields() -> None:
         },
     )
     _, _, decoded_cartesian = codec.decode(packet)
+    assert decoded_cartesian["left"]["control_mode"] == "position"
     assert decoded_cartesian["left"]["cartesian_stiffness"] == target[
         "cartesian_stiffness"
     ]
@@ -372,3 +374,23 @@ def test_typed_codec_sets_oneof_for_every_empty_payload(kind: str) -> None:
     decoded_kind, sequence, _payload = codec.decode(packet)
     assert decoded_kind == kind
     assert sequence == 9
+
+
+def test_authorize_home_codec_preserves_reset_fault_recovery_flag() -> None:
+    codec = TypedEnvelopeCodec.load()
+    packet = codec.encode(
+        "authorize_home",
+        10,
+        {
+            "session_id": "session",
+            "operator_confirmation": "FLEXIV-HOME-MOVE",
+            "clear_hold_latched": True,
+            "recover_robot_faults": True,
+        },
+    )
+
+    kind, sequence, payload = codec.decode(packet)
+
+    assert kind == "authorize_home"
+    assert sequence == 10
+    assert payload["recover_robot_faults"] is True

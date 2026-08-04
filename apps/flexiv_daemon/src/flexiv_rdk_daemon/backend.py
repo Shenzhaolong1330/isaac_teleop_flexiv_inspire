@@ -565,7 +565,30 @@ class FlexivRDKBackend:
         self._switch_mode(side, "IDLE", local_console=local_console)
 
     def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None:
-        self._switch_mode(side, "NRT_CARTESIAN_MOTION_FORCE", local_console=local_console)
+        # Flexiv retains the force-control-axis selection independently from
+        # the pose/wrench target. A previous force-control session can leave
+        # one or more axes ignoring Cartesian position after a mode switch.
+        self._guard.require(
+            "SwitchMode(NRT_CARTESIAN_MOTION_FORCE)",
+            local_console=local_console,
+        )
+        self._guard.require("SetForceControlAxis", local_console=local_console)
+        with self._arm_locks[side]:
+            robot = self._robot(side)
+            self._invoke(
+                robot,
+                "switch_mode",
+                "SwitchMode",
+                args=(self._mode("NRT_CARTESIAN_MOTION_FORCE"),),
+            )
+            self._invoke(
+                robot,
+                "set_force_control_axis",
+                "SetForceControlAxis",
+                args=([False] * 6,),
+            )
+            # A mode switch may restore controller-default Cartesian gains.
+            self._cartesian_impedance.pop(side, None)
 
     def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None:
         self._switch_mode(side, "NRT_JOINT_POSITION", local_console=local_console)

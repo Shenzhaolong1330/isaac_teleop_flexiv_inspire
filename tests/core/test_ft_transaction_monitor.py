@@ -88,11 +88,13 @@ def test_opposite_arm_motion_that_never_settles_is_rejected() -> None:
         def __init__(self):
             super().__init__()
             self.left_enabled = False
+            self.is_operational["left"] = False
 
         def enable(self, side: str, *, local_console: bool) -> None:
             super().enable(side, local_console=local_console)
             if side == "left":
                 self.left_enabled = True
+                self.is_operational[side] = True
 
         def observe_both(self):
             left = self.observe("left")

@@ -43,6 +43,9 @@ class HomeTokenAuthority:
     def __init__(self) -> None:
         self.consumed = 0
 
+    def mint(self, **kwargs):
+        return "home-token", time.monotonic_ns() + 1_000_000_000
+
     def consume(self, token: str, *, session_id: str) -> None:
         if token != "home-token" or session_id != "session":
             raise PermissionError("bad Home token")
@@ -78,6 +81,7 @@ def dispatcher(
 def command(source: str, sequence: int, ttl_s: float = 0.05):
     target = {
         "tcp_pose_rdk": [0, 0, 0, 1, 0, 0, 0],
+        "control_mode": "impedance",
         "max_linear_velocity": 0.01,
         "max_angular_velocity": 0.05,
         "max_linear_acceleration": 0.05,
@@ -254,6 +258,61 @@ def test_home_authorization_requires_separate_confirmation(monkeypatch) -> None:
     authority.consume(token, session_id="session")
 
 
+def test_reset_home_authorization_clears_fault_enables_and_waits_operational() -> None:
+    value, backend = dispatcher()
+    backend.is_faulted["left"] = True
+    backend.is_operational["left"] = False
+    value("observe", 0, {}, (10, 0, 0))
+    assert value._latest_observation is not None
+
+    original_enable = backend.enable
+
+    def enable(side: str, *, local_console: bool) -> None:
+        original_enable(side, local_console=local_console)
+        backend.is_operational[side] = True
+
+    backend.enable = enable
+    kind, response = value(
+        "authorize_home",
+        1,
+        {
+            "session_id": "session",
+            "operator_confirmation": "FLEXIV-HOME-MOVE",
+            "clear_hold_latched": True,
+            "recover_robot_faults": True,
+        },
+        (10, 0, 0),
+    )
+
+    assert kind == "authorize_home_result"
+    assert response["authorized"]
+    assert ("left", "clear_fault") in backend.events
+    assert ("left", "enable") in backend.events
+    assert backend.is_operational["left"]
+    assert not backend.is_faulted["left"]
+    assert value._latest_observation is None
+
+
+def test_ordinary_home_authorization_does_not_clear_controller_fault() -> None:
+    value, backend = dispatcher()
+    backend.is_faulted["left"] = True
+
+    kind, response = value(
+        "authorize_home",
+        1,
+        {
+            "session_id": "session",
+            "operator_confirmation": "FLEXIV-HOME-MOVE",
+            "clear_hold_latched": True,
+        },
+        (10, 0, 0),
+    )
+
+    assert kind == "authorize_home_result"
+    assert response["authorized"]
+    assert ("left", "clear_fault") not in backend.events
+
+
 def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
     value, backend = dispatcher()
     kind, response = value(
@@ -269,6 +328,21 @@ def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
     assert not value.hold_latched
 
 
+def test_home_sends_each_target_immediately_after_its_mode_switch() -> None:
+    value, backend = dispatcher()
+
+    _, response = value(
+        "home_command", 1, home_command(1), (777, 0, 0)
+    )
+
+    assert response["accepted"] and response["completed"]
+    left_mode = backend.events.index(("left", "joint_position_mode"))
+    left_target = backend.events.index(("left", "send_joint_position"))
+    right_mode = backend.events.index(("right", "joint_position_mode"))
+    right_target = backend.events.index(("right", "send_joint_position"))
+    assert left_mode < left_target < right_mode < right_target
+
+
 def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
     value, backend = dispatcher()
     for side in ("left", "right"):
@@ -282,6 +356,8 @@ def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
     _, first = value("home_command", 1, request, (790, 0, 0))
     assert first["accepted"] and not first["completed"]
     assert ("left", "send_cartesian") in backend.events
+    assert ("left", "disable_force_control_axes") in backend.events
+    assert ("left", "set_cartesian_impedance") not in backend.events
     np.testing.assert_allclose(
         backend.cartesian_targets["left"],
         [0.0, 0.0, -0.38, 1.0, 0.0, 0.0, 0.0],
@@ -331,6 +407,30 @@ def test_home_lift_never_descends_an_arm_already_above_safe_z() -> None:
     # Cartesian target that could lower either arm.
     assert response["accepted"] and response["completed"]
     assert backend.cartesian_targets == {}
+
+
+def test_home_lift_timeout_reports_arm_height_and_remaining_distance() -> None:
+    value, backend = dispatcher()
+    left_pose = backend.samples["left"].tcp_pose_rdk.copy()
+    left_pose[2] = -0.60
+    backend.samples["left"] = replace(
+        backend.samples["left"], tcp_pose_rdk=left_pose
+    )
+    request = enable_home_lift(home_command(1))
+
+    _, first = value("home_command", 1, request, (792, 0, 0))
+    assert first["accepted"] and not first["completed"]
+    value._home_phase_started_ns = time.monotonic_ns() - 13_000_000_000
+    retry = enable_home_lift(home_command(2))
+    retry["local_authorization_token"] = ""
+
+    _, timed_out = value("home_command", 2, retry, (792, 0, 0))
+
+    assert not timed_out["accepted"]
+    assert timed_out["reason"].startswith("home_lift_timeout:left(")
+    assert "current_z=-0.6000" in timed_out["reason"]
+    assert "target_z=-0.3800" in timed_out["reason"]
+    assert "remaining=0.2200" in timed_out["reason"]
 
 
 def test_home_reuses_fresh_bridge_observation_instead_of_polling_rdk_again() -> None:
@@ -501,6 +601,20 @@ def test_cartesian_command_applies_impedance_before_motion() -> None:
         impedance = backend.events.index((side, "set_cartesian_impedance"))
         motion = backend.events.index((side, "send_cartesian"))
         assert impedance < motion
+
+
+def test_cartesian_position_command_does_not_apply_impedance() -> None:
+    value, backend = dispatcher()
+    payload = command("teleop", 1)
+    payload["left"]["control_mode"] = "position"
+    payload["right"]["control_mode"] = "position"
+
+    _, response = value("cartesian_command", 1, payload, (779, 0, 0))
+
+    assert response["accepted"]
+    for side in ("left", "right"):
+        assert (side, "set_cartesian_impedance") not in backend.events
+        assert (side, "send_cartesian") in backend.events
 
 
 def test_cartesian_command_accepts_site_limits_below_daemon_ceiling() -> None:

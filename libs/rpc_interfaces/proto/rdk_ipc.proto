@@ -73,6 +73,7 @@ message CartesianTarget {
   double max_angular_acceleration = 5;
   repeated double cartesian_stiffness = 6;
   repeated double cartesian_damping_ratio = 7;
+  string control_mode = 8; // position | impedance
 }
 
 message CartesianCommand {
@@ -162,6 +163,10 @@ message AuthorizeHomeRequest {
   string session_id = 1;
   string operator_confirmation = 2;
   bool clear_hold_latched = 3;
+  // robot reset only: mirror the proven one-shot reset sequence by clearing
+  // controller faults, enabling both arms and waiting for operational before
+  // Home. Ordinary episode Home authorization leaves this false.
+  bool recover_robot_faults = 4;
 }
 
 message AuthorizeHomeResult {

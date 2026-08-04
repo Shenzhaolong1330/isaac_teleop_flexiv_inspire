@@ -179,7 +179,14 @@ def _publish_home_authorization_and_request(
                     "session_id": session_id,
                     "operator_confirmation": "FLEXIV-HOME-MOVE",
                     "clear_hold_latched": clear_hold_latched,
+                    # A valid F/T zero may be reused after a controller Minor
+                    # fault.  In that path no new ZeroFT transaction runs, so
+                    # Reset must explicitly perform the same
+                    # ClearFault -> Enable -> operational sequence used by the
+                    # known-good one-shot reset implementation before Home.
+                    "recover_robot_faults": clear_hold_latched,
                 },
+                timeout_s=30.0,
             )
         finally:
             client.close()

@@ -98,6 +98,7 @@ class MockBackend:
 
     def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None:
         self.events.append((side, "cartesian_mode"))
+        self.events.append((side, "disable_force_control_axes"))
 
     def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None:
         self.events.append((side, "joint_position_mode"))

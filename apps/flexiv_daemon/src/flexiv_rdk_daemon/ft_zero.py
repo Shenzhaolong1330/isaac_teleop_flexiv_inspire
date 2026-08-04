@@ -546,19 +546,19 @@ class FTZeroManager:
                 )
         return dual
 
-    def _wait_for_dual_arm_settle_after_enable(
+    def _wait_for_dual_arm_settle(
         self,
         generation: int,
         hand_reference: tuple[np.ndarray, np.ndarray],
         *,
-        enabled_side: str,
+        failure_prefix: str,
     ) -> None:
-        """Wait out the bounded mechanical transient caused by Robot.Enable.
+        """Wait out a bounded mechanical transient before continuing ZeroFT.
 
-        Enabling a Flexiv arm releases its brakes and can produce a short
-        unloaded rebound.  Motion remains continuously observed, but ZeroFT
-        is allowed to proceed only after *both* arms stay below the original
-        strict velocity limits for a complete settle window.
+        Enabling an arm and restoring Cartesian control can both produce a
+        short unloaded rebound. Motion remains continuously observed, but the
+        transaction proceeds only after both arms stay below the configured
+        velocity limits for a complete settle window.
         """
 
         deadline = self._monotonic() + self._config.enable_settle_timeout_s
@@ -602,8 +602,7 @@ class FTZeroManager:
                     for side in ("left", "right")
                 )
                 raise FTZeroFailure(
-                    f"arms did not settle after enabling {enabled_side}: "
-                    + details
+                    f"{failure_prefix}: " + details
                 )
             self._sleep(self._config.poll_interval_s)
 
@@ -652,17 +651,31 @@ class FTZeroManager:
     ) -> ObservationWindowStatistics:
         self._observe_dual_transaction(generation)
         self._verify_hand_monitor_unchanged()
-        self._backend.enable(side, local_console=True)
-        operational_deadline = self._monotonic() + self._config.operational_timeout_s
-        while not self._backend.operational(side):
-            self._observe_dual_transaction(generation, allow_motion=True)
-            self._verify_hands_unchanged(hand_reference, self._read_hands())
-            self._verify_hand_monitor_unchanged()
-            self._check_deadline(operational_deadline, f"{side} operational timeout", generation)
-            self._sleep(self._config.poll_interval_s)
-        self._wait_for_dual_arm_settle_after_enable(
-            generation, hand_reference, enabled_side=side
-        )
+        # Do not call Enable or wait out an enable transient when the arm is
+        # already operational. This is the common Reset path and saves a full
+        # settle window per arm.
+        if not self._backend.operational(side):
+            self._backend.enable(side, local_console=True)
+            operational_deadline = (
+                self._monotonic() + self._config.operational_timeout_s
+            )
+            while not self._backend.operational(side):
+                self._observe_dual_transaction(generation, allow_motion=True)
+                self._verify_hands_unchanged(
+                    hand_reference, self._read_hands()
+                )
+                self._verify_hand_monitor_unchanged()
+                self._check_deadline(
+                    operational_deadline,
+                    f"{side} operational timeout",
+                    generation,
+                )
+                self._sleep(self._config.poll_interval_s)
+            self._wait_for_dual_arm_settle(
+                generation,
+                hand_reference,
+                failure_prefix=f"arms did not settle after enabling {side}",
+            )
         self._backend.switch_primitive_mode(side, local_console=True)
         self._observe_dual_transaction(generation)
         self._backend.execute_zero_ft(side, local_console=True)
@@ -690,8 +703,19 @@ class FTZeroManager:
             raise FTZeroFailure(f"{side} post-zero residual check failed: {residual_reason}")
         self._backend.switch_idle(side, local_console=True)
         self._backend.switch_cartesian_mode(side, local_console=True)
-        self._backend.rebase_from_measurement(side)
-        self._observe_dual_transaction(generation)
+        # SwitchMode can resume the controller's previous Cartesian target.
+        # Send a measured anchor immediately instead of only updating the
+        # daemon's local cache, then tolerate the brief mode-switch transient.
+        self._backend.send_hold_from_measurement(
+            side, local_authorized=True
+        )
+        self._wait_for_dual_arm_settle(
+            generation,
+            hand_reference,
+            failure_prefix=(
+                f"arms did not settle after restoring {side} Cartesian hold"
+            ),
+        )
         self._verify_hand_monitor_unchanged()
         return after
 

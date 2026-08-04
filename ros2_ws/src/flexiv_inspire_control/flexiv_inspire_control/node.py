@@ -146,8 +146,8 @@ class ControlBridge(Node):
         self.declare_parameter("home_lift_max_angular_velocity_rad_s", 0.50)
         self.declare_parameter("home_lift_max_linear_acceleration_m_s2", 0.50)
         self.declare_parameter("home_lift_max_angular_acceleration_rad_s2", 1.0)
-        self.declare_parameter("home_lift_tolerance_m", 0.005)
-        self.declare_parameter("home_lift_timeout_s", 12.0)
+        self.declare_parameter("home_lift_tolerance_m", 0.03)
+        self.declare_parameter("home_lift_timeout_s", 15.0)
         self.declare_parameter("home_lift_parallel", False)
         self.declare_parameter(
             "joint_lower_limits_rad", Parameter.Type.DOUBLE_ARRAY
@@ -1107,6 +1107,7 @@ class ControlBridge(Node):
             candidate_quaternions[side] = output_quaternion.copy()
             result[side] = {
                 "tcp_pose_rdk": target.tolist(),
+                "control_mode": cartesian_mode,
                 "max_linear_velocity": float(self.get_parameter("max_linear_velocity_m_s").value),
                 "max_angular_velocity": float(self.get_parameter("max_angular_velocity_rad_s").value),
                 "max_linear_acceleration": float(self.get_parameter("max_linear_acceleration_m_s2").value),

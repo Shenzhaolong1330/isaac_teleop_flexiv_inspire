@@ -557,6 +557,8 @@ def test_candidate_targets_do_not_advance_safe_pose_before_ack() -> None:
         Command(), CommandPoint.identity()
     )
     assert set(targets) == {"left", "right"}
+    assert targets["left"]["control_mode"] == "impedance"
+    assert targets["right"]["control_mode"] == "impedance"
     assert set(candidates) == {"left", "right"}
     assert set(quaternions) == {"left", "right"}
     np.testing.assert_array_equal(bridge._safe_pose_rdk["left"], initial)

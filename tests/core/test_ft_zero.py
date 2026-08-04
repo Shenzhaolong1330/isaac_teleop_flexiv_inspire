@@ -167,6 +167,7 @@ def test_short_dual_arm_rebound_after_enable_is_waited_out() -> None:
 
         def enable(self, side: str, *, local_console: bool) -> None:
             super().enable(side, local_console=local_console)
+            self.is_operational[side] = True
             self.rebound_samples = 3
 
         def observe_both(self):
@@ -184,6 +185,8 @@ def test_short_dual_arm_rebound_after_enable_is_waited_out() -> None:
             )
 
     backend = EnableReboundBackend()
+    backend.is_operational["left"] = False
+    backend.is_operational["right"] = False
     value, _, _, _ = manager(backend)
 
     result = value.zero(request())
@@ -191,6 +194,40 @@ def test_short_dual_arm_rebound_after_enable_is_waited_out() -> None:
     assert result.success
     assert ("left", "zero_ft") in backend.events
     assert ("right", "zero_ft") in backend.events
+
+
+def test_cartesian_restore_anchors_current_pose_and_waits_out_transient() -> None:
+    class RestoreReboundBackend(MockBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.restore_rebound_samples = 0
+
+        def switch_cartesian_mode(self, side: str, *, local_console: bool) -> None:
+            super().switch_cartesian_mode(side, local_console=local_console)
+            self.restore_rebound_samples = 3
+
+        def observe_both(self):
+            sample = super().observe_both()
+            if self.restore_rebound_samples <= 0:
+                return sample
+            self.restore_rebound_samples -= 1
+            return replace(
+                sample,
+                left=replace(
+                    sample.left,
+                    dq=np.full(7, 0.02),
+                    tcp_velocity=np.full(6, 0.02),
+                ),
+            )
+
+    backend = RestoreReboundBackend()
+    value, _, _, _ = manager(backend)
+
+    result = value.zero(request())
+
+    assert result.success
+    assert backend.events.count(("left", "send_hold")) == 1
+    assert backend.events.count(("right", "send_hold")) == 1
 
 
 def test_hand_motion_rejects_transaction() -> None:

@@ -576,13 +576,36 @@ class RDKRequestDispatcher:
     def _authorize_home(
         self, pid: int, payload: dict[str, Any]
     ) -> tuple[str, dict[str, Any]]:
+        clear_hold_latched = bool(payload.get("clear_hold_latched", False))
+        recover_robot_faults = bool(
+            payload.get("recover_robot_faults", False)
+        )
+        if recover_robot_faults and not clear_hold_latched:
+            raise PermissionError(
+                "controller fault recovery requires clear_hold_latched"
+            )
+        if recover_robot_faults:
+            with self._lock:
+                if self._active:
+                    raise RuntimeError(
+                        "cannot recover controller faults while motion is active"
+                    )
+                if not self._ft_zero.is_zeroed_for(
+                    str(payload.get("session_id", ""))
+                ):
+                    raise PermissionError(
+                        "cannot recover controller faults before this session "
+                        "is F/T-zeroed"
+                    )
+            self._recover_robots_for_reset()
+
         session = str(payload.get("session_id", ""))
         token, expires = self._home_authorizations.mint(
             pid=pid,
             session_id=session,
             confirmation=str(payload.get("operator_confirmation", "")),
         )
-        if bool(payload.get("clear_hold_latched", False)):
+        if clear_hold_latched:
             with self._lock:
                 if not self._ft_zero.is_zeroed_for(session):
                     raise PermissionError(
@@ -603,6 +626,44 @@ class RDKRequestDispatcher:
             "expires_monotonic_ns": str(expires),
             "reason": "local_tty_confirmed",
         }
+
+    def _recover_robots_for_reset(self, timeout_s: float = 20.0) -> None:
+        """Clear Flexiv faults and restore both arms to operational for Reset.
+
+        This intentionally matches the working one-shot reset sequence:
+        ``ClearFault`` when faulted, ``Enable``, then wait for
+        ``operational()`` before any Home mode switch.  It is reachable only
+        from the explicit local Reset Home authorization, never from routine
+        teleoperation re-authorization.
+        """
+
+        for side in ("left", "right"):
+            self._backend.clear_fault(side, local_console=True)
+        for side in ("left", "right"):
+            if not self._backend.operational(side):
+                self._backend.enable(side, local_console=True)
+
+        deadline = time.monotonic() + timeout_s
+        pending = ["left", "right"]
+        while pending and time.monotonic() < deadline:
+            pending = [
+                side
+                for side in pending
+                if not self._backend.operational(side)
+            ]
+            if pending:
+                time.sleep(0.2)
+        if pending:
+            raise RuntimeError(
+                "Flexiv arm did not become operational after ClearFault/Enable: "
+                + ", ".join(pending)
+            )
+        # The bridge may have cached the pre-recovery sample with fault=true.
+        # Force Home's health check to read the post-ClearFault controller
+        # state instead of rejecting a recovered arm on that stale sample.
+        with self._observation_lock:
+            self._latest_observation = None
+            self._latest_observation_ns = 0
 
     def _zero_ft_request(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         session_id = str(payload.get("session_id", ""))
@@ -775,6 +836,7 @@ class RDKRequestDispatcher:
     def _validate_target(
         self, side: str, target: object
     ) -> tuple[
+        str,
         np.ndarray,
         tuple[float, float, float, float],
         np.ndarray,
@@ -782,6 +844,15 @@ class RDKRequestDispatcher:
     ]:
         if not isinstance(target, dict):
             raise ValueError(f"{side} Cartesian target is missing")
+        # Old replay/test clients did not carry this field and historically
+        # used impedance. Current control bridges always send it explicitly.
+        control_mode = str(
+            target.get("control_mode", "impedance")
+        ).strip().lower()
+        if control_mode not in {"position", "impedance"}:
+            raise ValueError(
+                f"{side} Cartesian control_mode must be position or impedance"
+            )
         pose = np.asarray(target.get("tcp_pose_rdk", []), dtype=np.float64).reshape(-1)
         if pose.shape != (7,) or not np.all(np.isfinite(pose)):
             raise ValueError(f"{side} Cartesian pose must be a finite 7-vector")
@@ -825,25 +896,27 @@ class RDKRequestDispatcher:
             raise ValueError(
                 f"{side} Cartesian damping ratio must be in [0.3,0.8]"
             )
-        return pose, limits, stiffness, damping_ratio
+        return control_mode, pose, limits, stiffness, damping_ratio
 
     def _send_validated_target(
         self,
         side: str,
         validated: tuple[
+            str,
             np.ndarray,
             tuple[float, float, float, float],
             np.ndarray,
             np.ndarray,
         ],
     ) -> None:
-        pose, limits, stiffness, damping_ratio = validated
-        self._backend.set_cartesian_impedance(
-            side,
-            stiffness,
-            damping_ratio,
-            local_authorized=True,
-        )
+        control_mode, pose, limits, stiffness, damping_ratio = validated
+        if control_mode == "impedance":
+            self._backend.set_cartesian_impedance(
+                side,
+                stiffness,
+                damping_ratio,
+                local_authorized=True,
+            )
         self._backend.send_cartesian_target(
             side,
             pose,
@@ -1000,11 +1073,17 @@ class RDKRequestDispatcher:
                             False, False, f"{side}_arm_unhealthy_during_home_lift"
                         )
                 if now - self._home_phase_started_ns > self._home_lift_timeout_ns:
+                    detail = ",".join(
+                        f"{side}(current_z={float(getattr(sample, side).tcp_pose_rdk[2]):.4f},"
+                        f"target_z={float(self._home_lift_targets[side][2]):.4f},"
+                        f"remaining={max(0.0, float(self._home_lift_targets[side][2]) - float(getattr(sample, side).tcp_pose_rdk[2])):.4f})"
+                        for side in self._home_lift_active
+                    )
                     self._latch_hold_locked(
                         "home_lift_timeout", force_hardware_hold=True
                     )
                     return self._home_result(
-                        False, False, "home_lift_timeout"
+                        False, False, f"home_lift_timeout:{detail}"
                     )
                 reached = all(
                     float(getattr(sample, side).tcp_pose_rdk[2])
@@ -1258,12 +1337,9 @@ class RDKRequestDispatcher:
         for side in sides:
             self._backend.switch_cartesian_mode(side, local_console=True)
         for side in sides:
-            self._backend.set_cartesian_impedance(
-                side,
-                lift["stiffness"],
-                lift["damping_ratio"],
-                local_authorized=True,
-            )
+            # Reset lift is rigid Cartesian position tracking. The mode switch
+            # already disabled all force-control axes; do not replace the
+            # controller's position gains with teleop impedance settings.
             motion_limits = lift["motion_limits"]
             self._backend.send_cartesian_target(
                 side,
@@ -1284,11 +1360,17 @@ class RDKRequestDispatcher:
         limits: tuple[float, float, float, float],
         now: int,
     ) -> None:
+        # RDK expects the first NRT joint target immediately after SwitchMode.
+        # Switching both arms first left the first arm in NRT_JOINT_POSITION
+        # for roughly one hardware round-trip without a target. On the real
+        # station that produced controller event 303010 (no feasible NRT
+        # trajectory) before the second arm had even changed mode. This is the
+        # same per-arm SwitchMode -> SendJointPosition ordering used by the
+        # proven dual_arm_teleop reset implementation.
         for side in ("left", "right"):
             self._backend.switch_joint_position_mode(
                 side, local_console=True
             )
-        for side in ("left", "right"):
             self._backend.send_joint_position(
                 side,
                 targets[side],

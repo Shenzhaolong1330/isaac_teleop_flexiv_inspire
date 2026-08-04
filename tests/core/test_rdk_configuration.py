@@ -52,8 +52,9 @@ def test_site_daemon_configuration_exposes_cartesian_command_ceiling():
     config = load_daemon_configuration(path)
 
     assert config.cartesian_limits == (0.35, 1.0, 1.0, 2.0)
-    assert config.ft_zero["enable_settle_timeout_s"] == 10.0
-    assert config.ft_zero["enable_settle_window_s"] == 0.5
+    assert config.ft_zero["sample_window_s"] == 0.25
+    assert config.ft_zero["enable_settle_timeout_s"] == 3.0
+    assert config.ft_zero["enable_settle_window_s"] == 0.15
     assert config.ft_zero["external_contact_check_enabled"] is False
 
 
@@ -144,6 +145,9 @@ class _Robot:
             ("SetCartesianImpedance", stiffness, damping_ratio)
         )
 
+    def SetForceControlAxis(self, enabled):
+        self.calls.append(("SetForceControlAxis", enabled))
+
     def SendJointPosition(self, positions, velocities, max_vel, max_acc):
         self.calls.append(
             ("SendJointPosition", positions, velocities, max_vel, max_acc)
@@ -213,6 +217,7 @@ def test_connect_runs_read_only_robot_info_compatibility(monkeypatch):
     backend.stop("left", local_console=True)
     calls = backend._robots["left"].calls
     assert ("SwitchMode", "cartesian") in calls
+    assert ("SetForceControlAxis", [False] * 6) in calls
     assert any(call[0] == "SetCartesianImpedance" for call in calls)
     assert ("SwitchMode", "joint") in calls
     assert ("Stop",) in calls

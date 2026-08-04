@@ -15,7 +15,7 @@ right:
   required_license: RDK-Professional
 tool_payload_config: tool_payload.yaml
 control:
-  target_rate_hz: 200
+  target_rate_hz: 300
   default_mode: observe_only
   hardware_writes_enabled: false
   # Independent daemon ceiling. The site command profile must be at or below
@@ -33,15 +33,17 @@ ft_zero:
   # Practical site mode: ZeroFTSensor may run with a non-zero estimated
   # external wrench. The operator is responsible for physically unloading it.
   external_contact_check_enabled: false
-  sample_window_s: 2.0
+  # Practical reset: short windows are enough because the Flexiv primitive
+  # performs the actual zeroing and the controller retains its own checks.
+  sample_window_s: 0.25
   sample_rate_hz: 200.0
   operational_timeout_s: 30.0
   primitive_timeout_s: 30.0
   # Robot.Enable releases the brakes and can cause a brief unloaded rebound.
   # Keep the strict velocity limits, but require them continuously for this
   # window before executing ZeroFTSensor.
-  enable_settle_timeout_s: 10.0
-  enable_settle_window_s: 0.5
+  enable_settle_timeout_s: 3.0
+  enable_settle_window_s: 0.15
   max_joint_velocity_norm: 0.01
   max_tcp_velocity_norm: 0.01
   max_wrench_std_force_n: 0.5

@@ -54,7 +54,9 @@ robot policy-serve
 
 该命令以前台方式运行，默认先执行本机 Reset，然后启动 RDK、控制桥、Inspire、
 三路相机、脚踏和 loopback TLS Policy RPC。它不会启动 Quest、MANUS、Episode
-Controller、LeRobot 或训练/推理程序。`Ctrl-C` 关闭 server 及其硬件服务。
+Controller、LeRobot 或训练/推理程序。中踏板踩下时，前台进程会自动生成/刷新
+policy 授权；松开停止，再踩自动恢复，不再需要单独运行 authorize-control。
+`Ctrl-C` 关闭 server 及其硬件服务。
 
 只做不允许运动的 shadow 诊断且不希望自动 Home 时，可以使用：
 
@@ -78,17 +80,7 @@ robot-record --config scripts/config/experiments/pick_place_act_v1/run_policy_sh
 默认配置为 `shadow_only: true`：client 读取 RPC observation、加载本仓库数据训练出的
 checkpoint、执行 ACT 并验证 24D action，但不申请 lease、不向真机发送动作。
 
-真机模式必须在完成 shadow 验收后使用单独的 guarded 配置；server 端还必须由本机
-TTY 授权 policy source，并保持中踏板按下：
-
-```bash
-flexiv-inspire-authorize-control \
-  --session-id flexiv-inspire-site \
-  --source policy \
-  --confirm FLEXIV-CONTROL-ARM \
-  --clear-hold-latched \
-  --socket /run/user/1000/isaac_teleop/rdk.sock
-```
-
-然后启动 `run_policy_guarded.yaml`。动作继续经过 lease、TTL、heartbeat、脚踏、
-软限位和 source-exclusive 控制。
+真机模式必须在完成 shadow 验收后使用单独的 `run_policy_guarded.yaml`。Client 可以
+先启动；未踩中踏板时只推理并等待，不会因 lease 暂时不可用而退出。踩下中踏板后
+Server 自动授权并开始下发，动作仍经过 lease、TTL、heartbeat、脚踏、软限位和
+source-exclusive 控制。

@@ -5,10 +5,12 @@ from types import SimpleNamespace
 
 import yaml
 from flexiv_inspire_isaac.cli import (
+    _PolicyAuthorizationSupervisor,
     _commands,
     _conversion_manifest,
     _conversion_manifests,
     _load_policy_server_config,
+    _policy_authorization_command,
     _policy_serve_commands,
     _run_convert,
 )
@@ -46,6 +48,14 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
         "camera_hz": 15.0,
         "action_hz": 30.0,
     }
+    assert settings["auto_reset_before_serve"] is True
+    assert settings["auto_authorize_policy"] is True
+    authorization = _policy_authorization_command(
+        config, Path(config.document["session"]["runtime_root"]) / "rdk.sock"
+    )
+    assert authorization[0] == "flexiv-inspire-authorize-control"
+    assert authorization[authorization.index("--source") + 1] == "policy"
+    assert "--clear-hold-latched" in authorization
     assert len(commands) == 6
     assert any("flexiv-rdk-daemon" in command for command in joined)
     assert any("flexiv_inspire_control.node" in command for command in joined)
@@ -61,6 +71,33 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
         "rerun_viz",
     )
     assert not any(marker in command for marker in forbidden for command in joined)
+
+
+def test_policy_authorizer_refreshes_on_pedal_press(monkeypatch, capsys) -> None:
+    calls = []
+    supervisor = _PolicyAuthorizationSupervisor.__new__(
+        _PolicyAuthorizationSupervisor
+    )
+    supervisor._command = ["authorize-policy"]
+    supervisor._pedal_pressed = False
+    supervisor._control_state = ""
+    supervisor._last_attempt = 0.0
+    supervisor._last_reported_error = ""
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.time.monotonic", lambda: 20.0
+    )
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.subprocess.run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    supervisor._on_control_state(SimpleNamespace(state_name="READY"))
+    supervisor._on_pedal(SimpleNamespace(data=True))
+    supervisor._refresh_if_needed()
+
+    assert [item[0] for item in calls] == [["authorize-policy"]]
+    assert "policy 控制已自动授权" in capsys.readouterr().out
 
 
 def test_conversion_manifest_discovers_raw_and_legacy_episodes(tmp_path) -> None:

@@ -21,3 +21,6 @@ startup:
   # One-command local preparation. Use --no-reset only for read-only shadow
   # diagnostics when moving/Home is intentionally undesired.
   auto_reset_before_serve: true
+  # The foreground local-TTY launcher refreshes policy authority whenever the
+  # middle pedal is held. No second authorize-control command is required.
+  auto_authorize_policy: true

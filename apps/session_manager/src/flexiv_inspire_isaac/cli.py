@@ -1303,6 +1303,7 @@ def _load_policy_server_config(config, raw_path: str | Path) -> dict:
         "auto_reset_before_serve": bool(
             startup.get("auto_reset_before_serve", True)
         ),
+        "auto_authorize_policy": bool(startup.get("auto_authorize_policy", True)),
     }
 
 
@@ -1336,6 +1337,116 @@ def _policy_server_command(settings: dict) -> list[str]:
     return command
 
 
+def _policy_authorization_command(config, rdk_socket: Path) -> list[str]:
+    return [
+        "flexiv-inspire-authorize-control",
+        "--session-id",
+        str(config.document["session"]["id"]),
+        "--source",
+        "policy",
+        "--confirm",
+        "FLEXIV-CONTROL-ARM",
+        "--clear-hold-latched",
+        "--socket",
+        str(rdk_socket),
+    ]
+
+
+class _PolicyAuthorizationSupervisor:
+    """Refresh local policy authority while the physical pedal is held."""
+
+    _REFRESH_INTERVAL_S = 10.0
+
+    def __init__(self, config, rdk_socket: Path) -> None:
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "automatic policy authorization requires robot policy-serve "
+                "to run in a local interactive terminal"
+            )
+        import rclpy
+        from flexiv_inspire_interfaces.msg import ControlState
+        from rclpy.executors import ExternalShutdownException
+        from std_msgs.msg import Bool
+
+        self._rclpy = rclpy
+        self._external_shutdown = ExternalShutdownException
+        self._command = _policy_authorization_command(config, rdk_socket)
+        self._pedal_pressed = False
+        self._control_state = ""
+        self._last_attempt = 0.0
+        self._last_reported_error = ""
+        rclpy.init()
+        self._node = rclpy.create_node(
+            f"flexiv_policy_auto_authorizer_{os.getpid()}"
+        )
+        self._node.create_subscription(
+            Bool, "/teleop/deadman", self._on_pedal, 10
+        )
+        self._node.create_subscription(
+            ControlState, "/control/state", self._on_control_state, 10
+        )
+        self._node.create_timer(0.25, self._refresh_if_needed)
+
+    def _on_pedal(self, message) -> None:
+        pressed = bool(message.data)
+        if pressed and not self._pedal_pressed:
+            # Every new press may follow a deliberate measured hardware hold.
+            self._last_attempt = 0.0
+        self._pedal_pressed = pressed
+
+    def _on_control_state(self, message) -> None:
+        self._control_state = str(message.state_name).upper()
+
+    def _refresh_if_needed(self) -> None:
+        if not self._pedal_pressed:
+            return
+        if self._control_state not in {"READY", "POLICY_ARMED", "HOLD_LATCHED"}:
+            return
+        now = time.monotonic()
+        if now - self._last_attempt < self._REFRESH_INTERVAL_S:
+            return
+        self._last_attempt = now
+        try:
+            result = subprocess.run(
+                self._command,
+                stdin=sys.stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=5.0,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        else:
+            detail = (result.stdout or "").strip()
+            if result.returncode == 0:
+                self._last_reported_error = ""
+                print(
+                    "中踏板：policy 控制已自动授权；策略动作可以申请 lease",
+                    flush=True,
+                )
+                return
+            detail = detail or f"exit code {result.returncode}"
+        if detail != self._last_reported_error:
+            print(
+                f"中踏板：policy 自动授权暂未完成：{detail}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._last_reported_error = detail
+
+    def spin_once(self) -> None:
+        try:
+            self._rclpy.spin_once(self._node, timeout_sec=0.1)
+        except self._external_shutdown as exc:
+            raise KeyboardInterrupt from exc
+
+    def close(self) -> None:
+        self._node.destroy_node()
+        self._rclpy.try_shutdown()
+
+
 def _policy_serve_commands(
     config, rendered: dict[str, Path], settings: dict
 ) -> list[list[str]]:
@@ -1367,7 +1478,10 @@ def _policy_serve_commands(
 
 
 def _wait_for_policy_services(
-    processes: Sequence[subprocess.Popen], logs: Sequence[Path]
+    processes: Sequence[subprocess.Popen],
+    logs: Sequence[Path],
+    *,
+    spin_once=None,
 ) -> None:
     """Keep the policy owner foregrounded and fail if an owned service exits."""
 
@@ -1385,7 +1499,10 @@ def _wait_for_policy_services(
                 f"policy service-{index} exited with status {status}; "
                 f"log={logs[index]}\n{tail}"
             )
-        time.sleep(0.1)
+        if spin_once is None:
+            time.sleep(0.1)
+        else:
+            spin_once()
 
 
 def _commands(
@@ -1892,6 +2009,7 @@ def _main(args, config) -> int:
         logs = [runtime / f"{log_prefix}-{index}.log" for index in range(len(commands))]
         processes = _start(commands, runtime, log_prefix=log_prefix)
         _write_state(runtime, config, processes)
+        authorizer = None
         try:
             _verify_process_startup(processes, logs)
             _wait_for_rdk_socket(rdk_socket, processes, logs)
@@ -1901,24 +2019,34 @@ def _main(args, config) -> int:
                 logs,
                 tuple(config.document["cameras"]["streams"]),
             )
-            session_id = str(config.document["session"]["id"])
+            if settings["auto_authorize_policy"] and reset_requested:
+                authorizer = _PolicyAuthorizationSupervisor(config, rdk_socket)
+                authorization_status = (
+                    "中踏板踩下时自动授权 policy；松开停止，再踩自动恢复"
+                )
+            else:
+                authorization_status = (
+                    "未启用自动授权；--no-reset 仅用于 shadow/只读诊断"
+                )
             print(
                 f"Policy RPC ready: {settings['bind']}:{settings['port']}\n"
                 "hardware owner=isaac_teleop_flexiv_inspire; "
                 "training/inference client=dual_arm_teleop\n"
-                "Shadow 可直接连接；真机动作请在另一个本地终端授权：\n"
-                "  flexiv-inspire-authorize-control "
-                f"--session-id {session_id} --source policy "
-                "--confirm FLEXIV-CONTROL-ARM --clear-hold-latched "
-                f"--socket {rdk_socket}\n"
+                f"{authorization_status}\n"
                 "Ctrl-C stops server",
                 flush=True,
             )
             try:
-                _wait_for_policy_services(processes, logs)
+                _wait_for_policy_services(
+                    processes,
+                    logs,
+                    spin_once=(authorizer.spin_once if authorizer is not None else None),
+                )
             except KeyboardInterrupt:
                 return 130
         finally:
+            if authorizer is not None:
+                authorizer.close()
             _stop_started_processes(processes)
             _remove_state_pids(runtime, {process.pid for process in processes})
     if args.operation == "collect":

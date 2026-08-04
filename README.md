@@ -91,7 +91,9 @@ to and from `wxyz`.
 Start with the exact, fail-closed startup sequence in
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md). Also read `docs/ENVIRONMENTS.md`,
 `docs/SAFETY_INVARIANTS.md`, `docs/MANUS_SETUP.md`, and
-`docs/MANUS_POSE_ADAPTER.md` before integration.
+`docs/MANUS_POSE_ADAPTER.md` before integration. The staged design for
+multi-rate policy RPC and LeRobot interoperability is in
+[`docs/POLICY_INTEROPERABILITY_PLAN.md`](docs/POLICY_INTEROPERABILITY_PLAN.md).
 
 ## Environments
 

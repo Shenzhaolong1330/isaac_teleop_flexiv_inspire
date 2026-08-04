@@ -19,6 +19,7 @@ vendor/
 build/
 install/
 log/
+/log.txt
 CMakeFiles/
 CMakeCache.txt
 

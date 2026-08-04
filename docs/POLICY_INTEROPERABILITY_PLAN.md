@@ -20,6 +20,24 @@ feature；真正缺失的是两层适配：
 - 运行时层：实现一个只通过 RPC 读写的 LeRobot `Robot`，禁止再次直连 RDK、
   Inspire 或 RealSense。
 
+### 1.1 实施硬约束
+
+后续实现必须同时满足以下三条，任一不满足都不能合并：
+
+1. **默认路径零回归**：现有 `robot record/reset/replay/visualize/convert`、
+   `PolicyService v1`，以及 `dual_arm_teleop` 里直连 Flexiv 的老版数采、训练和
+   推理继续可用；新功能只通过新 profile、新 robot type 或新 v2 endpoint 启用。
+2. **模块之间只依赖契约**：schema/映射是无 ROS、无 gRPC、无 LeRobot 依赖的
+   纯模块；transport、离线 exporter、LeRobot adapter 和硬件驱动分层，不能互相
+   import 具体实现。
+3. **策略张量不携带重复表达**：设备原始通道可以完整保留，但一个具体 policy
+   profile 只能选择一种关节/笛卡尔状态和一种旋转表达；同一个 state/action 中
+   不同时放 quaternion、Rotation-6D、rotation vector，也不默认同时放可由关节
+   正运动学得到的 TCP pose。
+
+兼容旧 checkpoint 是第 3 条唯一允许的例外：legacy profile 必须原样生成它训练时
+使用的 38 维 state 和 24 维 action，但这个例外不能成为新 profile 的默认设计。
+
 ## 2. 目标结构
 
 ```text
@@ -47,6 +65,19 @@ Data/Policy RPC v2        现有安全控制路径
 `FlexivDualArm` 仍可单独使用，但与本系统联机时必须改用 RPC Robot，不能同时
 占用机械臂、手和相机。
 
+模块边界固定为：
+
+| 模块 | 职责 | 禁止依赖 |
+|---|---|---|
+| `policy_contracts` | descriptor、schema hash、FeatureContract、纯数学映射 | ROS、gRPC、LeRobot、硬件 SDK |
+| `rpc_interfaces` | protobuf wire contract | ROS、硬件 SDK |
+| `policy_server` | ROS channel 与 RPC transport 适配 | LeRobot |
+| `data_core` profile | MCAP 到 FeatureContract 的离线转换 | 真机硬件 SDK |
+| `IsaacFlexivRpcRobot` | LeRobot Robot API 到 RPC client 的适配 | RDK、Inspire、RealSense SDK |
+
+新机器人或灵巧手只新增 device descriptor 和 mapping profile，不修改 RPC
+transport、安全监督器或 LeRobot 训练核心。
+
 ## 3. RPC v2 设计
 
 新增 `libs/rpc_interfaces/proto/policy_data_v2.proto`，不修改 v1 wire contract。
@@ -71,6 +102,11 @@ Data/Policy RPC v2        现有安全控制路径
 - dtype、shape、轴/元素名、单位和坐标系；
 - 原生频率、时钟域、允许的编码；
 - schema version 和内容哈希。
+
+RPC 不定义一个包含“所有东西”的大 state。`arm.q`、`arm.tcp_pose`、`hand.angle`、
+`force_torque`、`tactile` 和图像都是可独立订阅的原子 channel；FeatureContract
+只请求当前策略真正使用的集合。时间戳、validity、age 和 sequence 位于 envelope
+metadata，不重复拼进 policy state tensor。
 
 每个 sample envelope 包含 source time、mapped host monotonic time、receive time、
 sequence、validity、age 和 payload。Tensor 使用 little-endian packed bytes；图像
@@ -105,7 +141,23 @@ bounded queue：状态可选 reliable，图像/触觉默认 drop-oldest。这样
 
 ## 4. LeRobot schema 适配
 
-### 4.1 已确认的两套 schema
+### 4.1 策略 state/action 的最小化规则
+
+原始 MCAP 和 RPC channel 保留可复现所需的完整数据；policy dataset/profile 则采用
+白名单，未声明的字段不会进入 `observation.state` 或 `action`。首批 profile 为：
+
+| Profile | State | Action | 用途 |
+|---|---|---|---|
+| `dual_arm_lerobot_v1` | legacy 38D | legacy 24D | 兼容既有数据和 checkpoint，不改变任何字段 |
+| `joint_proprio_cartesian_v1` | `q(14) + hand_angle(12)` = 26D | `delta_xyz + delta_rotvec` 双臂 + hand = 24D | 推荐新通用 profile |
+| `cartesian_proprio_v1` | `tcp_xyz + tcp_rotvec` 双臂 + hand = 24D | 同上 24D | 明确需要笛卡尔 proprio 的策略 |
+
+新 profile 不同时包含 `q` 和 TCP pose。力、触觉、深度或高频 history 只有在策略
+明确声明时才加入专用 profile；加入 history 时不能再把同一时刻状态复制成另一组
+等价 feature。控制内部现有 30D Rotation-6D command 保持不变，它是兼容且安全的
+wire representation；新策略的最小 24D action 只在边界转换一次。
+
+### 4.2 已确认的两套 schema
 
 本仓库当前 `sent_command` 数据：
 
@@ -137,7 +189,7 @@ bounded queue：状态可选 reliable，图像/触觉默认 drop-oldest。这样
 `_apply_delta_to_pose7` 做 golden parity test。手部转换必须验证 1000=张开、0=闭合，
 以及每个单独通道的真机方向，不能只验证全开/全闭。
 
-### 4.2 FeatureContract
+### 4.3 FeatureContract
 
 新增 `FeatureContract`：从目标数据集 `meta/info.json` 或 checkpoint 保存的 dataset
 metadata 读取有序 feature、dtype、shape、元素名和 fps，然后与 RPC
@@ -147,6 +199,10 @@ metadata 读取有序 feature、dtype、shape、元素名和 fps，然后与 RPC
 38 这些维度猜测。缺字段、单位不一致、frame 不一致或映射有歧义时直接拒绝启动。
 编译结果、源/目标 schema hash、标定 hash 和 tool payload hash写入 inference run
 manifest，保证可复现。
+
+FeatureContract 输出必须与目标 metadata **精确相等**：不缺字段，也不附带额外
+state/action 字段。训练、离线推理和在线推理共用同一个已编译 mapping，禁止三处
+各写一套通道顺序。
 
 ## 5. 离线训练适配
 
@@ -162,8 +218,9 @@ lerobot_export:
 
 实现后，`robot convert` 应把所有有效 raw episode 写成一个标准 LeRobot v3
 dataset，而不是每个 episode 一个独立 dataset。任务 description、episode 边界、
-validity 和时间戳继续保留；丰富模态可以作为额外 feature 输出，但 legacy profile
-的 policy 输入默认严格匹配上述 38 维状态、24 维动作和三路图像。
+validity 和时间戳继续保留在 metadata/manifest。`dual_arm_lerobot_v1` 只生成 legacy
+38 维状态、24 维动作和三路图像，不附加力、触觉、高频 history 等 policy feature；
+需要丰富模态时必须选择另一个显式 profile，避免旧策略把额外字段误当输入。
 
 `dual_arm_teleop/scripts/core/run_train.py` 已通过 `dataset.meta` 推导 policy
 features，因此训练配置只需指向这个 dataset root，不再手写 observation/action：
@@ -175,9 +232,10 @@ train:
 ```
 
 数据集 fps 必须是真实策略时间线。当前新数据是 15 Hz；旧 30 Hz 数据不能在未显式
-重采样和记录 provenance 的情况下直接混合。200 Hz 本体状态首版以每个策略帧前的
-history + valid/age 保存；需要原生异步训练的策略可直接读取 RPC/MCAP channel，
-不强行塞进标准 LeRobot 单时间线。
+重采样和记录 provenance 的情况下直接混合。200 Hz 本体状态默认只用于同步时选择
+最新有效样本，不自动复制为 history；需要时序 proprio 的策略必须选择专用 history
+profile。需要原生异步训练的策略可直接读取 RPC/MCAP channel，不强行塞进标准
+LeRobot 单时间线。
 
 ## 6. 在线推理适配
 
@@ -201,9 +259,19 @@ Home、Enable 和 F/T 清零仍由本机 `robot reset/record` 流程负责。RPC
 
 ## 7. 分阶段交付与验收
 
+### P-1：兼容基线
+
+- 固化当前 v1 proto、默认 conversion schema、ROS topics 和 CLI 行为；
+- 保存现有本仓库数据集和 legacy LeRobot 数据集的 `meta/info.json` golden fixture；
+- 给 `dual_arm_teleop` 直连 `FlexivDualArm` 的 feature schema、旧训练加载和旧
+  checkpoint shadow inference 建回归测试。
+
+验收：不启用任何 v2/profile 配置时，命令、topic、feature 名称/顺序和输出目录均
+与实现前一致；老数据可加载，旧 checkpoint 可完成 shadow inference。
+
 ### P0：契约与转换纯函数
 
-- 建立 v2 proto、channel/action descriptor 和 schema hash；
+- 建立独立 `policy_contracts`、v2 proto、channel/action descriptor 和 schema hash；
 - 实现 Rotation-6D/rotvec、hand normalization、feature reorder；
 - 用现有两套 `meta/info.json` 建 golden fixtures。
 
@@ -221,12 +289,12 @@ Home、Enable 和 F/T 清零仍由本机 `robot reset/record` 流程负责。RPC
 
 ### P2：LeRobot 离线 profile
 
-- 实现 `dual_arm_lerobot_v1`；
+- 实现严格兼容的 `dual_arm_lerobot_v1` 和一个无冗余的新 minimal profile；
 - 合并多 episode 为单个 LeRobot v3 dataset；
 - 在 `dual_arm_teleop` 直接运行 dataset load、1 个 batch 和短训练 smoke test。
 
 验收：feature 名称/顺序与 legacy 38/24 schema 完全一致，视频可解码，统计量有限，
-训练不需要手写 observation/action。
+训练不需要手写 observation/action；minimal profile 不含重复姿态表达或未声明字段。
 
 ### P3：RPC Robot shadow inference
 
@@ -257,6 +325,17 @@ inference，控制核心无需修改。
 
 ## 8. 推荐实施顺序
 
-先完成 P0-P2，立即打通“现有数据直接训练”；再做 P1/P3 打通不动机器人的在线
-推理；最后做 P4 真机控制。不要先把固定 30 维 v1 改成任意向量，也不要让
+先完成 P-1，再完成 P0-P2，立即打通“现有数据直接训练”；之后做 P3 的不动机器人
+在线推理，最后做 P4 真机控制。不要先把固定 30 维 v1 改成任意向量，也不要让
 `dual_arm_teleop` 同时直连硬件，这两种做法都会把 schema 错误或设备争用带到真机。
+
+每个阶段都运行以下兼容矩阵，失败则停止推进：
+
+| 路径 | 必须保持的结果 |
+|---|---|
+| 本仓库旧 CLI | record/reset/replay/visualize/convert 默认配置行为不变 |
+| PolicyService v1 | wire schema、30D action 和安全语义不变 |
+| 本仓库当前 LeRobot export | 未选择新 profile 时 schema/output 不变 |
+| dual_arm 老版直连数采 | `FlexivDualArm` 仍直接可用，不 import RPC adapter |
+| dual_arm 老版训练/推理 | 旧 dataset/checkpoint 无需转换即可继续运行 |
+| 新 RPC 路径 | 只有显式选择新 robot type/profile 后才启动 |

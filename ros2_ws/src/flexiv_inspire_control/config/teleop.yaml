@@ -27,6 +27,8 @@
     # Quest faces the operator: Quest [x,y,z] -> robot [z,x,y].
     axis_rotation: [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
     hand_pose_topic: /xr_teleop/hand
+    manus_left_ergonomics_topic: /manus/left/ergonomics
+    manus_right_ergonomics_topic: /manus/right/ergonomics
     # Empty means arm-only teleop. Copy/manually calibrate the packaged
     # manus_calibration_template.yaml before setting this path.
     manus_calibration: ""

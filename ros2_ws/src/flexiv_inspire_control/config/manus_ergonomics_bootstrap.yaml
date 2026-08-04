@@ -1,0 +1,38 @@
+# Bootstrap ranges measured with the local MANUS/RH56 setup. Replace this
+# file with a per-operator capture before precision data collection.
+schema_version: 2
+calibrated: true
+source_format: MANUS_SDK_ERGONOMICS_RADIANS
+filter:
+  low_pass_alpha: 0.35
+  output_deadband: 2.0
+  max_output_rate_per_s: 3000.0
+calibration:
+  kind: local_bootstrap_ranges
+  requires_operator_recalibration: true
+
+side_channels: &side_channels
+  little:
+    source: PinkyMCPStretch
+    points: [[-0.135873882268, 1000], [1.133888055143, 0]]
+  ring:
+    source: RingMCPStretch
+    points: [[-0.126361837844, 1000], [1.231713759717, 0]]
+  middle:
+    source: MiddleMCPStretch
+    points: [[-0.093270395227, 1000], [1.323779877760, 0]]
+  index:
+    source: IndexMCPStretch
+    points: [[-0.073775067482, 1000], [1.255659677055, 0]]
+  thumb_bend:
+    source: ThumbMCPStretch
+    points: [[0.474136144597, 1000], [0.226735723127, 0]]
+  thumb_rotate:
+    source: ThumbMCPSpread
+    points: [[0.157655591333, 1000], [0.478499467727, 0]]
+
+sides:
+  left:
+    <<: *side_channels
+  right:
+    <<: *side_channels

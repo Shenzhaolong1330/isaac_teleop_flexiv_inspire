@@ -50,10 +50,17 @@ cmake --build build/manus-isaac \
 cmake --install build/manus-isaac --component manus
 ```
 
-站点补丁使 `ISAAC_TELEOP_MANUS_WRIST_SOURCE=controllers` 可显式关闭 Quest
-光学手腕根。运行脚本会设置该变量，因此腕部始终来自 Quest Touch 控制器，
-MANUS 只提供手指关节；拿起控制器后不会因光学手跟踪消失而把手指流标成
-无效。补丁脚本可重复执行。
+站点补丁完成三件事：
+
+- `ISAAC_TELEOP_MANUS_WRIST_SOURCE=controllers` 固定由 Quest Touch 提供腕部位姿；
+- `ISAAC_TELEOP_MANUS_OPENXR_ENABLED=0` 让插件跳过 OpenXR 会话，手指数据
+  不等待 CloudXR 或视频；
+- `ISAAC_TELEOP_MANUS_ERGONOMICS_UDP=127.0.0.1:15053` 从同一个 Integrated
+  SDK 实例输出 Ergonomics，避免第二个 MANUS Core 争抢手套。
+
+`manus_ergonomics_source` 将 SDK 的度数转换为 ROS 标准弧度，发布
+`/manus/left/ergonomics` 和 `/manus/right/ergonomics`。灵巧手命令使用
+Ergonomics；OpenXR skeleton 仅作为旧标定/诊断兼容路径。补丁脚本可重复执行。
 
 安装产物：
 
@@ -96,19 +103,45 @@ MANUS_SMOKE_EXIT=124
 许可，因此没有许可阻塞，也没有修改或重试许可。`lsusb` 同时能看到
 MANUS Sensor Dongle。
 
-Flexiv/Inspire 运行链路使用仓库提供的
-`flexiv-inspire-xr-raw-source`，直接输出 `/xr_teleop/hand` 的
-left25+right25 原始 OpenXR Pose。它不实例化 NVIDIA Sharpa
-retargeter，所以不需要 Sharpa URDF；后级再用现场张开/握拳端点映射为
-Inspire 六路命令。
+Flexiv/Inspire 运行链路不实例化 NVIDIA Sharpa retargeter，所以不需要
+Sharpa URDF。Quest 的腕部位姿与 MANUS Ergonomics 是相互独立的输入；
+Quest 视频/OpenXR 显示失败不会阻断手指 Ergonomics 数据。
 
-## 当前 OpenXR/Quest 状态
+## Ergonomics 现场标定
 
-smoke 没有启动 CloudXR/OpenXR runtime，所以插件明确降级为
-`Manus-only mode`；这不影响 SDK、许可和 dongle 发现验证。当前
-`NV_CXR_RUNTIME_DIR` 未设置，CloudXR EULA 标记不存在，且
-`adb devices -l` 没有 Quest。完成 Quest 连接和由操作者接受 CloudXR
-EULA 后，才能继续验证 OpenXR hand injection、Quest 位姿和完整遥操作
-数据流。
+启动 `robot record` 后保持双手完全张开：
+
+```bash
+flexiv-inspire-manus-calibrate capture-ergonomics \
+  --pose open --frames 90 \
+  --output artifacts/calibration/manus_ergonomics_open.yaml
+```
+
+再自然握拳（拇指同时完成对掌）：
+
+```bash
+flexiv-inspire-manus-calibrate capture-ergonomics \
+  --pose closed --frames 90 \
+  --output artifacts/calibration/manus_ergonomics_closed.yaml
+```
+
+生成左右手独立标定：
+
+```bash
+flexiv-inspire-manus-calibrate finalize-ergonomics \
+  --open artifacts/calibration/manus_ergonomics_open.yaml \
+  --closed artifacts/calibration/manus_ergonomics_closed.yaml \
+  --template ros2_ws/src/flexiv_inspire_control/config/manus_ergonomics_calibration_template.yaml \
+  --output artifacts/calibration/manus_ergonomics_site.yaml
+```
+
+最后将 `config/sensors.yaml` 的 `teleop.manus_calibration` 改为生成文件。
+仓库自带 bootstrap 范围可用于首次低速检查，正式数采前应完成操作者标定。
+
+## OpenXR/Quest 边界
+
+默认数采启动器把 MANUS 插件运行在显式 `MANUS-only` 模式，不创建
+OpenXR 会话。Quest 位姿由独立 `xr_raw_ros_source` 输出，XR 视频由独立
+视频链路处理；它们失败时 MANUS Ergonomics 仍然可用。
 
 本次 smoke 没有执行手套校准、固件升级、触觉输出或任何设备写操作。

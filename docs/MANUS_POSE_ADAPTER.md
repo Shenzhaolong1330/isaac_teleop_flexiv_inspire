@@ -1,40 +1,30 @@
-# Isaac `/xr_teleop/hand` → Inspire 手指适配
+# MANUS SDK Ergonomics → Inspire 手指适配
 
-本项目直接订阅 Isaac Teleop ROS 2 的原始 `geometry_msgs/PoseArray`
-`/xr_teleop/hand`，不依赖不存在的 `/manus/*/joint_states`，也不把
-模式相关、已经重定向过的 `/xr_teleop/finger_joints` 当作通用 MANUS
-原始数据。
+当前主链路不再从 OpenXR 手部骨架反推手指角度。Isaac Teleop
+的 MANUS Integrated SDK 实例直接读取 Ergonomics 流，经本机 UDP
+传给 `manus_ergonomics_source`；该 ROS 节点将度转为弧度，分别发布：
 
-消息布局固定为 50 个 Pose：
+- `/manus/left/ergonomics`
+- `/manus/right/ergonomics`
 
-- `poses[0:25]`：左手 OpenXR `WRIST..LITTLE_TIP`
-- `poses[25:50]`：右手 OpenXR `WRIST..LITTLE_TIP`
-- OpenXR/MANUS 内部模型每手有 26 个关节，但 ROS transport 省略
-  `PALM`（index 0），因此每手传输 25 个 Pose
-- 每手 local index 0 是 `WRIST`，local index 1 是
-  `THUMB_METACARPAL`
-- Isaac 对无效关节填充“零位置 + 单位四元数”；适配器把任一必需
-  关节的这种值视为整手无效
+每只手包含 20 个 SDK Ergonomics 通道：拇指和四指的
+MCP spread/stretch、PIP stretch 和 DIP stretch。`teleop_input` 按左右手
+独立标定把它们映射到 Inspire RH56 的六个执行器，并对命令做
+低通、死区、变化率限制和 `[0,1000]` 夹取。
 
-适配器使用父子骨段的相对旋转推导四指 MCP/PIP/DIP 和拇指
-CMC/MCP/IP 屈曲特征；拇指外展使用腕坐标系中的有符号掌骨方向角。
-这些特征只进入现场标定映射，不直接当作 Inspire 命令。
+Quest 只提供左右腕的位置和姿态，MANUS Ergonomics 只提供手指
+动作。两条输入互相独立：XR 视频显示失败不会阻断 MANUS 手指流。
 
-这里不需要 Sharpa URDF：Sharpa 只属于 NVIDIA 示例的目标手模型。本项目
-没有把 MANUS 关节先变成 Sharpa 关节，而是把原始 OpenXR 特征直接标定为
-Inspire 的六个执行器端点。当前映射也不做 Inspire 手部 IK，因此不需要
-Inspire URDF；若将来改为模型 IK，目标模型才应换成经过核对的 Inspire
-URDF。
+这里不需要 Sharpa URDF：Sharpa 只属于 NVIDIA 示例的目标手模型。
+本项目把 SDK 的人手关节角直接标定到 Inspire 六个执行器端点，
+不做手部模型 IK，因此也不需要 Inspire URDF。如果未来改成模型 IK，
+目标模型才应换成经过核对的 Inspire URDF。
 
-`ros2_ws/src/flexiv_inspire_control/config/manus_calibration_template.yaml`
-默认 `calibrated: false`。默认
-空 `manus_calibration` 参数时系统仅允许手臂遥操作，手的 valid mask
-不会置位。必须在真实操作者、手套和双手上分别采集开/闭端点，审核
-权重与方向，然后复制模板、设为 `calibrated: true` 并把
-`manus_calibration` 指向该文件。错误 pose 数、零 Pose、NaN/Inf、
-非法四元数、缺失特征、未知标定字段或超时都会 fail closed，不会沿用
-上一帧手命令。
+`manus_ergonomics_bootstrap.yaml` 使用本地已有的实测范围，仅用于首次
+低速验证。正式数采前，用 `capture-ergonomics` 分别采集自然
+完全张开和自然握拳各 90 帧，再用 `finalize-ergonomics` 生成这一
+操作者/手套的左右手独立标定。完整命令见 `docs/MANUS_SETUP.md`。
 
-现场工具 `flexiv-inspire-manus-calibrate` 分两次采集双手
-张开/握拳各 90 帧，以中位数生成左右手独立端点。完整命令见
-`docs/RUNBOOK.md` 4.4。
+旧的 `/xr_teleop/hand` 50-Pose 骨架标定仍保留向后兼容，但不再是
+`config/sensors.yaml` 的默认路径。骨架流中的零 Pose、非法四元数、
+NaN/Inf 和缺失特征仍会 fail closed。

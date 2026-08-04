@@ -1,0 +1,258 @@
+diff --git a/src/plugins/manus/core/inc/manus/manus_hand_tracking_plugin.hpp b/src/plugins/manus/core/inc/manus/manus_hand_tracking_plugin.hpp
+--- a/src/plugins/manus/core/inc/manus/manus_hand_tracking_plugin.hpp
++++ b/src/plugins/manus/core/inc/manus/manus_hand_tracking_plugin.hpp
+@@ -13,6 +13,7 @@
+ 
+ #include <ManusSDK.h>
+ #include <XR_MNDX_xdev_space.h>
++#include <cstdint>
+ #include <memory>
+ #include <mutex>
+ #include <optional>
+@@ -55,10 +56,13 @@ private:
+ 
+     // ManusSDK specific methods
+     void RegisterCallbacks();
++    void initialize_ergonomics_output();
++    void close_ergonomics_output();
+     void ConnectToGloves() noexcept(false);
+     void DisconnectFromGloves();
+     static void OnSkeletonStream(const SkeletonStreamInfo* skeleton_stream_info);
+     static void OnLandscapeStream(const Landscape* landscape);
++    static void OnErgonomicsStream(const ErgonomicsStream* ergonomics_stream);
+ 
+     // OpenXR specific methods
+     void inject_hand_data();
+@@ -82,6 +86,9 @@ private:
+     std::optional<uint32_t> left_glove_id;
+     std::optional<uint32_t> right_glove_id;
+     bool is_connected = false;
++    int m_ergonomics_socket = -1;
++    std::string m_ergonomics_host;
++    uint16_t m_ergonomics_port = 0;
+ 
+     // OpenXR State
+     std::shared_ptr<core::OpenXRSession> m_session;
+diff --git a/src/plugins/manus/core/manus_hand_tracking_plugin.cpp b/src/plugins/manus/core/manus_hand_tracking_plugin.cpp
+--- a/src/plugins/manus/core/manus_hand_tracking_plugin.cpp
++++ b/src/plugins/manus/core/manus_hand_tracking_plugin.cpp
+@@ -13,13 +13,22 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <cstdlib>
++#include <iomanip>
+ #include <iostream>
+ #include <memory>
+ #include <mutex>
++#include <sstream>
+ #include <stdexcept>
+ #include <thread>
+ #include <vector>
+ 
++#if defined(__linux__)
++#    include <arpa/inet.h>
++#    include <sys/socket.h>
++
++#    include <unistd.h>
++#endif
++
+ 
+ namespace plugins
+ {
+@@ -137,6 +146,7 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+     }
+     std::cout << "[Manus] SDK initialized successfully" << std::endl;
+ 
++    initialize_ergonomics_output();
+     RegisterCallbacks();
+ 
+     CoordinateSystemVUH t_VUH;
+@@ -156,5 +166,15 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+     std::cout << "[Manus] Coordinate system initialized successfully" << std::endl;
+ 
+     ConnectToGloves();
++
++    const char* openxr_enabled_env = std::getenv("ISAAC_TELEOP_MANUS_OPENXR_ENABLED");
++    const bool openxr_enabled = openxr_enabled_env == nullptr || std::string(openxr_enabled_env) != "0";
++    if (!openxr_enabled)
++    {
++        std::cout << "[Manus] OpenXR injection disabled; Ergonomics remains active" << std::endl;
++        std::lock_guard<std::mutex> lock(m_lifecycle_mutex);
++        m_initialized = true;
++        return;
++    }
+ 
+     std::string error_msg = "Unknown error";
+@@ -164,8 +184,7 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+     try
+     {
+         const char* wrist_source = std::getenv("ISAAC_TELEOP_MANUS_WRIST_SOURCE");
+-        const bool force_controller_wrist = wrist_source != nullptr &&
+-                                             std::string(wrist_source) == "controllers";
++        const bool force_controller_wrist = wrist_source != nullptr && std::string(wrist_source) == "controllers";
+         // Create ControllerTracker unconditionally; HandTracker requires
+         // XR_EXT_hand_tracking which is optional — only add it when the runtime
+         // advertises support so xrCreateInstance does not fail with
+@@ -173,8 +192,8 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+         m_controller_tracker = std::make_shared<core::ControllerTracker>();
+         std::vector<std::shared_ptr<core::ITracker>> trackers = { m_controller_tracker };
+ 
+-        const bool hand_tracking_supported = !force_controller_wrist &&
+-                                             is_openxr_extension_supported(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
++        const bool hand_tracking_supported =
++            !force_controller_wrist && is_openxr_extension_supported(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+         if (hand_tracking_supported)
+         {
+             m_hand_tracker = std::make_shared<core::HandTracker>();
+@@ -232,7 +251,8 @@ void ManusTracker::initialize(const std::string& app_name) noexcept(false)
+         if (force_controller_wrist)
+         {
+             std::cout << "[Manus] Controller wrist explicitly selected by "
+-                         "ISAAC_TELEOP_MANUS_WRIST_SOURCE" << std::endl;
++                         "ISAAC_TELEOP_MANUS_WRIST_SOURCE"
++                      << std::endl;
+         }
+ 
+         std::cout << "[Manus] Initialized with wrist source: " << (m_xdev_available ? "HandTracking" : "Controllers")
+@@ -266,12 +286,81 @@ void ManusTracker::shutdown_sdk()
+     CoreSdk_RegisterCallbackForErgonomicsStream(nullptr);
+     DisconnectFromGloves();
+     CoreSdk_ShutDown();
++    close_ergonomics_output();
+ }
+ 
+ void ManusTracker::RegisterCallbacks()
+ {
+     CoreSdk_RegisterCallbackForRawSkeletonStream(OnSkeletonStream);
+     CoreSdk_RegisterCallbackForLandscapeStream(OnLandscapeStream);
++    if (m_ergonomics_socket >= 0)
++    {
++        const auto result = CoreSdk_RegisterCallbackForErgonomicsStream(OnErgonomicsStream);
++        if (result != SDKReturnCode::SDKReturnCode_Success)
++        {
++            throw std::runtime_error("Failed to register MANUS Ergonomics callback, error code: " +
++                                     std::to_string(static_cast<int>(result)));
++        }
++    }
++}
++
++void ManusTracker::initialize_ergonomics_output()
++{
++    const char* destination = std::getenv("ISAAC_TELEOP_MANUS_ERGONOMICS_UDP");
++    if (destination == nullptr || std::string(destination).empty())
++    {
++        return;
++    }
++
++#if defined(__linux__)
++    const std::string value(destination);
++    const auto separator = value.rfind(':');
++    if (separator == std::string::npos)
++    {
++        throw std::runtime_error("ISAAC_TELEOP_MANUS_ERGONOMICS_UDP must be HOST:PORT");
++    }
++    m_ergonomics_host = value.substr(0, separator);
++    if (m_ergonomics_host == "localhost")
++    {
++        m_ergonomics_host = "127.0.0.1";
++    }
++    if (m_ergonomics_host != "127.0.0.1")
++    {
++        throw std::runtime_error("MANUS Ergonomics UDP destination must be loopback");
++    }
++    try
++    {
++        const auto port = std::stoul(value.substr(separator + 1));
++        if (port == 0 || port > 65535)
++        {
++            throw std::out_of_range("port");
++        }
++        m_ergonomics_port = static_cast<uint16_t>(port);
++    }
++    catch (const std::exception&)
++    {
++        throw std::runtime_error("MANUS Ergonomics UDP port is invalid");
++    }
++    m_ergonomics_socket = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
++    if (m_ergonomics_socket < 0)
++    {
++        throw std::runtime_error("Failed to create MANUS Ergonomics UDP socket");
++    }
++    std::cout << "[Manus] Ergonomics output enabled on " << m_ergonomics_host << ':' << m_ergonomics_port << std::endl;
++#else
++    throw std::runtime_error("MANUS Ergonomics UDP is currently supported on Linux only");
++#endif
++}
++
++void ManusTracker::close_ergonomics_output()
++{
++#if defined(__linux__)
++    if (m_ergonomics_socket >= 0)
++    {
++        close(m_ergonomics_socket);
++        m_ergonomics_socket = -1;
++    }
++#endif
+ }
+ 
+ void ManusTracker::ConnectToGloves() noexcept(false)
+@@ -482,6 +571,59 @@ void ManusTracker::OnLandscapeStream(const Landscape* landscape)
+     }
+ }
+ 
++void ManusTracker::OnErgonomicsStream(const ErgonomicsStream* ergonomics_stream)
++{
++    auto& tracker = instance();
++    std::lock_guard<std::mutex> instance_lock(tracker.m_lifecycle_mutex);
++    if (!tracker.m_initialized || tracker.m_ergonomics_socket < 0 || ergonomics_stream == nullptr)
++    {
++        return;
++    }
++
++#if defined(__linux__)
++    sockaddr_in destination{};
++    destination.sin_family = AF_INET;
++    destination.sin_port = htons(tracker.m_ergonomics_port);
++    if (inet_pton(AF_INET, tracker.m_ergonomics_host.c_str(), &destination.sin_addr) != 1)
++    {
++        return;
++    }
++
++    for (uint32_t i = 0; i < ergonomics_stream->dataCount; ++i)
++    {
++        const auto& ergonomics = ergonomics_stream->data[i];
++        if (ergonomics.isUserID)
++        {
++            continue;
++        }
++        bool is_left = false;
++        bool is_right = false;
++        {
++            std::lock_guard<std::mutex> landscape_lock(tracker.landscape_mutex);
++            is_left = tracker.left_glove_id && ergonomics.id == *tracker.left_glove_id;
++            is_right = tracker.right_glove_id && ergonomics.id == *tracker.right_glove_id;
++        }
++        if (!is_left && !is_right)
++        {
++            continue;
++        }
++        const auto first = static_cast<size_t>(is_left ? ErgonomicsDataType_LeftFingerThumbMCPSpread :
++                                                         ErgonomicsDataType_RightFingerThumbMCPSpread);
++        constexpr size_t kFieldsPerSide = 20;
++        std::ostringstream packet;
++        packet << "MANUS_ERGONOMICS_V1," << (is_left ? "left" : "right") << ',' << ergonomics.id << ','
++               << ergonomics_stream->publishTime.time << std::setprecision(9);
++        for (size_t field = 0; field < kFieldsPerSide; ++field)
++        {
++            packet << ',' << ergonomics.data[first + field];
++        }
++        const auto payload = packet.str();
++        sendto(tracker.m_ergonomics_socket, payload.data(), payload.size(), MSG_DONTWAIT,
++               reinterpret_cast<const sockaddr*>(&destination), sizeof(destination));
++    }
++#endif
++}
++
+ void ManusTracker::initialize_xdev_hand_trackers()
+ {
+     // Load XDev extension function pointers

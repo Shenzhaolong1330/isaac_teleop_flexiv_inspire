@@ -1,12 +1,12 @@
 from pathlib import Path
 
 import yaml
-
 from flexiv_inspire_control.manus_calibration import (
     build_calibration,
+    build_ergonomics_calibration,
+    summarize_ergonomics_samples,
     summarize_samples,
 )
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -56,10 +56,7 @@ def test_endpoint_captures_finalize_a_calibrated_file():
     assert result["calibration"]["open_samples"] == 10
     assert "channel_defaults" not in result
     assert "side_channels" not in result
-    assert (
-        result["sides"]["left"]["index"]
-        is not result["sides"]["right"]["index"]
-    )
+    assert result["sides"]["left"]["index"] is not result["sides"]["right"]["index"]
     assert (
         result["sides"]["left"]["index"]["source_open"]
         != result["sides"]["right"]["index"]["source_open"]
@@ -67,3 +64,45 @@ def test_endpoint_captures_finalize_a_calibrated_file():
     for side in ("left", "right"):
         for channel in result["sides"][side].values():
             assert channel["source_closed"] > channel["source_open"]
+
+
+def test_ergonomics_captures_finalize_a_schema_v2_mapping():
+    fields = {
+        "PinkyMCPStretch": 0.1,
+        "RingMCPStretch": 0.2,
+        "MiddleMCPStretch": 0.3,
+        "IndexMCPStretch": 0.4,
+        "ThumbMCPStretch": 0.5,
+        "ThumbMCPSpread": 0.6,
+    }
+    open_samples = {
+        side: [fields.copy() for _ in range(10)] for side in ("left", "right")
+    }
+    closed_fields = {name: value + 0.5 for name, value in fields.items()}
+    closed_samples = {
+        side: [closed_fields.copy() for _ in range(10)] for side in ("left", "right")
+    }
+    opened = summarize_ergonomics_samples(open_samples, "open")
+    closed = summarize_ergonomics_samples(closed_samples, "closed")
+    template = yaml.safe_load(
+        (
+            ROOT
+            / "ros2_ws/src/flexiv_inspire_control/config"
+            / "manus_ergonomics_calibration_template.yaml"
+        ).read_text()
+    )
+
+    result = build_ergonomics_calibration(template, opened, closed)
+
+    assert result["schema_version"] == 2
+    assert result["calibrated"] is True
+    assert result["source_format"] == "MANUS_SDK_ERGONOMICS_RADIANS"
+    assert result["calibration"]["open_samples"] == {
+        "left": 10,
+        "right": 10,
+    }
+    assert "side_channels" not in result
+    assert result["sides"]["left"]["index"]["points"] == [
+        [0.4, 1000.0],
+        [0.9, 0.0],
+    ]

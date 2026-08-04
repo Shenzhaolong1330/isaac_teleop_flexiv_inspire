@@ -15,6 +15,8 @@ setup(
                 "config/control_bridge.yaml",
                 "config/teleop.yaml",
                 "config/manus_calibration_template.yaml",
+                "config/manus_ergonomics_calibration_template.yaml",
+                "config/manus_ergonomics_bootstrap.yaml",
             ],
         ),
         (
@@ -35,6 +37,7 @@ setup(
             "home = flexiv_inspire_control.authorize_home:request_main",
             "zero_ft_local = flexiv_inspire_control.zero_ft_local:main",
             "teleop_input = flexiv_inspire_control.teleop_input_node:main",
+            "manus_ergonomics_source = flexiv_inspire_control.manus_ergonomics_source:main",
             "manus_calibrate = flexiv_inspire_control.manus_calibration:main",
         ],
     },

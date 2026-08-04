@@ -1,0 +1,24 @@
+# MANUS SDK Ergonomics (radians) to Inspire RH56 six-actuator template.
+# Run `flexiv-inspire-manus-calibrate capture-ergonomics` for open/closed,
+# then `finalize-ergonomics`; this template cannot command hands as-is.
+schema_version: 2
+calibrated: false
+source_format: MANUS_SDK_ERGONOMICS_RADIANS
+filter:
+  low_pass_alpha: 0.35
+  output_deadband: 2.0
+  max_output_rate_per_s: 3000.0
+
+side_channels: &side_channels
+  little: {source: PinkyMCPStretch, output_open: 1000, output_closed: 0}
+  ring: {source: RingMCPStretch, output_open: 1000, output_closed: 0}
+  middle: {source: MiddleMCPStretch, output_open: 1000, output_closed: 0}
+  index: {source: IndexMCPStretch, output_open: 1000, output_closed: 0}
+  thumb_bend: {source: ThumbMCPStretch, output_open: 1000, output_closed: 0}
+  thumb_rotate: {source: ThumbMCPSpread, output_open: 1000, output_closed: 0}
+
+sides:
+  left:
+    <<: *side_channels
+  right:
+    <<: *side_channels

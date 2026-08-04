@@ -38,10 +38,10 @@ a motion target; those actions require the corresponding Reset/control flow.
 ## Data and control path
 
 ```text
-Quest PoseArray + MANUS PoseArray
-              |
-              v
-teleop_input (SE(3) mapping + calibrated hand retargeting)
+Quest wrist position/orientation + MANUS SDK Ergonomics
+                    |
+                    v
+teleop_input (SE(3) wrist mapping + calibrated finger retargeting)
               |
               v
 teleop / policy / replay arbitration

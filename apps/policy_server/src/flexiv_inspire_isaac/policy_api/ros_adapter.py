@@ -15,10 +15,20 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
+
 from .broker import LatestActionBuffer, ObservationBroker, PolicyStreamLiveness
+from .channel_broker import (
+    ChannelBroker,
+    ChannelDataError,
+    SampleTiming,
+    image_sample,
+    tensor_sample,
+)
 from .lease import ControlLeaseManager, LocalControlState
 from .models import ActionChunk
 from .server import TlsFiles, serve
+from .system_schema import build_system_schema
 from .generated import policy_service_v1_pb2 as pb
 from flexiv_inspire_isaac.dftp.protocol import TACTILE_LAYOUT, TOTAL_TAXELS
 from isaac_teleop_core.command import ROTATION_ORDER
@@ -58,6 +68,45 @@ def _metadata(acquisition: Any | None, *, now_ns: int | None = None) -> pb.Timed
         sequence=int(acquisition.source_sequence),
         valid=valid,
         age_ns=age_ns,
+        invalid_reason=reason,
+        source_clock_domain=str(acquisition.source_clock_domain),
+        host_clock_domain=str(acquisition.host_clock_domain),
+        timing_valid=timing_valid,
+    )
+
+
+def _sample_timing(acquisition: Any, *, now_ns: int | None = None) -> SampleTiming:
+    snapshot_ns = time.monotonic_ns() if now_ns is None else now_ns
+    if acquisition is None:
+        return SampleTiming(
+            source_time_ns=0,
+            host_receive_time_ns=snapshot_ns,
+            mapped_host_time_ns=0,
+            acquisition_start_ns=0,
+            acquisition_end_ns=0,
+            sequence=0,
+            valid=False,
+            invalid_reason="observation-not-yet-received",
+            source_clock_domain="",
+            host_clock_domain="host_monotonic",
+            timing_valid=False,
+        )
+    mapped_ns = _time_ns(acquisition.mapped_host_time)
+    timing_valid = bool(acquisition.timing_valid) and mapped_ns > 0
+    reason = str(acquisition.invalid_reason)
+    if not timing_valid:
+        reason = ";".join(filter(None, (reason, "source-clock-unmapped")))
+    elif mapped_ns > snapshot_ns:
+        timing_valid = False
+        reason = ";".join(filter(None, (reason, "mapped-source-after-receive")))
+    return SampleTiming(
+        source_time_ns=_time_ns(acquisition.source_time),
+        host_receive_time_ns=_time_ns(acquisition.host_receive_time),
+        mapped_host_time_ns=mapped_ns,
+        acquisition_start_ns=_time_ns(acquisition.acquisition_start),
+        acquisition_end_ns=_time_ns(acquisition.acquisition_end),
+        sequence=int(acquisition.source_sequence),
+        valid=bool(acquisition.valid) and timing_valid,
         invalid_reason=reason,
         source_clock_domain=str(acquisition.source_clock_domain),
         host_clock_domain=str(acquisition.host_clock_domain),
@@ -257,6 +306,7 @@ def build_ros_node(
     grpc_loop,
     lease_manager: ControlLeaseManager,
     action_liveness: PolicyStreamLiveness,
+    channel_broker: ChannelBroker | None = None,
 ):
     import rclpy
     from rclpy.node import Node
@@ -276,6 +326,8 @@ def build_ros_node(
             self._grpc_loop = grpc_loop
             self._lease_manager = lease_manager
             self._action_liveness = action_liveness
+            self._channel_broker = channel_broker
+            self._channel_futures: set[Any] = set()
             self._command_pub = self.create_publisher(
                 BimanualCommand, "/command_sources/policy/command", 1
             )
@@ -287,24 +339,24 @@ def build_ros_node(
             for side in ("left", "right"):
                 self.create_subscription(
                     ArmState, f"/robot/{side}_arm/state",
-                    lambda msg, selected=side: self._store("arms", selected, msg),
+                    lambda msg, selected=side: self._on_arm(selected, msg),
                     qos_profile_sensor_data,
                 )
                 self.create_subscription(
                     HandState, f"/robot/{side}_hand/state",
-                    lambda msg, selected=side: self._store("hands", selected, msg),
+                    lambda msg, selected=side: self._on_hand(selected, msg),
                     qos_profile_sensor_data,
                 )
                 self.create_subscription(
                     TactileFrame, f"/robot/{side}_hand/tactile_raw",
-                    lambda msg, selected=side: self._store("tactile", selected, msg),
+                    lambda msg, selected=side: self._on_tactile(selected, msg),
                     qos_profile_sensor_data,
                 )
             for camera in ("head", "left_wrist", "right_wrist"):
                 root = f"/camera/{camera}/color"
                 self.create_subscription(
                     CameraFrame, f"{root}/frame",
-                    lambda msg, selected=camera: self._store("camera_frames", selected, msg),
+                    lambda msg, selected=camera: self._on_camera(selected, msg),
                     qos_profile_sensor_data,
                 )
             self.create_timer(1.0 / 30.0, self._publish_observation)
@@ -314,6 +366,138 @@ def build_ros_node(
         def _store(self, collection: str, key: str, message: Any) -> None:
             with shared.lock:
                 getattr(shared.snapshot, collection)[key] = message
+
+        def _submit_channel_samples(self, samples) -> None:
+            if self._channel_broker is None:
+                return
+            try:
+                materialized = tuple(samples)
+            except ChannelDataError as exc:
+                self.get_logger().warning(f"PolicyData v2 sample rejected: {exc}")
+                return
+            future = asyncio.run_coroutine_threadsafe(
+                self._channel_broker.publish_many(materialized), self._grpc_loop
+            )
+            self._channel_futures.add(future)
+
+            def completed(item) -> None:
+                self._channel_futures.discard(item)
+                try:
+                    item.result()
+                except Exception as exc:  # noqa: BLE001
+                    self.get_logger().warning(f"PolicyData v2 publish failed: {exc}")
+
+            future.add_done_callback(completed)
+
+        def _on_arm(self, side: str, message: Any) -> None:
+            self._store("arms", side, message)
+            if self._channel_broker is None:
+                return
+            timing = _sample_timing(message.acquisition)
+            pose = message.tcp_pose
+            twist = message.tcp_twist
+            samples = []
+            values_by_suffix = {
+                "q": message.q,
+                "dq": message.dq,
+                "tau_ext": message.tau_ext,
+                "tcp_pose": (
+                    pose.position.x, pose.position.y, pose.position.z,
+                    pose.orientation.x, pose.orientation.y,
+                    pose.orientation.z, pose.orientation.w,
+                ),
+                "tcp_twist": (
+                    twist.linear.x, twist.linear.y, twist.linear.z,
+                    twist.angular.x, twist.angular.y, twist.angular.z,
+                ),
+                "raw_ft": _wrench(message.raw_ft),
+                "tcp_wrench": _wrench(message.tcp_wrench),
+            }
+            try:
+                for suffix, values in values_by_suffix.items():
+                    channel_id = f"arm.{side}.{suffix}"
+                    samples.append(
+                        tensor_sample(
+                            channel_id,
+                            values,
+                            timing,
+                            self._channel_broker.descriptor(channel_id),
+                        )
+                    )
+            except ChannelDataError as exc:
+                self.get_logger().warning(f"PolicyData v2 {side} arm rejected: {exc}")
+                return
+            self._submit_channel_samples(samples)
+
+        def _on_hand(self, side: str, message: Any) -> None:
+            self._store("hands", side, message)
+            if self._channel_broker is None:
+                return
+            timing = _sample_timing(message.acquisition)
+            samples = []
+            try:
+                for suffix, values in (
+                    ("angle", message.angle),
+                    ("actual_force", message.actual_force),
+                ):
+                    channel_id = f"hand.{side}.{suffix}"
+                    samples.append(
+                        tensor_sample(
+                            channel_id,
+                            values,
+                            timing,
+                            self._channel_broker.descriptor(channel_id),
+                        )
+                    )
+            except ChannelDataError as exc:
+                self.get_logger().warning(f"PolicyData v2 {side} hand rejected: {exc}")
+                return
+            self._submit_channel_samples(samples)
+
+        def _on_tactile(self, side: str, message: Any) -> None:
+            self._store("tactile", side, message)
+            if self._channel_broker is None:
+                return
+            channel_id = f"hand.{side}.tactile"
+            values = np.asarray(
+                [taxel for surface in message.surfaces for taxel in surface.taxels],
+                dtype=np.uint16,
+            )
+            try:
+                sample = tensor_sample(
+                    channel_id,
+                    values,
+                    _sample_timing(message.acquisition),
+                    self._channel_broker.descriptor(channel_id),
+                )
+            except ChannelDataError as exc:
+                self.get_logger().warning(f"PolicyData v2 {side} tactile rejected: {exc}")
+                return
+            self._submit_channel_samples((sample,))
+
+        def _on_camera(self, camera: str, message: Any) -> None:
+            self._store("camera_frames", camera, message)
+            if self._channel_broker is None:
+                return
+            image = message.image
+            encoding = str(image.format).lower()
+            if encoding.startswith("jpeg"):
+                encoding = "jpeg"
+            channel_id = f"camera.{camera}.rgb"
+            try:
+                sample = image_sample(
+                    channel_id,
+                    bytes(image.data),
+                    encoding=encoding,
+                    width=int(message.width),
+                    height=int(message.height),
+                    channels=3,
+                    timing=_sample_timing(message.acquisition),
+                )
+            except ChannelDataError as exc:
+                self.get_logger().warning(f"PolicyData v2 {camera} image rejected: {exc}")
+                return
+            self._submit_channel_samples((sample,))
 
         def _on_control(self, message: Any) -> None:
             with shared.lock:
@@ -448,6 +632,11 @@ def _parse_args(argv=None):
     parser.add_argument("--server-cert", type=Path, required=True)
     parser.add_argument("--server-key", type=Path, required=True)
     parser.add_argument("--client-ca", type=Path)
+    parser.add_argument("--arm-rate-hz", type=float, default=300.0)
+    parser.add_argument("--hand-rate-hz", type=float, default=15.0)
+    parser.add_argument("--tactile-rate-hz", type=float, default=15.0)
+    parser.add_argument("--camera-rate-hz", type=float, default=15.0)
+    parser.add_argument("--action-rate-hz", type=float, default=30.0)
     return parser.parse_args(argv)
 
 
@@ -463,9 +652,23 @@ def main(argv=None) -> int:
         shared = SharedRosState()
         lease = ControlLeaseManager()
         action_liveness = PolicyStreamLiveness()
+        system_schema = build_system_schema(
+            arm_rate_hz=options.arm_rate_hz,
+            hand_rate_hz=options.hand_rate_hz,
+            tactile_rate_hz=options.tactile_rate_hz,
+            camera_rate_hz=options.camera_rate_hz,
+            action_rate_hz=options.action_rate_hz,
+        )
+        channel_broker = ChannelBroker(system_schema)
         rclpy.init(args=None)
         node = build_ros_node(
-            shared, broker, actions, loop, lease, action_liveness
+            shared,
+            broker,
+            actions,
+            loop,
+            lease,
+            action_liveness,
+            channel_broker,
         )
         executor = MultiThreadedExecutor(num_threads=2)
         executor.add_node(node)
@@ -482,6 +685,8 @@ def main(argv=None) -> int:
                 action_buffer=actions,
                 stop_callback=node.request_safe_stop,
                 action_liveness=action_liveness,
+                channel_broker=channel_broker,
+                system_schema=system_schema,
             )
         finally:
             executor.shutdown(timeout_sec=2.0)

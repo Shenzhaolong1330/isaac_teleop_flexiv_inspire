@@ -1,14 +1,10 @@
-# PolicyService v1
+# PolicyService v1 and PolicyDataService v2
 
-`libs/rpc_interfaces/proto/policy_service_v1.proto` is the only canonical schema. Generate
-the Python bindings inside `envs/ros-py312`:
+The canonical schemas are in `libs/rpc_interfaces/proto`. Generate both sets
+of Python bindings inside `envs/ros-py312` with:
 
 ```bash
-python -m grpc_tools.protoc \
-  -I libs/rpc_interfaces/proto \
-  --python_out=apps/policy_server/src/flexiv_inspire_isaac/policy_api/generated \
-  --grpc_python_out=apps/policy_server/src/flexiv_inspire_isaac/policy_api/generated \
-  libs/rpc_interfaces/proto/policy_service_v1.proto
+./scripts/generate_protos.sh
 ```
 
 The server always uses TLS. Binding outside loopback additionally requires a
@@ -20,3 +16,23 @@ robot enable, or local arming.
 Client monotonic clocks are diagnostic only. TTL starts at server receipt and
 each action point uses a relative `execute_after_s`, so clocks on different
 machines are never compared.
+
+PolicyDataService v2 is additive and served on the same TLS port. Read-only
+`DescribeSystem`, `SubscribeSamples` and `GetSnapshot` do not acquire a motion
+lease. Each channel carries source/mapped/receive timing outside its tensor;
+clients should open separate subscriptions for high-rate state and images to
+avoid transport head-of-line blocking. `INTERPOLATE` is limited to floating
+numeric channels and uses quaternion SLERP for `tcp_pose`.
+
+Smoke the real wire path after starting the policy server:
+
+```bash
+flexiv-inspire-policy-data-smoke \
+  --server-ca certs/server.crt \
+  --duration 10 \
+  --subscribe arm.left.q=200 \
+  --subscribe camera.head.rgb=15
+```
+
+The v2 action method remains subject to the same v1 lease, local authorization,
+pedal, TTL and stop authority. Neither version exposes Enable, Home or F/T zero.

@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+package flexiv.inspire.policy.v2;
+
+// Additive multi-rate data plane. PolicyService v1 remains wire-compatible.
+service PolicyDataService {
+  rpc DescribeSystem(DescribeSystemRequest) returns (SystemDescription);
+  rpc SubscribeSamples(SubscribeRequest) returns (stream SampleEnvelope);
+  rpc GetSnapshot(SnapshotRequest) returns (Snapshot);
+  rpc StreamActions(stream PolicyActionChunk) returns (stream PolicyActionResult);
+}
+
+enum DataType {
+  DATA_TYPE_UNSPECIFIED = 0;
+  BOOL = 1;
+  UINT8 = 2;
+  UINT16 = 3;
+  UINT32 = 4;
+  UINT64 = 5;
+  INT8 = 6;
+  INT16 = 7;
+  INT32 = 8;
+  INT64 = 9;
+  FLOAT16 = 10;
+  FLOAT32 = 11;
+  FLOAT64 = 12;
+  BYTES = 13;
+}
+
+enum DropPolicy {
+  DROP_POLICY_UNSPECIFIED = 0;
+  DROP_OLDEST = 1;
+  RELIABLE = 2;
+}
+
+enum AlignmentMode {
+  ALIGNMENT_MODE_UNSPECIFIED = 0;
+  LATEST_CAUSAL = 1;
+  NEAREST = 2;
+  INTERPOLATE = 3;
+}
+
+message TensorDescriptor {
+  DataType dtype = 1;
+  repeated uint32 shape = 2;
+  repeated string element_names = 3;
+  string unit = 4;
+}
+
+message ChannelDescriptor {
+  string channel_id = 1;
+  string semantic = 2;
+  TensorDescriptor tensor = 3;
+  double native_rate_hz = 4;
+  string frame_id = 5;
+  string clock_domain = 6;
+  repeated string encodings = 7;
+}
+
+message ActionSchemaDescriptor {
+  string schema_id = 1;
+  TensorDescriptor tensor = 2;
+  string frame_id = 3;
+  string representation = 4;
+  double rate_hz = 5;
+  bool relative = 6;
+}
+
+message DescribeSystemRequest {}
+
+message SystemDescription {
+  uint32 schema_version = 1;
+  string schema_hash = 2;
+  string system_id = 3;
+  string robot_type = 4;
+  string session_id = 5;
+  string control_state = 6;
+  repeated ChannelDescriptor channels = 7;
+  repeated ActionSchemaDescriptor action_schemas = 8;
+  map<string, string> metadata = 9;
+}
+
+message SampleMetadata {
+  uint64 source_time_ns = 1;
+  uint64 host_receive_time_ns = 2;
+  uint64 mapped_host_time_ns = 3;
+  uint64 acquisition_start_ns = 4;
+  uint64 acquisition_end_ns = 5;
+  uint64 sequence = 6;
+  bool valid = 7;
+  uint64 age_ns = 8;
+  string invalid_reason = 9;
+  string source_clock_domain = 10;
+  string host_clock_domain = 11;
+  bool timing_valid = 12;
+}
+
+message TensorPayload {
+  DataType dtype = 1;
+  repeated uint32 shape = 2;
+  // Little-endian contiguous C-order bytes.
+  bytes data = 3;
+}
+
+message ImagePayload {
+  string encoding = 1;
+  bytes data = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  uint32 channels = 5;
+}
+
+message SampleEnvelope {
+  uint32 schema_version = 1;
+  string schema_hash = 2;
+  string channel_id = 3;
+  SampleMetadata timing = 4;
+  oneof payload {
+    TensorPayload tensor = 5;
+    ImagePayload image = 6;
+  }
+}
+
+message ChannelSubscription {
+  string channel_id = 1;
+  double max_rate_hz = 2;
+  DropPolicy drop_policy = 3;
+}
+
+message SubscribeRequest {
+  string client_id = 1;
+  string expected_schema_hash = 2;
+  string expected_session_id = 3;
+  repeated ChannelSubscription channels = 4;
+}
+
+message SnapshotChannelRequest {
+  string channel_id = 1;
+  AlignmentMode alignment = 2;
+  uint64 tolerance_ns = 3;
+  uint64 max_age_ns = 4;
+}
+
+message SnapshotRequest {
+  string expected_schema_hash = 1;
+  string expected_session_id = 2;
+  // Zero means server host-monotonic now.
+  uint64 target_monotonic_ns = 3;
+  repeated SnapshotChannelRequest channels = 4;
+}
+
+message Snapshot {
+  uint32 schema_version = 1;
+  string schema_hash = 2;
+  string session_id = 3;
+  uint64 target_monotonic_ns = 4;
+  repeated SampleEnvelope samples = 5;
+  bool complete = 6;
+  repeated string errors = 7;
+}
+
+message PolicyActionPoint {
+  uint64 execute_after_ns = 1;
+  TensorPayload action = 2;
+}
+
+message PolicyActionChunk {
+  uint32 schema_version = 1;
+  string schema_hash = 2;
+  string action_schema_id = 3;
+  string lease_id = 4;
+  string session_id = 5;
+  uint64 sequence = 6;
+  uint64 client_issued_monotonic_ns = 7;
+  uint64 ttl_from_server_receive_ns = 8;
+  bool deadman = 9;
+  repeated PolicyActionPoint points = 10;
+}
+
+message PolicyActionResult {
+  uint64 sequence = 1;
+  bool accepted = 2;
+  string reason = 3;
+  string control_state = 4;
+}

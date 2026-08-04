@@ -13,6 +13,9 @@ from typing import Callable
 from .broker import LatestActionBuffer, ObservationBroker, PolicyStreamLiveness
 from .lease import ControlLeaseManager, LocalControlState
 from .models import ActionChunk, ActionPoint, capabilities_v1, validate_action_chunk
+from .channel_broker import ChannelBroker
+from .data_server import add_policy_data_servicer
+from policy_contracts import SystemSchema
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,8 @@ async def serve(
     action_buffer: LatestActionBuffer[ActionChunk],
     stop_callback: Callable[[str], None],
     action_liveness: PolicyStreamLiveness | None = None,
+    channel_broker: ChannelBroker | None = None,
+    system_schema: SystemSchema | None = None,
 ) -> None:
     import grpc
     from .generated import policy_service_v1_pb2 as pb
@@ -261,6 +266,15 @@ async def serve(
         ]
     )
     pb_grpc.add_PolicyServiceServicer_to_server(Servicer(), server)
+    if (channel_broker is None) != (system_schema is None):
+        raise ValueError("channel_broker and system_schema must be configured together")
+    if channel_broker is not None and system_schema is not None:
+        add_policy_data_servicer(
+            server,
+            schema=system_schema,
+            broker=channel_broker,
+            local_state=local_state,
+        )
     bound_port = server.add_secure_port(f"{bind_host}:{port}", credentials)
     if bound_port == 0:
         raise RuntimeError(f"failed to bind PolicyService on {bind_host}:{port}")

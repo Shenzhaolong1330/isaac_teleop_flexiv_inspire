@@ -111,6 +111,38 @@ def test_deviceio_is_bypassed_when_no_foreground_recorder_exists(tmp_path) -> No
     )
 
 
+def test_pedal_release_acknowledges_replay_deadman_for_later_home() -> None:
+    arbiter = ControlArbiter()
+    arbiter.begin_hardware_session("session")
+    arbiter.mark_ft_zeroed(session_id="session", connection_generation=1)
+    arbiter.declare_ready(connection_generation=1)
+    arbiter.update_gates(
+        GateInputs(
+            local_permission=True,
+            physical_pedal=True,
+            arms_online=True,
+            hands_online=True,
+            limits_ok=True,
+            collision_clear=True,
+        )
+    )
+    arbiter.arm(CommandSource.REPLAY)
+    arbiter.stop()
+
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._arbiter = arbiter
+    bridge._physical_pedal = True
+    bridge._chunk_lock = threading.Lock()
+    bridge._chunk_generation = 0
+    bridge._update_gates = lambda _now: None
+    bridge._publish_control_state = lambda: None
+    bridge._send_hold_once = lambda _reason: None
+
+    bridge._on_pedal_state(False)
+    arbiter.clear_hold(local_acknowledged=True)
+    assert arbiter.snapshot.state is ControlState.READY
+
+
 def test_daemon_clutch_hold_is_not_classified_as_hardware_fault() -> None:
     assert ControlBridge._routine_daemon_hold_reason(
         RuntimeError(

@@ -1197,6 +1197,14 @@ class ControlBridge(Node):
     def _on_pedal_state(self, pressed: bool) -> None:
         self._physical_pedal = pressed
         if not pressed:
+            # A physical clutch release is the deadman release for every
+            # local source, including replay (which has no neutral command
+            # stream like Quest teleop). Without this acknowledgement a
+            # failed replay can strand the next Reset/Home behind its old
+            # source latch.
+            active_source = self._arbiter.snapshot.active_source
+            if active_source is not None:
+                self._arbiter.observe_deadman_released(active_source)
             # Cancel every scheduled/in-flight chunk before issuing the
             # measured hardware hold. A fresh press will rebase from the
             # latest observation and start a new command generation.

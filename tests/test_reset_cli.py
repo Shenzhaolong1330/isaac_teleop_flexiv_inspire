@@ -212,6 +212,7 @@ def test_replay_automatically_prepares_rdk_and_ros_stack(tmp_path, monkeypatch):
         lambda config, args: prepared.append((config, args.preview_seconds)) or 0,
     )
     monkeypatch.setattr(cli, "_start_replay_pedal_router", lambda config: [])
+    monkeypatch.setattr(cli, "_publish_replay_deadman_release", lambda: None)
     replay_module = ModuleType("flexiv_inspire_isaac.replay")
     replay_module.main = lambda argv: 23
     monkeypatch.setitem(sys.modules, replay_module.__name__, replay_module)
@@ -222,9 +223,8 @@ def test_replay_automatically_prepares_rdk_and_ros_stack(tmp_path, monkeypatch):
     result = cli._main(SimpleNamespace(operation="replay"), config)
 
     assert result == 23
-    assert len(prepared) == 1
-    assert prepared[0][0] is config
-    assert prepared[0][1] == 0.0
+    assert len(prepared) == 2
+    assert all(item[0] is config and item[1] == 0.0 for item in prepared)
 
 
 def test_manus_startup_reports_valid_bimanual_retargeting(tmp_path):

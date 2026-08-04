@@ -1706,6 +1706,37 @@ def _start_replay_pedal_router(config) -> list[subprocess.Popen]:
     return processes
 
 
+def _publish_replay_deadman_release() -> None:
+    """Deliver a clutch-release edge before standalone replay cleanup."""
+
+    try:
+        import rclpy
+        from rclpy.qos import QoSProfile, ReliabilityPolicy
+        from std_msgs.msg import Bool
+
+        rclpy.init()
+        node = rclpy.create_node("flexiv_inspire_replay_cleanup")
+        publisher = node.create_publisher(
+            Bool, "/teleop/deadman", QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
+        )
+        try:
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and publisher.get_subscription_count() < 1:
+                rclpy.spin_once(node, timeout_sec=0.05)
+            message = Bool()
+            message.data = False
+            for _ in range(3):
+                publisher.publish(message)
+                rclpy.spin_once(node, timeout_sec=0.05)
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
+    except Exception as exc:
+        # Reset below remains the recovery authority if ROS was already torn
+        # down unexpectedly. Keep this best-effort release non-fatal.
+        print(f"Replay 清理：踏板释放通知未确认（将继续 Reset）：{exc}", flush=True)
+
+
 def _run_replay(config) -> int:
     """Prepare the local stack and run one foreground hardware replay."""
 
@@ -1718,14 +1749,25 @@ def _run_replay(config) -> int:
     if reset_result != 0:
         raise SystemExit(f"Replay 自动准备失败，Reset 退出码 {reset_result}")
     pedal_processes = _start_replay_pedal_router(config)
+    replay_started = False
     try:
         print("Replay: 真机准备完成，开始校验并回放选中的 episode", flush=True)
         from .replay import main as replay_main
 
+        replay_started = True
         return replay_main([])
     finally:
         if pedal_processes:
             _stop_started_processes(pedal_processes)
+        _publish_replay_deadman_release()
+        if replay_started:
+            print("Replay 已结束，正在自动 Reset（F/T -> Home -> 双手张开）", flush=True)
+            try:
+                recovery = _run_reset(config, argparse.Namespace(preview_seconds=0.0))
+                if recovery != 0:
+                    print(f"Replay 收尾 Reset 失败，退出码 {recovery}", flush=True)
+            except BaseException as exc:
+                print(f"Replay 收尾 Reset 失败：{exc}", flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

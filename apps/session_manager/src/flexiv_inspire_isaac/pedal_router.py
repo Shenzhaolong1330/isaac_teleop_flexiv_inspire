@@ -77,7 +77,13 @@ class PedalRouter(Node):
     def _publish_deadman(self) -> None:
         message = Bool()
         message.data = self._enabled
-        self._deadman_publisher.publish(message)
+        try:
+            self._deadman_publisher.publish(message)
+        except Exception:
+            # Process teardown may race with the evdev worker's final
+            # release edge. The CLI sends an explicit release before it
+            # terminates a standalone replay router.
+            return
 
     def _on_event(self, event: PedalEvent) -> None:
         if not event.pressed:
@@ -96,6 +102,11 @@ class PedalRouter(Node):
         self.get_logger().info(label)
 
     def destroy_node(self) -> bool:
+        # Publish the release while the ROS context is still alive; otherwise
+        # a killed foreground replay can leave the control bridge believing
+        # that the clutch remains pressed.
+        self._enabled = False
+        self._publish_deadman()
         self._pedal.close()
         return super().destroy_node()
 

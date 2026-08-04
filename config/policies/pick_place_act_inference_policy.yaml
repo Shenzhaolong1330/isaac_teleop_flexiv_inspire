@@ -1,0 +1,34 @@
+# Inference configuration for checkpoints produced by
+# pick_place_act_train.yaml. Architecture fields must remain identical to the
+# training policy; inference-only queueing may differ.
+pretrained_path: null
+device: cuda
+use_amp: false
+n_obs_steps: 1
+chunk_size: 15
+n_action_steps: 1
+
+normalization_mapping:
+  VISUAL: MEAN_STD
+  STATE: MEAN_STD
+  ACTION: MEAN_STD
+
+vision_backbone: resnet18
+pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
+replace_final_stride_with_dilation: false
+
+pre_norm: false
+dim_model: 512
+n_heads: 8
+dim_feedforward: 3200
+feedforward_activation: relu
+n_encoder_layers: 4
+n_decoder_layers: 1
+
+use_vae: true
+latent_dim: 32
+n_vae_encoder_layers: 4
+
+# Predict every 15 Hz step and temporally ensemble overlapping action chunks.
+temporal_ensemble_coeff: 0.03
+push_to_hub: false

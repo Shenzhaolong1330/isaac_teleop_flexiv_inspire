@@ -789,6 +789,7 @@ class ControlBridge(Node):
                 received_monotonic_ns=receive_ns,
             )
             self._validate_hand_targets(command)
+            self._prepare_direct_policy_control(source, receive_ns)
             self._update_gates(receive_ns)
             self._arbiter.submit(command, now_monotonic_ns=receive_ns)
         except Exception as exc:
@@ -815,6 +816,85 @@ class ControlBridge(Node):
             daemon=True,
             name=f"command-chunk-{source.value}-{command.sequence}",
         ).start()
+
+    def _prepare_direct_policy_control(
+        self, source: CommandSource, now_monotonic_ns: int
+    ) -> None:
+        """Make a pedal-free policy action the control authorization event.
+
+        In direct policy mode the caller should only have to send an action.
+        This method translates that action into the local daemon token and
+        bridge arming transitions that are still useful for process ownership,
+        without exposing them as a separate operator workflow.
+        """
+
+        if source is not CommandSource.POLICY or bool(
+            self.get_parameter("policy_pedal_required").value
+        ):
+            return
+
+        snapshot = self._arbiter.snapshot
+        if (
+            snapshot.active_source is CommandSource.POLICY
+            and snapshot.state
+            in {ControlState.POLICY_ARMED, ControlState.ACTIVE}
+        ):
+            return
+        if snapshot.state is ControlState.FAULT:
+            raise RuntimeError("policy action cannot recover a robot hardware fault")
+        if snapshot.state not in {ControlState.READY, ControlState.HOLD_LATCHED}:
+            raise RuntimeError(
+                f"policy action cannot start from {snapshot.state.value}"
+            )
+
+        # Complete any prior watchdog/TTL hold before asking the daemon to
+        # rebuild its measured Cartesian anchor.  This is synchronous only on
+        # the first action after READY/HOLD; steady-state actions do not enter
+        # this path.
+        if snapshot.state is ControlState.HOLD_LATCHED:
+            self._send_hold_once(snapshot.hold_reason.value)
+
+        with self._hardware_command_lock:
+            kind, response = self._ipc_command.request(
+                "authorize_control",
+                {
+                    "session_id": self._session_id,
+                    "source": CommandSource.POLICY.value,
+                    "operator_confirmation": "FLEXIV-CONTROL-ARM",
+                    # After Reset/F-T zero the daemon intentionally retains a
+                    # control_rearm_required latch even though the ROS bridge
+                    # is READY. Always clear/re-anchor it on first action.
+                    "clear_hold_latched": True,
+                },
+                timeout_s=5.0,
+            )
+        if kind != "authorize_control_result" or not response.get(
+            "authorized", False
+        ):
+            raise RuntimeError(response.get("reason", kind))
+        token = str(response.get("one_time_token", ""))
+        expires = int(response.get("expires_monotonic_ns", "0"))
+        if not token or expires <= now_monotonic_ns:
+            raise RuntimeError("daemon returned an invalid policy control token")
+
+        if snapshot.state is ControlState.HOLD_LATCHED:
+            self._arbiter.observe_deadman_released(CommandSource.POLICY)
+            self._arbiter.clear_hold(local_acknowledged=True)
+
+        with self._state_lock:
+            self._local_permission = True
+            self._pending_arm_source = CommandSource.POLICY
+            self._pending_arm_token = token
+            self._pending_arm_token_expiry_ns = expires
+            self._rdk_control_lease_active = False
+            self._hold_sent_for_latch = False
+
+        self._update_gates(now_monotonic_ns)
+        if self._arbiter.snapshot.state is not ControlState.READY:
+            raise RuntimeError("policy action could not return bridge to READY")
+        if not self._gates_allow_arm(self._last_gate_inputs):
+            raise RuntimeError("robot hardware is not ready for policy action")
+        self._arbiter.arm(CommandSource.POLICY)
 
     def _execute_chunk(
         self,
@@ -1700,11 +1780,18 @@ class ControlBridge(Node):
         practical_mode = not bool(
             self.get_parameter("software_safety_limits_enabled").value
         )
+        snapshot = getattr(self._arbiter, "snapshot", None)
+        direct_policy = not bool(
+            self.get_parameter("policy_pedal_required").value
+        ) and (
+            getattr(self, "_pending_arm_source", None) is CommandSource.POLICY
+            or getattr(snapshot, "active_source", None) is CommandSource.POLICY
+        )
         hands_online = all(
             self._hand_connected[side]
             and now - self._last_hand_observation_ns[side] <= 200_000_000
             for side in ("left", "right")
-        )
+        ) or direct_policy
         arms_online = all(
             self._last_arm_observation_ns[side] > 0
             and now - self._last_arm_observation_ns[side] <= 100_000_000

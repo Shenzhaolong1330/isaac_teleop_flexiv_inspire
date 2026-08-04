@@ -138,13 +138,25 @@ def test_one_second_chunk_keeps_policy_heartbeat_alive_until_lease_or_gate_loss(
         sequence=8,
         action_deadline_ns=2_500_000_000,
     )
+    # Direct policy mode does not use the pedal/pre-armed state as a second
+    # action gate. Actual arm availability still terminates liveness.
     assert policy_heartbeat_sequence(
-        liveness, manager, local_state(pedal_valid=False)
+        liveness,
+        manager,
+        local_state(
+            pedal_valid=False,
+            local_policy_authorized=False,
+            hands_online=False,
+        ),
+    ) == 8
+    assert liveness.current() is not None
+    assert policy_heartbeat_sequence(
+        liveness, manager, local_state(arms_online=False)
     ) is None
     assert liveness.current() is None
 
 
-def test_remote_lease_requires_every_local_gate_and_is_single_owner():
+def test_policy_lease_is_action_driven_and_is_single_owner():
     now = [1_000_000]
     manager = ControlLeaseManager(clock_ns=lambda: now[0])
     with pytest.raises(PermissionError):
@@ -158,7 +170,12 @@ def test_remote_lease_requires_every_local_gate_and_is_single_owner():
         client_id="a",
         peer="peer-a",
         requested_ms=1000,
-        local_state=local_state(),
+        local_state=local_state(
+            state="READY",
+            local_policy_authorized=False,
+            pedal_valid=False,
+            hands_online=False,
+        ),
     )
     with pytest.raises(PermissionError):
         manager.acquire(

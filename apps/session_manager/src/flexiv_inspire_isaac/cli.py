@@ -2086,16 +2086,22 @@ def _main(args, config) -> int:
                         "require_pedal"
                     ]
                 )
-                authorizer = _PolicyAuthorizationSupervisor(
-                    config,
-                    rdk_socket,
-                    require_pedal=policy_pedal_required,
-                )
-                authorization_status = (
-                    "中踏板踩下时自动授权 policy；松开停止，再踩自动恢复"
-                    if policy_pedal_required
-                    else "Policy 直连模式：无需中踏板，客户端动作直接下发"
-                )
+                if policy_pedal_required:
+                    authorizer = _PolicyAuthorizationSupervisor(
+                        config,
+                        rdk_socket,
+                        require_pedal=True,
+                    )
+                    authorization_status = (
+                        "中踏板踩下时自动授权 policy；松开停止，再踩自动恢复"
+                    )
+                else:
+                    # Direct policy mode is action-driven inside the control
+                    # bridge.  Running the legacy periodic authorizer here
+                    # races that path and can invalidate its one-shot token.
+                    authorization_status = (
+                        "Policy 直连模式：无需中踏板，收到客户端动作即执行"
+                    )
             else:
                 authorization_status = (
                     "未启用自动授权；--no-reset 仅用于 shadow/只读诊断"

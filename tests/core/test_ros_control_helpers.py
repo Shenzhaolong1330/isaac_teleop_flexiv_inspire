@@ -568,6 +568,61 @@ def test_policy_direct_authorization_arms_without_physical_pedal() -> None:
     assert bridge._arbiter.snapshot.state is ControlState.POLICY_ARMED
 
 
+def test_first_direct_policy_action_authorizes_and_arms_itself() -> None:
+    class IPC:
+        calls = []
+
+        def request(self, kind, payload, *, timeout_s=None):
+            self.calls.append((kind, payload, timeout_s))
+            return "authorize_control_result", {
+                "authorized": True,
+                "one_time_token": "direct-token",
+                "expires_monotonic_ns": str(time.monotonic_ns() + 1_000_000_000),
+            }
+
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._hardware_command_lock = threading.Lock()
+    bridge._session_id = "session"
+    bridge._arbiter = ControlArbiter()
+    bridge._arbiter.begin_hardware_session("session")
+    bridge._arbiter.mark_ft_zeroed(session_id="session", connection_generation=1)
+    bridge._arbiter.declare_ready(connection_generation=1)
+    bridge._local_permission = False
+    bridge._physical_pedal = False
+    bridge._pending_arm_source = None
+    bridge._pending_arm_token = None
+    bridge._pending_arm_token_expiry_ns = 0
+    bridge._rdk_control_lease_active = False
+    bridge._hold_sent_for_latch = False
+    bridge._last_gate_inputs = GateInputs()
+    bridge._ipc_command = IPC()
+    bridge.get_parameter = lambda name: SimpleNamespace(value=False)
+
+    def update_gates(now):
+        del now
+        bridge._last_gate_inputs = GateInputs(
+            local_permission=True,
+            physical_pedal=True,
+            arms_online=True,
+            hands_online=True,
+            limits_ok=True,
+            collision_clear=True,
+        )
+        bridge._arbiter.update_gates(bridge._last_gate_inputs)
+
+    bridge._update_gates = update_gates
+
+    bridge._prepare_direct_policy_control(
+        CommandSource.POLICY, time.monotonic_ns()
+    )
+
+    assert bridge._arbiter.snapshot.state is ControlState.POLICY_ARMED
+    assert bridge._pending_arm_token == "direct-token"
+    assert bridge._local_permission is True
+    assert bridge._ipc_command.calls[0][0] == "authorize_control"
+
+
 def test_hardware_hold_waits_for_single_synchronous_stop() -> None:
     class IPC:
         def __init__(self) -> None:

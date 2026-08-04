@@ -227,6 +227,21 @@ def test_remote_process_cannot_mint_zero_or_control_authorization(monkeypatch) -
         )
 
 
+def test_policy_control_authorization_does_not_require_a_tty(monkeypatch) -> None:
+    monkeypatch.setattr(server_module, "peer_has_local_tty", lambda pid: False)
+    authority = LocalControlAuthorization()
+    token, expires = authority.mint(
+        pid=1,
+        session_id="session",
+        source="policy",
+        confirmation="FLEXIV-CONTROL-ARM",
+    )
+
+    assert token
+    assert expires > time.monotonic_ns()
+    authority.consume(token, session_id="session", source="policy")
+
+
 def test_local_authorization_is_single_use(monkeypatch) -> None:
     monkeypatch.setattr(server_module, "peer_has_local_tty", lambda pid: True)
     authority = LocalControlAuthorization()

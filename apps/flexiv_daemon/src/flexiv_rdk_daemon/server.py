@@ -143,8 +143,9 @@ class _LocalAuthorization:
         confirmation: str,
         expected_confirmation: str,
         binding: tuple[str, ...],
+        require_local_tty: bool = True,
     ) -> tuple[str, int]:
-        if not peer_has_local_tty(pid):
+        if require_local_tty and not peer_has_local_tty(pid):
             raise PermissionError("authorization requires a same-host local TTY")
         if confirmation != expected_confirmation:
             raise PermissionError("local confirmation token is incorrect")
@@ -225,6 +226,12 @@ class LocalControlAuthorization:
             confirmation=confirmation,
             expected_confirmation=self.CONFIRMATION,
             binding=(session_id, source),
+            # Policy actions arrive through the local Unix socket from the
+            # long-running control bridge, which normally has no controlling
+            # TTY.  The bridge automatically requests this short-lived token
+            # on the first action; teleop and replay retain their explicit
+            # local-console authorization behavior.
+            require_local_tty=source != "policy",
         )
 
     def consume(self, token: str, *, session_id: str, source: str) -> None:

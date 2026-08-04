@@ -20,13 +20,18 @@ class LocalControlState:
 
     @property
     def policy_lease_allowed(self) -> bool:
+        """Whether the hardware session can accept a policy action.
+
+        Policy control is intentionally action-driven: the control bridge
+        acquires local ownership when the first action arrives.  Consequently
+        the RPC ingress must not wait for an already-armed bridge, a pedal
+        edge, or a hand observation before accepting that action.  The lease
+        remains only a single-client transport ownership mechanism.
+        """
         return (
-            self.state in {"READY", "POLICY_ARMED", "ACTIVE"}
+            self.state in {"READY", "POLICY_ARMED", "ACTIVE", "HOLD_LATCHED"}
             and self.ft_zeroed
-            and self.local_policy_authorized
-            and self.pedal_valid
             and self.arms_online
-            and self.hands_online
         )
 
 

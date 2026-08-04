@@ -9,6 +9,7 @@ from flexiv_inspire_isaac.cli import (
     _commands,
     _conversion_manifest,
     _conversion_manifests,
+    _load_policy_run_config,
     _load_policy_server_config,
     _policy_authorization_command,
     _policy_serve_commands,
@@ -31,6 +32,20 @@ def _site() -> Path:
 
 def _policy_server() -> Path:
     return Path(__file__).parents[1] / "config" / "policy_server.yaml"
+
+
+def _policy_run() -> Path:
+    return Path(__file__).parents[1] / "config" / "policy_run.yaml"
+
+
+def test_policy_run_config_is_one_command_guarded_client() -> None:
+    config = load_system_config(_site())
+    settings = _load_policy_run_config(config, _policy_run())
+
+    assert settings["working_directory"].name == "dual_arm_teleop"
+    assert settings["command"][0].endswith("/flexiv_teleop/bin/robot-record")
+    assert settings["command"][-1].endswith("run_policy_guarded.yaml")
+    assert settings["environment"]["DUAL_ARM_TELEOP_INCOMPLETE_DATASET"] == "delete"
 
 
 def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
@@ -65,19 +80,19 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
         clear_hold_latched=True,
     )
     assert "--clear-hold-latched" in recovery_authorization
-    assert len(commands) == 5
+    assert len(commands) == 6
     assert any("flexiv-rdk-daemon" in command for command in joined)
     assert any("flexiv_inspire_control.node" in command for command in joined)
     assert any("flexiv-inspire-camera-node" in command for command in joined)
     assert any("flexiv-inspire-dftp-node" in command for command in joined)
     assert not any("flexiv-inspire-pedal-router" in command for command in joined)
+    assert any("rerun_viz.cli" in command for command in joined)
     assert any("policy_api.ros_adapter" in command for command in joined)
     forbidden = (
         "teleop_input_node",
         "episode_control",
         "xr_raw",
         "run_manus_plugin",
-        "rerun_viz",
     )
     assert not any(marker in command for marker in forbidden for command in joined)
 

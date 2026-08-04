@@ -44,7 +44,23 @@ checkpoint 只写入 client 仓库：
 /home/hb/flexiv_inspire_ws/src/dual_arm_teleop/outputs/train/pick_place_demo_act_v1/
 ```
 
-## 3. RPC server（本仓库）
+## 3. 日常一键推理（本仓库）
+
+真机策略推理只运行一个命令：
+
+```bash
+cd /home/hb/isaac_teleop_flexiv_inspire
+source scripts/env/activate_ros.sh
+robot policy-run
+```
+
+它依次完成 Reset、启动硬件和 RPC、等待服务就绪、调用 `flexiv_teleop`
+环境加载配置的 checkpoint，并直接执行策略，不需要踏板。按一次 `Ctrl-C` 会先
+停止策略并释放 lease，再关闭全部硬件后台；未完成的临时 rollout 自动丢弃，不再询问。
+
+checkpoint/推理配置入口集中在 `config/policy_run.yaml`，日常命令不带参数。
+
+## 4. 单独启动 RPC server（调试用）
 
 ```bash
 cd /home/hb/isaac_teleop_flexiv_inspire
@@ -67,7 +83,7 @@ robot policy-serve --no-reset
 RPC 地址、证书和频率在 `config/policy_server.yaml`。非 loopback 监听必须配置
 client CA 并使用双向 TLS。
 
-## 4. 推理（client 仓库）
+## 5. 单独启动推理 client（调试用）
 
 server 就绪后，在另一个终端运行：
 
@@ -84,3 +100,14 @@ checkpoint、执行 ACT 并验证 24D action，但不申请 lease、不向真机
 先启动；Server 完成自动授权后，Client 直接申请 lease 并下发。动作仍经过
 lease、TTL、heartbeat、软限位和
 source-exclusive 控制。
+
+遥操与策略使用不同的来源 topic，随后进入完全相同的真机执行链：
+
+```text
+/command_sources/teleop/command ─┐
+                                 ├─> requested -> safe -> sent -> RDK
+/command_sources/policy/command ─┘
+```
+
+Rerun 中 client 侧显示 checkpoint 的 24D action；硬件侧显示映射后的 30D
+requested/safe/sent action，控制状态中的 `active_source` 标识 `teleop` 或 `policy`。

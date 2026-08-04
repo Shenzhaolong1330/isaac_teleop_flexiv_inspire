@@ -1,0 +1,16 @@
+schema_version: 1
+
+# Daily policy inference entrypoint. Edit this file when switching checkpoint
+# or policy config; the command itself remains simply `robot policy-run`.
+policy_server_config: config/policy_server.yaml
+rpc_ready_timeout_s: 180
+
+client:
+  working_directory: /home/hb/flexiv_inspire_ws/src/dual_arm_teleop
+  command:
+    - /home/hb/miniconda3/envs/flexiv_teleop/bin/robot-record
+    - --config
+    - scripts/config/experiments/pick_place_act_v1/run_policy_guarded.yaml
+  environment:
+    # Ctrl-C is non-interactive: discard only the unfinished rollout folder.
+    DUAL_ARM_TELEOP_INCOMPLETE_DATASET: delete

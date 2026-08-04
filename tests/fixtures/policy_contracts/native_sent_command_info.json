@@ -1,0 +1,50 @@
+{
+  "codebase_version": "v3.0",
+  "robot_type": "flexiv_rizon4s_dual_inspire_dftp2",
+  "fps": 15,
+  "features": {
+    "observation.arm_pose": {
+      "dtype": "float32",
+      "shape": [18],
+      "names": [
+        "left_x", "left_y", "left_z", "left_R00", "left_R10", "left_R20",
+        "left_R01", "left_R11", "left_R21", "right_x", "right_y", "right_z",
+        "right_R00", "right_R10", "right_R20", "right_R01", "right_R11", "right_R21"
+      ]
+    },
+    "observation.hand_state": {
+      "dtype": "float32",
+      "shape": [12],
+      "names": [
+        "left_little", "left_ring", "left_middle", "left_index",
+        "left_thumb_bend", "left_thumb_rotate", "right_little", "right_ring",
+        "right_middle", "right_index", "right_thumb_bend", "right_thumb_rotate"
+      ]
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [30],
+      "names": [
+        "left_dx", "left_dy", "left_dz", "left_dR00", "left_dR10", "left_dR20",
+        "left_dR01", "left_dR11", "left_dR21", "right_dx", "right_dy", "right_dz",
+        "right_dR00", "right_dR10", "right_dR20", "right_dR01", "right_dR11", "right_dR21",
+        "left_hand_little", "left_hand_ring", "left_hand_middle", "left_hand_index",
+        "left_hand_thumb_bend", "left_hand_thumb_rotate", "right_hand_little",
+        "right_hand_ring", "right_hand_middle", "right_hand_index",
+        "right_hand_thumb_bend", "right_hand_thumb_rotate"
+      ]
+    },
+    "observation.images.head": {
+      "dtype": "video", "shape": [240, 424, 3],
+      "names": ["height", "width", "channel"]
+    },
+    "observation.images.left_wrist": {
+      "dtype": "video", "shape": [240, 424, 3],
+      "names": ["height", "width", "channel"]
+    },
+    "observation.images.right_wrist": {
+      "dtype": "video", "shape": [240, 424, 3],
+      "names": ["height", "width", "channel"]
+    }
+  }
+}

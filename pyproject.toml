@@ -61,6 +61,7 @@ packages = [
   "flexiv_inspire_isaac.dftp",
   "flexiv_inspire_isaac.policy_api",
   "flexiv_inspire_isaac.policy_api.generated",
+  "policy_contracts",
   "flexiv_inspire_isaac.rerun_viz",
   "flexiv_inspire_xr_bridge",
   "flexiv_inspire_control",
@@ -74,6 +75,7 @@ packages = [
 "flexiv_inspire_isaac.dftp" = "ros2_ws/src/flexiv_inspire_dftp"
 "flexiv_inspire_isaac.policy_api" = "apps/policy_server/src/flexiv_inspire_isaac/policy_api"
 "flexiv_inspire_isaac.policy_api.generated" = "apps/policy_server/src/flexiv_inspire_isaac/policy_api/generated"
+"policy_contracts" = "libs/policy_contracts/src/flexiv_inspire_isaac/policy_contracts"
 "flexiv_inspire_isaac.rerun_viz" = "ros2_ws/src/flexiv_inspire_rerun"
 "flexiv_inspire_xr_bridge" = "ros2_ws/src/flexiv_inspire_xr_bridge/flexiv_inspire_xr_bridge"
 "flexiv_inspire_control" = "ros2_ws/src/flexiv_inspire_control/flexiv_inspire_control"

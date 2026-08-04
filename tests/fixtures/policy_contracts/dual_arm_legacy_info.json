@@ -1,0 +1,57 @@
+{
+  "codebase_version": "v3.0",
+  "robot_type": "flexiv_dual_arm",
+  "fps": 30,
+  "features": {
+    "action": {
+      "dtype": "float32",
+      "shape": [24],
+      "names": [
+        "left_delta_ee_pose.x", "left_delta_ee_pose.y", "left_delta_ee_pose.z",
+        "left_delta_ee_pose.rx", "left_delta_ee_pose.ry", "left_delta_ee_pose.rz",
+        "right_delta_ee_pose.x", "right_delta_ee_pose.y", "right_delta_ee_pose.z",
+        "right_delta_ee_pose.rx", "right_delta_ee_pose.ry", "right_delta_ee_pose.rz",
+        "left_hand_cmd_0", "left_hand_cmd_1", "left_hand_cmd_2",
+        "left_hand_cmd_3", "left_hand_cmd_4", "left_hand_cmd_5",
+        "right_hand_cmd_0", "right_hand_cmd_1", "right_hand_cmd_2",
+        "right_hand_cmd_3", "right_hand_cmd_4", "right_hand_cmd_5"
+      ]
+    },
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [38],
+      "names": [
+        "left_joint_1.pos", "left_joint_2.pos", "left_joint_3.pos",
+        "left_joint_4.pos", "left_joint_5.pos", "left_joint_6.pos",
+        "left_joint_7.pos", "left_ee_pose.x", "left_ee_pose.y",
+        "left_ee_pose.z", "left_ee_pose.rx", "left_ee_pose.ry",
+        "left_ee_pose.rz", "left_hand_state_0", "left_hand_state_1",
+        "left_hand_state_2", "left_hand_state_3", "left_hand_state_4",
+        "left_hand_state_5", "right_joint_1.pos", "right_joint_2.pos",
+        "right_joint_3.pos", "right_joint_4.pos", "right_joint_5.pos",
+        "right_joint_6.pos", "right_joint_7.pos", "right_ee_pose.x",
+        "right_ee_pose.y", "right_ee_pose.z", "right_ee_pose.rx",
+        "right_ee_pose.ry", "right_ee_pose.rz", "right_hand_state_0",
+        "right_hand_state_1", "right_hand_state_2", "right_hand_state_3",
+        "right_hand_state_4", "right_hand_state_5"
+      ]
+    },
+    "observation.images.left_wrist_image": {
+      "dtype": "video", "shape": [240, 424, 3],
+      "names": ["height", "width", "channels"]
+    },
+    "observation.images.right_wrist_image": {
+      "dtype": "video", "shape": [240, 424, 3],
+      "names": ["height", "width", "channels"]
+    },
+    "observation.images.head_image": {
+      "dtype": "video", "shape": [240, 424, 3],
+      "names": ["height", "width", "channels"]
+    },
+    "timestamp": {"dtype": "float32", "shape": [1], "names": null},
+    "frame_index": {"dtype": "int64", "shape": [1], "names": null},
+    "episode_index": {"dtype": "int64", "shape": [1], "names": null},
+    "index": {"dtype": "int64", "shape": [1], "names": null},
+    "task_index": {"dtype": "int64", "shape": [1], "names": null}
+  }
+}

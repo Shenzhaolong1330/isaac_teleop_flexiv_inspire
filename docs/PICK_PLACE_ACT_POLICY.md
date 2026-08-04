@@ -54,8 +54,9 @@ robot policy-serve
 
 该命令以前台方式运行，默认先执行本机 Reset，然后启动 RDK、控制桥、Inspire、
 三路相机、脚踏和 loopback TLS Policy RPC。它不会启动 Quest、MANUS、Episode
-Controller、LeRobot 或训练/推理程序。本机配置为 policy 直连模式：前台进程自动完成
-policy 授权，不需要中踏板或单独运行 authorize-control。Quest 遥操的踏板逻辑不受影响。
+Controller、LeRobot 或训练/推理程序。本机配置为 policy 直连模式：Client 的首个 action
+就是控制接管事件，不需要中踏板、单独运行 authorize-control 或等待后台授权循环。
+Quest 遥操的踏板逻辑不受影响。
 `Ctrl-C` 关闭 server 及其硬件服务。
 
 只做不允许运动的 shadow 诊断且不希望自动 Home 时，可以使用：
@@ -80,10 +81,10 @@ robot-record --config scripts/config/experiments/pick_place_act_v1/run_policy_sh
 默认配置为 `shadow_only: true`：client 读取 RPC observation、加载本仓库数据训练出的
 checkpoint、执行 ACT 并验证 24D action，但不申请 lease、不向真机发送动作。
 
-真机模式使用单独的 `run_policy_guarded.yaml`。Server 完成自动授权后，Client 每发送
-一帧 action，Server 就立即映射和下发，不需要踏板或逐帧授权。动作仍经过
-lease、TTL、heartbeat、软限位和
-source-exclusive 控制。
+真机模式使用单独的 `run_policy_guarded.yaml`。Client 每发送一帧合法 action，Server
+就立即映射和下发；READY 或常规 HOLD 状态会在首帧自动接管/恢复。RPC lease 仅用于防止
+两个 Client 同时写入，不再依赖踏板、本地预授权、手部在线状态或独立 heartbeat。
+数组维度、有限数值、双臂连接状态以及 Flexiv 控制器自身的故障/硬限位仍然有效。
 
 遥操与策略使用不同的来源 topic，随后进入完全相同的真机执行链：
 
@@ -93,7 +94,7 @@ source-exclusive 控制。
 /command_sources/policy/command ─┘
 ```
 
-真机推理只由 `policy-serve` 创建一个 Rerun Viewer，显示映射后的 30D
-requested/safe/sent action；guarded Client 禁止自行 spawn 第二个 Viewer。控制状态中的
-`active_source` 标识 `teleop` 或 `policy`。Shadow Client 不控制真机，可以单独显示
-checkpoint 的 24D action。
+策略推理的 Shadow/Guarded Client 都不再自行启动 Rerun，避免与 Server Viewer 冲突；
+这两个开关只存在于 `pick_place_act_v1/run_policy_*.yaml`，不会改变 LeRobot 原有
+`record_cfg.yaml` 数采可视化。Server Viewer 继续显示映射后的 30D requested/safe/sent
+action。控制状态中的 `active_source` 标识 `teleop` 或 `policy`。

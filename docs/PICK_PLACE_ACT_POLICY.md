@@ -93,5 +93,7 @@ source-exclusive 控制。
 /command_sources/policy/command ─┘
 ```
 
-Rerun 中 client 侧显示 checkpoint 的 24D action；硬件侧显示映射后的 30D
-requested/safe/sent action，控制状态中的 `active_source` 标识 `teleop` 或 `policy`。
+真机推理只由 `policy-serve` 创建一个 Rerun Viewer，显示映射后的 30D
+requested/safe/sent action；guarded Client 禁止自行 spawn 第二个 Viewer。控制状态中的
+`active_source` 标识 `teleop` 或 `policy`。Shadow Client 不控制真机，可以单独显示
+checkpoint 的 24D action。

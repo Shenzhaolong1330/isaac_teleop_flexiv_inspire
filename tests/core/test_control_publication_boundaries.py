@@ -47,6 +47,7 @@ class _Arbiter:
         self.state = ControlState.ACTIVE
         self.marked_sent = []
         self.deadman_releases = []
+        self.heartbeats = []
 
     @property
     def snapshot(self):
@@ -57,6 +58,9 @@ class _Arbiter:
 
     def mark_sent(self, command) -> None:
         self.marked_sent.append(command)
+
+    def heartbeat(self, source: CommandSource, *, now_monotonic_ns: int) -> None:
+        self.heartbeats.append((source, now_monotonic_ns))
 
     def reject_invalid_command(
         self, source: CommandSource, *, now_monotonic_ns: int
@@ -328,6 +332,7 @@ def test_neutral_teleop_packet_does_not_latch_hold() -> None:
     assert bridge._arbiter.state is ControlState.ACTIVE
     assert bridge._arbiter.deadman_releases == [CommandSource.TELEOP]
     assert bridge._requested_pub.messages == [message]
+    assert bridge._arbiter.heartbeats[0][0] is CommandSource.TELEOP
     assert bridge.traces[0][3] == "teleop_clutch_released"
     assert not bridge.holds
 

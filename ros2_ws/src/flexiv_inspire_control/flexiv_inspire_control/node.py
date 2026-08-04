@@ -762,6 +762,12 @@ class ControlBridge(Node):
             self._publish_control_state()
             return
         self._requested_pub.publish(message)
+        # A command is itself an authoritative liveness event.  The policy
+        # adapter also publishes a separate heartbeat for gaps between action
+        # chunks, but ROS does not guarantee cross-topic callback ordering.
+        # Refresh here before gate evaluation so the first action cannot lose
+        # a race to its heartbeat and latch ``source_heartbeat_stale``.
+        self._arbiter.heartbeat(source, now_monotonic_ns=receive_ns)
         # Teleop publishes a neutral packet while the clutch is released so
         # observation and recording remain continuous.  It is not a malformed
         # motion request and must not latch HOLD immediately after arming.

@@ -6,7 +6,7 @@ dataset:
   # `robot visualize` 和 `robot replay` 都只从这里选择数据。
   root: sessions/pick_place_demo
   # latest | numeric episode_index | exact episode directory name.
-  episode: latest
+  episode: 3
   require_completed: true
 
 visualize:
@@ -22,14 +22,17 @@ visualize:
   pointcloud_hz: 2.0
 
 replay:
-  # Hardware execution is impossible until both fields below are deliberately set.
-  enabled: false
-  # Exact opt-in value: FLEXIV-REPLAY-EXECUTE
-  operator_confirmation: ""
+  # 设为 true 后 `robot replay` 会执行当前选中的 episode。
+  enabled: true
+  # 保留为兼容旧配置；无需每次在终端输入确认词。
+  operator_confirmation: "FLEXIV-REPLAY-EXECUTE"
   speed: 1.0                 # hardware replay cannot exceed recorded speed
   ttl_s: 0.2
-  max_inter_command_gap_s: 0.1
-  max_schedule_lateness_s: 0.02
+  # 人手换挡、短暂 XR 卡顿都会留下空档。replay 会自动零增量保持，
+  # 这里只拒绝超过 30 秒的明显坏数据。
+  max_inter_command_gap_s: 30.0
+  keepalive_hz: 10.0        # 在空档中维持当前末端目标，喂给 RDK 看门狗
+  max_schedule_lateness_s: 0.1
   start_delay_s: 2.0
   home_before_start: true
   include_hands: true

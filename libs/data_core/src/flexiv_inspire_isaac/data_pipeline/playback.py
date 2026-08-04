@@ -49,6 +49,7 @@ class ReplaySpec:
     speed: float
     ttl_s: float
     max_inter_command_gap_s: float
+    keepalive_hz: float
     max_schedule_lateness_s: float
     start_delay_s: float
     home_before_start: bool
@@ -169,15 +170,18 @@ def load_playback_config(path: str | Path) -> PlaybackSpec:
     ttl_s = float(replay_raw.get("ttl_s", 0.2))
     if not 0.02 <= ttl_s <= 1.0:
         raise PlaybackConfigError("replay.ttl_s must be in [0.02,1.0]")
-    max_gap = float(replay_raw.get("max_inter_command_gap_s", 0.1))
-    if not 0.01 <= max_gap <= 0.2:
+    max_gap = float(replay_raw.get("max_inter_command_gap_s", 30.0))
+    if not 0.1 <= max_gap <= 120.0:
         raise PlaybackConfigError(
-            "replay.max_inter_command_gap_s must be in [0.01,0.2]"
+            "replay.max_inter_command_gap_s must be in [0.1,120]"
         )
+    keepalive_hz = float(replay_raw.get("keepalive_hz", 10.0))
+    if not 2.0 <= keepalive_hz <= 100.0:
+        raise PlaybackConfigError("replay.keepalive_hz must be in [2,100]")
     max_lateness = float(replay_raw.get("max_schedule_lateness_s", 0.02))
-    if not 0.001 <= max_lateness <= 0.05:
+    if not 0.001 <= max_lateness <= 0.2:
         raise PlaybackConfigError(
-            "replay.max_schedule_lateness_s must be in [0.001,0.05]"
+            "replay.max_schedule_lateness_s must be in [0.001,0.2]"
         )
     start_delay = float(replay_raw.get("start_delay_s", 2.0))
     if not 0.0 <= start_delay <= 30.0:
@@ -190,6 +194,7 @@ def load_playback_config(path: str | Path) -> PlaybackSpec:
         speed=replay_speed,
         ttl_s=ttl_s,
         max_inter_command_gap_s=max_gap,
+        keepalive_hz=keepalive_hz,
         max_schedule_lateness_s=max_lateness,
         start_delay_s=start_delay,
         home_before_start=bool(replay_raw.get("home_before_start", True)),
@@ -445,20 +450,55 @@ def extract_replay_commands(
 def validate_replay_timing(
     commands: list[RecordedCommand], replay: ReplaySpec
 ) -> None:
-    """Ensure slowed scheduling cannot outlive the preceding command TTL."""
+    """Ensure bridge/RDK watchdogs remain fed during recorded pauses.
 
-    if len(commands) < 2:
+    Teleoperation naturally has gaps while the operator re-centres the
+    clutch or the XR stream hiccups.  Replay fills those gaps with explicit
+    zero-delta arm commands, so the relevant interval is the keepalive period
+    rather than the spacing of the recorded motion samples.
+    """
+
+    if not commands:
         return
-    largest_gap_s = max(
-        (current.timestamp_ns - previous.timestamp_ns) / 1e9
-        for previous, current in zip(commands, commands[1:])
-    )
-    scaled_gap_s = largest_gap_s / replay.speed
-    if scaled_gap_s >= replay.ttl_s * 0.8:
+    keepalive_period_s = 1.0 / replay.keepalive_hz
+    if keepalive_period_s >= replay.ttl_s * 0.8:
         raise PlaybackConfigError(
-            "replay speed/TTL would make commands stale between samples; "
-            "increase replay.ttl_s or replay.speed"
+            "replay keepalive would make commands stale; increase "
+            "replay.keepalive_hz or replay.ttl_s"
         )
+
+
+def replay_keepalive_command(command: RecordedCommand) -> RecordedCommand:
+    """Create one no-motion Cartesian command to bridge a recorded pause.
+
+    Cartesian replay is expressed as deltas from the bridge's last accepted
+    pose.  A zero translation plus identity Rotation-6D therefore keeps the
+    measured target fixed; replaying the preceding non-zero delta would move
+    the robot repeatedly.  Hand values are retained for message consistency,
+    while only arm bits are sent to the RDK boundary.
+    """
+
+    arm_mask = command.valid_mask & 0x3
+    if arm_mask == 0:
+        raise PlaybackConfigError("hardware replay requires at least one arm target")
+    identity_rotation6d = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+    action = (
+        0.0,
+        0.0,
+        0.0,
+        *identity_rotation6d,
+        0.0,
+        0.0,
+        0.0,
+        *identity_rotation6d,
+        *command.action[18:30],
+    )
+    return RecordedCommand(
+        timestamp_ns=command.timestamp_ns,
+        original_sequence=command.original_sequence,
+        valid_mask=arm_mask,
+        action=action,
+    )
 
 
 def validate_replay_home_origin(

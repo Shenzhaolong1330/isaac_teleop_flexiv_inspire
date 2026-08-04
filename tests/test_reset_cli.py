@@ -167,11 +167,64 @@ def test_reset_restarts_stuck_rdk_stack_then_retries_once(tmp_path, monkeypatch)
     assert stops == [(config, False)]
 
 
+def test_reset_recovers_replay_deadman_latch_by_restarting_stack(tmp_path, monkeypatch):
+    tool_config = tmp_path / "tool_payload.yaml"
+    tool_config.write_text("schema_version: 1\n", encoding="utf-8")
+    calls = 0
+    module = ModuleType("flexiv_inspire_control.zero_ft_local")
+
+    def fake_main(_argv: list[str]) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("source deadman must be released before rearming")
+        return 0
+
+    module.main = fake_main
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(cli.sys, "stdin", _InteractiveInput())
+    monkeypatch.setattr(cli, "_ensure_rdk_daemon", lambda config: tmp_path / "rdk.sock")
+    monkeypatch.setattr(cli, "_ensure_reset_ros_services", lambda config: None)
+    restarts: list[bool] = []
+    monkeypatch.setattr(
+        cli,
+        "_stop_managed_services",
+        lambda config, require_existing: restarts.append(require_existing) or 0,
+    )
+
+    assert cli._run_reset(_Config(tmp_path, tool_config), SimpleNamespace(preview_seconds=0)) == 0
+    assert calls == 2
+    assert restarts == [False]
+
+
 def test_reset_parser_needs_no_confirmation_argument():
     args = cli._parser().parse_args(["reset"])
 
     assert args.operation == "reset"
     assert args.preview_seconds == 2.0
+
+
+def test_replay_automatically_prepares_rdk_and_ros_stack(tmp_path, monkeypatch):
+    prepared: list[object] = []
+    monkeypatch.setattr(
+        cli,
+        "_run_reset",
+        lambda config, args: prepared.append((config, args.preview_seconds)) or 0,
+    )
+    monkeypatch.setattr(cli, "_start_replay_pedal_router", lambda config: [])
+    replay_module = ModuleType("flexiv_inspire_isaac.replay")
+    replay_module.main = lambda argv: 23
+    monkeypatch.setitem(sys.modules, replay_module.__name__, replay_module)
+
+    tool_config = tmp_path / "tool_payload.yaml"
+    tool_config.write_text("schema_version: 1\n", encoding="utf-8")
+    config = _Config(tmp_path, tool_config)
+    result = cli._main(SimpleNamespace(operation="replay"), config)
+
+    assert result == 23
+    assert len(prepared) == 1
+    assert prepared[0][0] is config
+    assert prepared[0][1] == 0.0
 
 
 def test_manus_startup_reports_valid_bimanual_retargeting(tmp_path):

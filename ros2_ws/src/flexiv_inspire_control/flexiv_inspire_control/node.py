@@ -1881,6 +1881,14 @@ class ControlBridge(Node):
         if emitter is None:
             # Unit harnesses construct a bridge without running its ROS constructor.
             return True
+        # DeviceIO has one collector per foreground recording session. Reset
+        # and standalone replay deliberately run without that collector; in
+        # that state there is nowhere to deliver a critical capture record.
+        # Do not fill the protected queue and turn an otherwise valid hardware
+        # command into ``invalid_command``. Once EpisodeController creates its
+        # socket, the same bridge immediately resumes native recording.
+        if not emitter.socket_path.is_socket():
+            return True
         try:
             sequence = int(getattr(message, "sequence", 0))
             emitter.emit(

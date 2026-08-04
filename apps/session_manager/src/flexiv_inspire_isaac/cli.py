@@ -1672,9 +1672,60 @@ def _main(args, config) -> int:
         from flexiv_inspire_isaac.rerun_viz.offline import main as visualize_main
 
         return visualize_main([])
+    if args.operation == "replay":
+        return _run_replay(config)
     from .replay import main as replay_main
 
     return replay_main([])
+
+
+def _start_replay_pedal_router(config) -> list[subprocess.Popen]:
+    """Start only the physical pedal input needed by standalone replay."""
+
+    if _process_running(
+        "flexiv_inspire_isaac.pedal_router",
+        "flexiv-inspire-pedal-router",
+    ):
+        print("Replay 复用已运行的踏板路由", flush=True)
+        return []
+    runtime = _runtime_dir(config)
+    rendered = render_runtime_configs(config, runtime / config.sha256[:12])
+    prefix = f"replay-{time.time_ns()}"
+    command = [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_isaac.pedal_router",
+        "--ros-args",
+        "--params-file",
+        str(rendered["pedal.yaml"]),
+    ]
+    processes = _start([command], runtime, log_prefix=prefix)
+    logs = [runtime / f"{prefix}-0.log"]
+    _verify_process_startup(processes, logs, timeout_s=0.25)
+    print("Replay 踏板路由已自动启动", flush=True)
+    return processes
+
+
+def _run_replay(config) -> int:
+    """Prepare the local stack and run one foreground hardware replay."""
+
+    # Replay is a hardware operation just like record: a bare command must be
+    # enough on a freshly booted workstation. Reset owns the RDK daemon and
+    # ROS bridge lifecycle, establishes this session's F/T zero, and moves to
+    # Home before replay's own trajectory checks.
+    print("Replay: 自动启动 RDK/ROS 并准备真机（F/T 清零 -> Home）", flush=True)
+    reset_result = _run_reset(config, argparse.Namespace(preview_seconds=0.0))
+    if reset_result != 0:
+        raise SystemExit(f"Replay 自动准备失败，Reset 退出码 {reset_result}")
+    pedal_processes = _start_replay_pedal_router(config)
+    try:
+        print("Replay: 真机准备完成，开始校验并回放选中的 episode", flush=True)
+        from .replay import main as replay_main
+
+        return replay_main([])
+    finally:
+        if pedal_processes:
+            _stop_started_processes(pedal_processes)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2014,6 +2065,11 @@ def _run_reset(config, args) -> int:
                 "SendJointPosition",
                 "feasible trajectory",
                 "closed IPC connection",
+                # A failed replay can leave its source latched while the
+                # middle pedal is still held. Restarting the locally managed
+                # bridge is the practical reset path: it clears that stale
+                # source ownership before F/T/Home runs again.
+                "source deadman must be released before rearming",
             )
         )
         if not retryable:

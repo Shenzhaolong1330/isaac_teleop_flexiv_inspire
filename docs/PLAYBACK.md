@@ -15,7 +15,9 @@ dataset:
   episode: latest
 ```
 
-`episode` 可写 `latest`、数值 `episode_index`，或 `root` 下的完整 episode 目录名。数据源固定为 episode manifest 指向的 `deviceio.mcap`。
+新采集的 episode 位于 `root/raw/`，转换结果位于 `root/lerobot/`。`episode` 可写
+`latest`、数值 `episode_index`，或 episode 目录名；回放会自动发现 `raw/` 下的新数据
+以及旧版 `root/` 下的平铺 episode。数据源固定为 episode manifest 指向的 `deviceio.mcap`。
 
 ## Visualize：机器人不动
 
@@ -32,21 +34,8 @@ dataset:
 
 Replay 只读取 `/control/sent_command`，即录制时真正通过安全检查并被控制桥确认发送的动作。它不会执行 `ros2 bag play`，也不会把历史 session、时间戳或 TTL 原样发回系统；每一帧都会重建为当前 session 的新鲜 `replay` 指令，并按照原采样间隔执行。
 
-默认配置不能运动：
-
-```yaml
-replay:
-  enabled: false
-  operator_confirmation: ""
-```
-
-现场确认目标数据、工作空间和人员安全后，必须同时改成：
-
-```yaml
-replay:
-  enabled: true
-  operator_confirmation: FLEXIV-REPLAY-EXECUTE
-```
+默认配置已经启用 replay，直接执行 `robot replay` 即可。它仍会自动
+Home，并要求脚踏持续踩住；松开脚踏或 Ctrl-C 都会立即 hold。
 
 启动前还必须满足：
 
@@ -57,9 +46,11 @@ replay:
 - 当前工具/payload 配置 hash 与数据集 manifest 一致；
 - episode 完整，且没有中途 Home；
 - 首条动作前记录到的左右关节位置与当前 Home 一致；
-- 整个动作段时间戳连续，配置的速度和 TTL 不会造成过期，调度延迟不超过
-  `max_schedule_lateness_s`。
+- 调度延迟不超过 `max_schedule_lateness_s`。
 
 执行顺序固定为：自动走当前配置的双臂 Home，获得 `replay` 独占授权，等待 `start_delay_s`，操作员持续踩住物理脚踏，然后按采样时序发送。进入 Replay 授权后，松开脚踏、心跳/动作超时、状态异常、`Ctrl-C` 或正常结束都会经现有控制桥进入 hold。Replay 不会伪造脚踏，也不能绕过关节限位、速度、外力、碰撞和在线状态检查。
 
-`speed` 最大为 `1.0`，不会快于原始示教。`include_hands: false` 可只执行录制的双臂动作；双手仍须在线，因为这是当前控制桥的整机安全门。
+`speed` 最大为 `1.0`，不会快于原始示教。录制中常见的踩踏板换挡、短暂
+XR 卡顿会造成动作空档；replay 会按 `keepalive_hz` 自动发送零增量保持指令，
+因此不会重复执行上一帧动作，也不会因为 RDK 的短看门狗超时而中断。超过
+`max_inter_command_gap_s` 的长空档才会被当作异常数据拒绝。

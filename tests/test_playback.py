@@ -44,6 +44,7 @@ replay:
   speed: {replay_speed}
   ttl_s: 0.2
   max_inter_command_gap_s: 0.1
+  keepalive_hz: 10.0
   max_schedule_lateness_s: 0.02
   start_delay_s: 2.0
   home_before_start: true
@@ -213,7 +214,7 @@ def test_deviceio_commands_are_validated_and_keep_recorded_timing(tmp_path: Path
     assert len(commands[0].action) == 30
 
 
-def test_command_gap_and_unmapped_timing_are_fail_closed(tmp_path: Path) -> None:
+def test_long_command_gap_and_unmapped_timing_are_rejected(tmp_path: Path) -> None:
     spec = load_playback_config(_config(tmp_path))
     from flexiv_inspire_isaac.data_pipeline.playback import DeviceIORecord
 
@@ -221,7 +222,7 @@ def test_command_gap_and_unmapped_timing_are_fail_closed(tmp_path: Path) -> None
         "/control/sent_command", 1, True, True, 1, _sent_payload(1), {}
     )
     second = DeviceIORecord(
-        "/control/sent_command", 200_000_002, True, True, 2, _sent_payload(2), {}
+        "/control/sent_command", 30_000_000_002, True, True, 2, _sent_payload(2), {}
     )
     with pytest.raises(PlaybackConfigError, match="gap"):
         extract_replay_commands([first, second], spec.replay)
@@ -232,14 +233,36 @@ def test_command_gap_and_unmapped_timing_are_fail_closed(tmp_path: Path) -> None
         )
 
 
-def test_slow_replay_must_keep_each_command_inside_ttl(tmp_path: Path) -> None:
+def test_replay_keepalive_must_arrive_inside_ttl(tmp_path: Path) -> None:
     spec = load_playback_config(_config(tmp_path))
     commands = [
         RecordedCommand(0, 1, 3, (0.0,) * 30),
         RecordedCommand(190_000_000, 2, 3, (0.0,) * 30),
     ]
-    with pytest.raises(PlaybackConfigError, match="commands stale"):
-        validate_replay_timing(commands, spec.replay)
+    from dataclasses import replace
+
+    with pytest.raises(PlaybackConfigError, match="keepalive would make commands stale"):
+        validate_replay_timing(commands, replace(spec.replay, keepalive_hz=3.0))
+
+
+def test_pause_keepalive_is_zero_delta_and_keeps_arm_mask() -> None:
+    from flexiv_inspire_isaac.data_pipeline.playback import replay_keepalive_command
+
+    command = RecordedCommand(
+        100,
+        7,
+        15,
+        (0.01, -0.02, 0.03, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+         -0.01, 0.02, -0.03, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+         *([123.0] * 12)),
+    )
+    hold = replay_keepalive_command(command)
+    assert hold.valid_mask == 3
+    assert hold.action[:18] == (
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    )
+    assert hold.action[18:] == command.action[18:]
 
 
 def test_hardware_replay_requires_recorded_home_origin(tmp_path: Path) -> None:

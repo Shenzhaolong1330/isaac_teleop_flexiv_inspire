@@ -95,6 +95,22 @@ def test_expired_daemon_control_token_is_recoverable() -> None:
     )
 
 
+def test_deviceio_is_bypassed_when_no_foreground_recorder_exists(tmp_path) -> None:
+    class Emitter:
+        socket_path = tmp_path / "deviceio.sock"
+
+        @staticmethod
+        def emit(*_args, **_kwargs) -> None:
+            raise AssertionError("no recorder socket means emit must not be called")
+
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._deviceio = Emitter()
+
+    assert ControlBridge._emit_deviceio(
+        bridge, "/control/sent_command", SimpleNamespace(sequence=1), 1, critical=True
+    )
+
+
 def test_daemon_clutch_hold_is_not_classified_as_hardware_fault() -> None:
     assert ControlBridge._routine_daemon_hold_reason(
         RuntimeError(

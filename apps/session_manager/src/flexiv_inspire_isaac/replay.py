@@ -23,6 +23,7 @@ from flexiv_inspire_isaac.data_pipeline.playback import (
     load_playback_config,
     override_playback_selection,
     read_deviceio_records,
+    replay_keepalive_command,
     resolve_episode,
     validate_replay_home_origin,
     validate_replay_timing,
@@ -371,6 +372,21 @@ class ReplayNode:
                 raise RuntimeError(f"control bridge entered {state}: {self._hold_reason()}")
         raise TimeoutError("control bridge did not enter REPLAY_ARMED")
 
+    def wait_for_physical_pedal(self, timeout_s: float = 60.0) -> None:
+        """Wait before minting the short-lived replay authorization token."""
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.spin(0.05)
+            state = self._control_state
+            if state is not None and bool(state.physical_pedal):
+                return
+            if self._state_name() in _TERMINAL_CONTROL_STATES:
+                raise RuntimeError(
+                    f"control bridge entered {self._state_name()}: {self._hold_reason()}"
+                )
+        raise TimeoutError("等待中踏板超时：请确认脚踏已连接并持续踩住中踏板")
+
     def _state_name(self) -> str:
         return "" if self._control_state is None else str(self._control_state.state_name)
 
@@ -487,6 +503,8 @@ def run_replay(
         print(f"replay selected {episode.directory}; commands={len(commands)}", flush=True)
         print("moving both arms to configured Home before replay", flush=True)
         replay.home(timeout_s=home_timeout)
+        print("请持续踩住中踏板，正在获取 replay 控制权…", flush=True)
+        replay.wait_for_physical_pedal()
         replay.authorize_replay()
         replay.require_ready_gates()
         print(
@@ -499,21 +517,42 @@ def run_replay(
         )
 
         first_timestamp = commands[0].timestamp_ns
-        base_sequence = min(time.monotonic_ns(), (((1 << 64) - 1) >> 6) - len(commands))
+        # Source sequence is expanded by the bridge for its one-point chunk;
+        # leave enough room for zero-delta keepalives inserted during pauses.
+        base_sequence = min(time.monotonic_ns(), (((1 << 64) - 1) >> 6) - len(commands) * 64)
         start_ns = time.monotonic_ns()
         episode_uuid = str(episode.manifest.get("episode_uuid", ""))
+        next_sequence = base_sequence
+        keepalive_period_ns = int(round(1e9 / spec.replay.keepalive_hz))
+        next_keepalive_ns = start_ns + keepalive_period_ns
+        keepalives_sent = 0
         replay.publish_command(
             commands[0],
-            sequence=base_sequence,
+            sequence=next_sequence,
             ttl_s=spec.replay.ttl_s,
             episode_uuid=episode_uuid,
         )
+        next_sequence += 1
         replay.wait_active()
         for index, command in enumerate(commands[1:], start=1):
             offset_ns = int(
                 (command.timestamp_ns - first_timestamp) / spec.replay.speed
             )
             deadline_ns = start_ns + offset_ns
+            # RDK's command watchdog is intentionally shorter than a normal
+            # human clutch pause. Keep feeding it with a zero-delta target so
+            # the original command can still execute at its recorded time.
+            while next_keepalive_ns < deadline_ns:
+                replay.wait_until(next_keepalive_ns, active_required=True)
+                replay.publish_command(
+                    replay_keepalive_command(command),
+                    sequence=next_sequence,
+                    ttl_s=spec.replay.ttl_s,
+                    episode_uuid=episode_uuid,
+                )
+                next_sequence += 1
+                keepalives_sent += 1
+                next_keepalive_ns += keepalive_period_ns
             replay.wait_until(deadline_ns, active_required=True)
             lateness_ns = time.monotonic_ns() - deadline_ns
             if lateness_ns > int(spec.replay.max_schedule_lateness_s * 1e9):
@@ -523,16 +562,19 @@ def run_replay(
                 )
             replay.publish_command(
                 command,
-                sequence=base_sequence + index,
+                sequence=next_sequence,
                 ttl_s=spec.replay.ttl_s,
                 episode_uuid=episode_uuid,
             )
+            next_sequence += 1
+            next_keepalive_ns = time.monotonic_ns() + keepalive_period_ns
         replay.wait_until(
             time.monotonic_ns() + min(int(spec.replay.ttl_s * 5e8), 100_000_000),
             active_required=True,
         )
         print(
-            f"replay complete at {spec.replay.speed:g}x; requesting guarded hold",
+            f"replay complete at {spec.replay.speed:g}x "
+            f"({keepalives_sent} pause keepalives); requesting guarded hold",
             flush=True,
         )
         return 0

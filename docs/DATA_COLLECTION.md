@@ -46,12 +46,16 @@ episode 数量会自动退出，`Ctrl-C` 会保存当前条、等待 MCAP/Device
 
 ```text
 sessions/pick_place_demo/
-  episode_000001_attempt_01_20260731_2359/
-    manifest.json
-    deviceio.mcap
-    ros_mcap/
-  episode_000002_attempt_01_20260801_0004/
-    ...
+  raw/
+    episode_000001_attempt_01_20260731_2359/
+      manifest.json
+      deviceio.mcap
+      ros_mcap/
+    episode_000002_attempt_01_20260801_0004/
+      ...
+  lerobot/
+    episode_000001_attempt_01_20260731_2359/
+      sent_command/
 ```
 
 目录名中的 `YYYYMMDD_HHMM` 是该 episode 创建时的本机日期、小时和分钟；
@@ -59,7 +63,8 @@ sessions/pick_place_demo/
 保持固定名称，确保可视化、回放和 LeRobot 导出继续按 manifest 稳定读取。
 如果同一分钟内再次创建完全相同的 episode/attempt，录制会拒绝覆盖已有目录。
 
-转换默认选择当前数据集最新的已完成 episode，并自动使用隔离的 data 环境：
+转换选择由 `config/conversion.yaml` 的 `source.episode` 决定，并自动使用隔离的
+data 环境。默认 `all` 会批量转换所有已完成 episode；已有非空输出自动跳过：
 
 ```bash
 robot convert
@@ -72,7 +77,8 @@ robot convert --action-view absolute_cartesian_pose
 把头部相机原始 Z16 深度、深度比例和内参写进 Parquet。三种动作视图分别是
 30 维实际下发命令、14 维双臂绝对关节位置和 18 维 world 下双臂绝对 EE 位姿。
 输出写入
-`artifacts/lerobot/<dataset>/<episode>/<action-view>/`，已有非空目录不会被覆盖。
+`sessions/<dataset>/lerobot/<episode>/<action-view>/`，与原始 MCAP 的 `raw/`
+平行；已有非空目录不会被覆盖。已有旧的平铺 episode 仍可被转换和回放。
 
 中踏板松开时若启用了 `record_only_while_pedal_pressed`，源 MCAP 会保留真实
 时间空档。转换不会复制旧图像或跨空档插值；每帧额外导出源时间戳、空档时长、

@@ -103,6 +103,7 @@ def test_episode_command_contains_configured_identity_prompt_and_internal_attemp
 
     assert not any(item.startswith("manus=") for item in command)
     assert command[command.index("--dataset-name") + 1] == "pick_place"
+    assert command[command.index("--storage-subdirectory") + 1] == "raw"
     assert command[command.index("--episode-index") + 1] == "3"
     assert command[command.index("--attempt") + 1] == "2"
     assert command[command.index("--deviceio-profile") + 1] == "training"
@@ -128,7 +129,7 @@ def test_episode_command_adds_suffix_when_minute_directory_exists(
     fake = _FakeController("")
     fake.values["sessions_root"] = str(tmp_path)
     timestamp = "20260802_1349"
-    existing = tmp_path / "pick_place" / f"episode_000003_{timestamp}"
+    existing = tmp_path / "pick_place" / "raw" / f"episode_000003_{timestamp}"
     existing.mkdir(parents=True)
     monkeypatch.setattr(episode_control, "local_minute_timestamp", lambda: timestamp)
 
@@ -143,10 +144,10 @@ def test_episode_command_adds_suffix_when_minute_directory_exists(
 def test_discard_deletes_only_current_episode_directory(tmp_path: Path) -> None:
     fake = _FakeController("")
     fake.values["sessions_root"] = str(tmp_path)
-    episode = tmp_path / "pick_place" / "episode_000003_20260803_1500"
+    episode = tmp_path / "pick_place" / "raw" / "episode_000003_20260803_1500"
     episode.mkdir(parents=True)
     (episode / "manifest.json").write_text("{}", encoding="utf-8")
-    sibling = tmp_path / "pick_place" / "episode_000002_20260803_1459"
+    sibling = tmp_path / "pick_place" / "raw" / "episode_000002_20260803_1459"
     sibling.mkdir()
     fake._current_manifest = episode / "manifest.json"
     logger = _Logger()

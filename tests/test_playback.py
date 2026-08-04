@@ -120,6 +120,33 @@ def test_config_and_latest_episode_selection(tmp_path: Path) -> None:
     assert spec.replay.enabled is False
 
 
+def test_raw_layout_is_selected_by_latest_and_episode_name(tmp_path: Path) -> None:
+    spec = load_playback_config(_config(tmp_path))
+    legacy = _episode(tmp_path, "legacy", index=1)
+    raw = tmp_path / "episodes" / "raw" / "current"
+    raw.mkdir(parents=True)
+    (raw / "deviceio.mcap").touch()
+    (raw / "manifest.json").write_text(
+        json.dumps(
+            {
+                "episode_uuid": "current",
+                "episode_index": 2,
+                "attempt": 1,
+                "completed": True,
+                "completion_reason": "complete",
+                "pause_count": 1,
+                "deviceio_mcap": "deviceio.mcap",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert resolve_episode(spec).directory == raw
+    named = load_playback_config(_config(tmp_path, episode="current"))
+    assert resolve_episode(named).directory == raw
+    assert legacy.is_dir()
+
+
 def test_command_line_dataset_and_episode_override(tmp_path: Path) -> None:
     spec = load_playback_config(_config(tmp_path))
     alternate = tmp_path / "alternate"

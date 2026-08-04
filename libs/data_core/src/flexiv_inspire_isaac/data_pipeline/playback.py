@@ -241,16 +241,21 @@ def _candidate_key(path: Path, manifest: dict[str, Any]) -> tuple[int, int, int]
 def resolve_episode(spec: PlaybackSpec, *, for_hardware: bool = False) -> EpisodeSelection:
     root = spec.dataset.root.resolve(strict=True)
     candidates: list[tuple[Path, dict[str, Any]]] = []
-    for child in root.iterdir():
-        manifest_path = child / "manifest.json"
-        if not child.is_dir() or not manifest_path.is_file():
+    # New recordings live below raw/, while direct children remain supported
+    # for datasets created before the raw/lerobot split.
+    for candidate_root in (root / "raw", root):
+        if not candidate_root.is_dir():
             continue
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(manifest, dict):
-            candidates.append((child, manifest))
+        for child in candidate_root.iterdir():
+            manifest_path = child / "manifest.json"
+            if not child.is_dir() or not manifest_path.is_file():
+                continue
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(manifest, dict):
+                candidates.append((child, manifest))
     if not candidates:
         raise FileNotFoundError(f"no episode manifests under {root}")
 
@@ -275,15 +280,18 @@ def resolve_episode(spec: PlaybackSpec, *, for_hardware: bool = False) -> Episod
             raise FileNotFoundError(f"episode index {index} is absent under {root}")
         selected = max(matching, key=lambda item: _candidate_key(*item))
     else:
-        selected_path = (root / selector).resolve(strict=True)
+        selected_path = (root / selector).resolve()
         try:
             selected_path.relative_to(root)
         except ValueError as exc:
             raise PlaybackConfigError("dataset.episode escapes dataset.root") from exc
         matching = [item for item in candidates if item[0] == selected_path]
         if not matching:
+            # A bare directory name works for both legacy and raw/ episodes.
+            matching = [item for item in candidates if item[0].name == selector]
+        if not matching:
             raise FileNotFoundError(f"episode manifest is absent: {selected_path}")
-        selected = matching[0]
+        selected = max(matching, key=lambda item: _candidate_key(*item))
 
     directory, manifest = selected
     if completed_required and not bool(manifest.get("completed", False)):

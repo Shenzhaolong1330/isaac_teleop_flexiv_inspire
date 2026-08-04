@@ -447,6 +447,7 @@ class EpisodeSession:
         deviceio_capture_layer: str = "native-pre-dds",
         *,
         dataset_name: str = "",
+        storage_subdirectory: str = "",
         episode_index: int = 0,
         attempt: int = 1,
         task_description: str = "",
@@ -479,7 +480,20 @@ class EpisodeSession:
         if not re.fullmatch(r"\d{8}_\d{4}", collection_timestamp_local):
             raise ValueError("collection_timestamp_local must use YYYYMMDD_HHMM")
         dataset_root = root / dataset_name if dataset_name else root
-        self.directory = dataset_root / (
+        # Keep the storage layer separate from the dataset identity written to
+        # the manifest. The collector uses ``raw``; the empty default keeps
+        # direct EpisodeSession callers and historical layouts compatible.
+        storage_subdirectory = storage_subdirectory.strip()
+        if storage_subdirectory and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", storage_subdirectory
+        ):
+            raise ValueError("storage_subdirectory must be one safe directory name")
+        storage_root = (
+            dataset_root / storage_subdirectory
+            if storage_subdirectory
+            else dataset_root
+        )
+        self.directory = storage_root / (
             episode_directory_name or f"episode_{collection_timestamp_local}"
         )
         self.directory.mkdir(parents=True, exist_ok=False)
@@ -1090,6 +1104,11 @@ def _parse_args(argv=None):
     parser.add_argument("--extra-topic", action="append", default=[])
     parser.add_argument("--duration-s", type=float, default=0.0)
     parser.add_argument("--dataset-name", default="")
+    parser.add_argument(
+        "--storage-subdirectory",
+        default="",
+        help="optional child directory below the dataset root (for example: raw)",
+    )
     parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--attempt", type=int, default=1)
     parser.add_argument("--task-description", default="")
@@ -1175,6 +1194,7 @@ def main(argv=None) -> int:
             if options.deviceio_mode == "native"
             else "post-dds-typed-mirror",
             dataset_name=options.dataset_name,
+            storage_subdirectory=options.storage_subdirectory,
             episode_index=options.episode_index,
             attempt=options.attempt,
             task_description=options.task_description,

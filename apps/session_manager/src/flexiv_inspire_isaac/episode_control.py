@@ -31,6 +31,7 @@ from flexiv_inspire_isaac.data_pipeline.manifest import local_minute_timestamp
 
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+_RAW_EPISODE_DIRECTORY = "raw"
 _ROUTINE_CONTROL_HOLD_REASONS = {
     "physical_pedal_released",
     "source_deadman_released",
@@ -201,10 +202,11 @@ class EpisodeController(Node):
         # recorder before it can acknowledge startup.
         episode_name = base_episode_name
         suffix = 1
-        while (root / dataset / episode_name).exists():
+        storage_root = root / dataset / _RAW_EPISODE_DIRECTORY
+        while (storage_root / episode_name).exists():
             episode_name = f"{base_episode_name}_{suffix:02d}"
             suffix += 1
-        self._current_manifest = root / dataset / episode_name / "manifest.json"
+        self._current_manifest = storage_root / episode_name / "manifest.json"
         command = [
             sys.executable,
             "-m",
@@ -213,6 +215,8 @@ class EpisodeController(Node):
             str(root),
             "--dataset-name",
             dataset,
+            "--storage-subdirectory",
+            _RAW_EPISODE_DIRECTORY,
             "--episode-index",
             str(self._episode_index),
             "--attempt",
@@ -325,7 +329,7 @@ class EpisodeController(Node):
             return
         root = Path(self._required("sessions_root")).expanduser().resolve()
         dataset = str(self.get_parameter("dataset_name").value).strip()
-        dataset_root = (root / dataset).resolve()
+        dataset_root = (root / dataset / _RAW_EPISODE_DIRECTORY).resolve()
         episode_directory = manifest_path.parent.resolve()
         try:
             episode_directory.relative_to(dataset_root)

@@ -442,6 +442,27 @@ def test_disabled_ros_mcap_is_absent_from_manifest_and_finish(tmp_path):
     assert not episode.ros_path.exists()
 
 
+def test_episode_session_can_store_raw_below_dataset_root(tmp_path):
+    episode = _episode_session(
+        tmp_path,
+        dataset_name="pick_place",
+        storage_subdirectory="raw",
+        episode_directory_name="episode_000001_20260804_1200",
+        collection_timestamp_local="20260804_1200",
+    )
+    try:
+        assert episode.directory == (
+            tmp_path
+            / "episodes"
+            / "pick_place"
+            / "raw"
+            / "episode_000001_20260804_1200"
+        )
+        assert episode.manifest.dataset_name == "pick_place"
+    finally:
+        episode.abort(reason="test-complete")
+
+
 def test_startup_abort_closes_recorder_and_writes_failed_manifest(tmp_path):
     episode = _episode_session(tmp_path)
     episode.abort(reason="fault:rosbag-start")

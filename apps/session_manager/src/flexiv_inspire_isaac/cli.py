@@ -1365,7 +1365,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("replay", help="replay the dataset selected by config/playback.yaml")
     convert = sub.add_parser(
         "convert",
-        help="export the latest completed episode to LeRobot",
+        help="export the episode(s) selected by config/conversion.yaml to LeRobot",
     )
     convert.add_argument(
         "--action-view",
@@ -1728,6 +1728,14 @@ def main(argv: list[str] | None = None) -> int:
             record_lock.close()
 
 
+def _episode_manifest_paths(dataset_root: Path) -> list[Path]:
+    """Find current ``raw/`` episodes and the legacy flat layout."""
+
+    paths = set(dataset_root.glob("raw/*/manifest.json"))
+    paths.update(dataset_root.glob("*/manifest.json"))
+    return sorted(paths)
+
+
 def _latest_completed_manifest(config) -> Path:
     recording = config.document["recording"]
     dataset_root = config.resolve(recording["output_root"]) / str(
@@ -1736,7 +1744,7 @@ def _latest_completed_manifest(config) -> Path:
     if not dataset_root.is_dir():
         raise FileNotFoundError(f"数据集目录不存在: {dataset_root}")
     candidates: list[tuple[tuple[int, int, int], Path]] = []
-    for path in dataset_root.glob("*/manifest.json"):
+    for path in _episode_manifest_paths(dataset_root):
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1758,22 +1766,22 @@ def _latest_completed_manifest(config) -> Path:
     return max(candidates, key=lambda item: item[0])[1]
 
 
-def _conversion_manifest(config, source: dict) -> Path:
+def _conversion_manifests(config, source: dict) -> list[Path]:
     explicit = str(source.get("manifest", "")).strip()
     if explicit:
         path = config.resolve(explicit)
         if not path.is_file():
             raise FileNotFoundError(f"manifest 不存在: {path}")
-        return path
+        return [path]
     dataset_root_raw = str(source.get("dataset_root", "")).strip()
     if not dataset_root_raw:
-        return _latest_completed_manifest(config)
+        return [_latest_completed_manifest(config)]
     dataset_root = config.resolve(dataset_root_raw)
     if not dataset_root.is_dir():
         raise FileNotFoundError(f"数据集目录不存在: {dataset_root}")
     selector = str(source.get("episode", "latest")).strip() or "latest"
     candidates: list[tuple[tuple[int, int, int], Path, dict]] = []
-    for path in dataset_root.glob("*/manifest.json"):
+    for path in _episode_manifest_paths(dataset_root):
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1791,7 +1799,7 @@ def _conversion_manifest(config, source: dict) -> Path:
                 document,
             )
         )
-    if selector == "latest":
+    if selector in {"latest", "all"}:
         matching = candidates
     elif selector.isdigit():
         matching = [
@@ -1805,7 +1813,16 @@ def _conversion_manifest(config, source: dict) -> Path:
         raise FileNotFoundError(
             f"没有匹配的已完成 episode: {dataset_root} / {selector}"
         )
-    return max(matching, key=lambda item: item[0])[1]
+    ordered = sorted(matching, key=lambda item: item[0])
+    if selector == "all":
+        return [item[1] for item in ordered]
+    return [ordered[-1][1]]
+
+
+def _conversion_manifest(config, source: dict) -> Path:
+    """Compatibility helper for callers that need one selected episode."""
+
+    return _conversion_manifests(config, source)[-1]
 
 
 def _run_convert(config, args) -> int:
@@ -1824,13 +1841,14 @@ def _run_convert(config, args) -> int:
     output = conversion.get("output", {})
     if not isinstance(source, dict) or not isinstance(output, dict):
         raise SystemExit("conversion source/output 必须是 mapping")
-    manifest = (
-        config.resolve(args.manifest)
+    manifests = (
+        [config.resolve(args.manifest)]
         if str(args.manifest).strip()
-        else _conversion_manifest(config, source)
+        else _conversion_manifests(config, source)
     )
-    if not manifest.is_file():
-        raise SystemExit(f"manifest 不存在: {manifest}")
+    for manifest in manifests:
+        if not manifest.is_file():
+            raise SystemExit(f"manifest 不存在: {manifest}")
     export = conversion.get("lerobot_export", {})
     configured_view = (
         export.get("action", {}).get("view")
@@ -1839,24 +1857,20 @@ def _run_convert(config, args) -> int:
     ) or config.document["lerobot_export"]["action"]["view"]
     action_view = str(args.action_view or configured_view)
     dataset_name = str(config.document["recording"]["dataset_name"])
-    if str(args.output_root).strip():
-        output_root = config.resolve(args.output_root)
-    else:
-        configured_root = str(output.get("root", "")).strip()
-        base = (
+    episode_subdirectory = bool(output.get("episode_subdirectory", True))
+    configured_root = str(output.get("root", "")).strip()
+    explicit_output_root = str(args.output_root).strip()
+    base = (
+        config.resolve(explicit_output_root)
+        if explicit_output_root
+        else (
             config.resolve(configured_root)
             if configured_root
-            else root / "artifacts" / "lerobot" / dataset_name
+            else root / "sessions" / dataset_name / "lerobot"
         )
-        output_root = (
-            base / manifest.parent.name / action_view
-            if bool(output.get("episode_subdirectory", True))
-            else base
-        )
-    if output_root.exists() and (
-        not output_root.is_dir() or any(output_root.iterdir())
-    ):
-        raise SystemExit(f"输出目录已存在且非空: {output_root}；请指定 --output-root")
+    )
+    if len(manifests) > 1 and not episode_subdirectory:
+        raise SystemExit("批量转换要求 output.episode_subdirectory: true")
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", dataset_name).strip("-") or "dataset"
     repo_id = (
         str(args.repo_id).strip()
@@ -1866,32 +1880,66 @@ def _run_convert(config, args) -> int:
     executable = root / "envs/data-py312/bin/flexiv-inspire-lerobot-export"
     if not executable.is_file():
         raise SystemExit("data 环境不存在；先运行 scripts/env/create_envs.sh")
-    command = [
-        str(executable),
-        "--manifest",
-        str(manifest),
-        "--output-root",
-        str(output_root),
-        "--repo-id",
-        repo_id,
-        "--export-config",
-        str(conversion_path),
-        "--action-view",
-        action_view,
-    ]
     mcap_files = source.get("mcap_files", [])
     if not isinstance(mcap_files, list):
         raise SystemExit("conversion source.mcap_files 必须是列表")
-    for raw_mcap in mcap_files:
-        mcap = config.resolve(str(raw_mcap))
+    mcaps = [config.resolve(str(raw_mcap)) for raw_mcap in mcap_files]
+    for mcap in mcaps:
         if not mcap.is_file():
             raise SystemExit(f"MCAP 不存在: {mcap}")
-        command.extend(("--mcap", str(mcap)))
+
+    failed = 0
+    converted = 0
+    skipped = 0
+    for manifest in manifests:
+        output_root = (
+            base
+            if explicit_output_root and len(manifests) == 1
+            else (
+                base / manifest.parent.name / action_view
+                if episode_subdirectory
+                else base
+            )
+        )
+        if output_root.exists() and (
+            not output_root.is_dir() or any(output_root.iterdir())
+        ):
+            if len(manifests) == 1:
+                raise SystemExit(
+                    f"输出目录已存在且非空: {output_root}；请指定 --output-root"
+                )
+            print(f"跳过已有转换结果: {manifest.parent.name}", flush=True)
+            skipped += 1
+            continue
+        command = [
+            str(executable),
+            "--manifest",
+            str(manifest),
+            "--output-root",
+            str(output_root),
+            "--repo-id",
+            repo_id,
+            "--export-config",
+            str(conversion_path),
+            "--action-view",
+            action_view,
+        ]
+        for mcap in mcaps:
+            command.extend(("--mcap", str(mcap)))
+        print(
+            f"转换 {manifest.parent.name} -> {action_view} -> {output_root}",
+            flush=True,
+        )
+        status = subprocess.call(command)
+        if status:
+            print(f"转换失败: {manifest.parent.name}（退出码 {status}）", flush=True)
+            failed += 1
+        else:
+            converted += 1
     print(
-        f"转换 {manifest.parent.name} -> {action_view} -> {output_root}",
-        flush=True,
+        f"转换完成：成功 {converted}，跳过 {skipped}，失败 {failed}", flush=True
     )
-    return subprocess.call(command)
+    return 1 if failed else 0
 
 
 def _run_reset(config, args) -> int:
@@ -2151,7 +2199,11 @@ def _run_collection(config, rendered: dict[str, Path]) -> int:
         lock.close()
         raise SystemExit("another collection process is already active")
     recording = config.document["recording"]
-    output = config.resolve(recording["output_root"]) / recording["dataset_name"]
+    output = (
+        config.resolve(recording["output_root"])
+        / recording["dataset_name"]
+        / "raw"
+    )
     print(
         f"collection starting: {recording['episode_count']} episodes -> {output}\n"
         f"task: {recording['task_description']}\n"

@@ -1,9 +1,9 @@
 # 日常数采只改这个文件；启动命令不接收参数。
 recording:
-  # 输出目录为 <output_root>/<dataset_name>/
-  # episode_000001_YYYYMMDD_HHMM/；左踏板丢弃时旧目录会直接删除。
+  # 输出目录为 <output_root>/<dataset_name>/raw/
+  # episode_000001_YYYYMMDD_HHMM/；同级 lerobot/ 存放转换结果。
   dataset_name: pick_place_demo
-  episode_count: 20
+  episode_count: 10
   output_root: sessions
   # 写入每条 manifest，并默认作为 LeRobot/VLA 的 task prompt。
   task_description: "Pick up the target object and place it in the designated area."

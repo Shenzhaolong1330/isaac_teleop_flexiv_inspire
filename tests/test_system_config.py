@@ -1,8 +1,15 @@
 import sys
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
-from flexiv_inspire_isaac.cli import _commands
+from flexiv_inspire_isaac.cli import (
+    _commands,
+    _conversion_manifest,
+    _conversion_manifests,
+    _run_convert,
+)
 from flexiv_inspire_isaac.system_config import (
     SystemConfigError,
     load_system_config,
@@ -16,6 +23,106 @@ def _example() -> Path:
 
 def _site() -> Path:
     return Path(__file__).parents[1] / "config" / "site.yaml"
+
+
+def test_conversion_manifest_discovers_raw_and_legacy_episodes(tmp_path) -> None:
+    dataset = tmp_path / "pick_place"
+    legacy = dataset / "episode_000001"
+    raw = dataset / "raw" / "episode_000002"
+    for directory, index in ((legacy, 1), (raw, 2)):
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text(
+            json.dumps(
+                {"completed": True, "episode_index": index, "attempt": 1}
+            ),
+            encoding="utf-8",
+        )
+
+    class Config:
+        document = {"recording": {"output_root": str(tmp_path), "dataset_name": "pick_place"}}
+
+        @staticmethod
+        def resolve(raw_path: str) -> Path:
+            return Path(raw_path).resolve()
+
+    assert _conversion_manifest(
+        Config(), {"dataset_root": str(dataset), "episode": "latest"}
+    ) == raw / "manifest.json"
+    assert _conversion_manifest(
+        Config(), {"dataset_root": str(dataset), "episode": "episode_000001"}
+    ) == legacy / "manifest.json"
+    assert _conversion_manifests(
+        Config(), {"dataset_root": str(dataset), "episode": "all"}
+    ) == [legacy / "manifest.json", raw / "manifest.json"]
+
+
+def test_batch_conversion_skips_existing_episode_output(tmp_path, monkeypatch) -> None:
+    dataset = tmp_path / "sessions" / "pick_place"
+    manifests = []
+    for index in (1, 2):
+        episode = dataset / "raw" / f"episode_{index:06d}"
+        episode.mkdir(parents=True)
+        manifest = episode / "manifest.json"
+        manifest.write_text(
+            json.dumps({"completed": True, "episode_index": index, "attempt": 1}),
+            encoding="utf-8",
+        )
+        manifests.append(manifest)
+    existing = dataset / "lerobot" / "episode_000001" / "sent_command"
+    existing.mkdir(parents=True)
+    (existing / "data.txt").write_text("already converted", encoding="utf-8")
+    conversion = tmp_path / "conversion.yaml"
+    conversion.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "source": {"dataset_root": str(dataset), "episode": "all"},
+                "output": {
+                    "root": str(dataset / "lerobot"),
+                    "episode_subdirectory": True,
+                },
+                "lerobot_export": {"action": {"view": "sent_command"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    exporter = tmp_path / "envs" / "data-py312" / "bin" / "flexiv-inspire-lerobot-export"
+    exporter.parent.mkdir(parents=True)
+    exporter.touch()
+    calls = []
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.subprocess.call",
+        lambda command: calls.append(command) or 0,
+    )
+
+    class Config:
+        root = tmp_path
+        document = {
+            "recording": {"dataset_name": "pick_place"},
+            "lerobot_export": {"action": {"view": "sent_command"}},
+        }
+
+        @staticmethod
+        def resolve(raw_path: str) -> Path:
+            return Path(raw_path).resolve()
+
+    status = _run_convert(
+        Config(),
+        SimpleNamespace(
+            conversion_config=str(conversion),
+            manifest="",
+            action_view=None,
+            output_root="",
+            repo_id="",
+        ),
+    )
+
+    assert status == 0
+    assert len(calls) == 1
+    assert calls[0][calls[0].index("--manifest") + 1] == str(manifests[1])
+    assert calls[0][calls[0].index("--output-root") + 1] == str(
+        dataset / "lerobot" / "episode_000002" / "sent_command"
+    )
 
 
 def test_example_system_config_renders_all_runtime_children(tmp_path):
@@ -180,7 +287,7 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     config = load_system_config(_site())
 
     assert config.document["recording"]["dataset_name"] == "pick_place_demo"
-    assert config.document["recording"]["episode_count"] == 20
+    assert config.document["recording"]["episode_count"] == 10
     assert config.document["recording"]["auto_reset_before_record"] is True
     assert config.document["recording"]["ros_mcap_enabled"] is False
     assert config.document["recording"]["deviceio_profile"] == "training"

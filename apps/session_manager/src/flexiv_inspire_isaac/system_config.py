@@ -155,6 +155,13 @@ def load_system_config(path: str | Path) -> SystemConfig:
     for key in ("rdk_config", "tool_payload_config", "frame_config"):
         if not str(flexiv.get(key, "")).strip():
             raise SystemConfigError(f"flexiv.{key} is required")
+    policy_control = _mapping(
+        flexiv.get("policy_control"), "flexiv.policy_control"
+    )
+    if not isinstance(policy_control.get("require_pedal"), bool):
+        raise SystemConfigError(
+            "flexiv.policy_control.require_pedal must be a bool"
+        )
     safety = _mapping(flexiv.get("safety"), "flexiv.safety")
     if not isinstance(safety.get("software_safety_limits_enabled"), bool):
         raise SystemConfigError(
@@ -809,6 +816,9 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     "observation_rate_hz": sampling["arm_observation_hz"],
                     "software_safety_limits_enabled": bool(
                         safety["software_safety_limits_enabled"]
+                    ),
+                    "policy_pedal_required": bool(
+                        flexiv["policy_control"]["require_pedal"]
                     ),
                     "joint_lower_limits_rad": safety["joint_lower_limits_rad"],
                     "joint_upper_limits_rad": safety["joint_upper_limits_rad"],

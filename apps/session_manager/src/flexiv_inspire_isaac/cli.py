@@ -1357,11 +1357,13 @@ def _policy_authorization_command(
 
 
 class _PolicyAuthorizationSupervisor:
-    """Authorize policy once per physical-pedal press."""
+    """Keep the locally launched policy source armed for RPC inference."""
 
     _RETRY_INTERVAL_S = 2.0
 
-    def __init__(self, config, rdk_socket: Path) -> None:
+    def __init__(
+        self, config, rdk_socket: Path, *, require_pedal: bool
+    ) -> None:
         if not sys.stdin.isatty():
             raise RuntimeError(
                 "automatic policy authorization requires robot policy-serve "
@@ -1376,9 +1378,10 @@ class _PolicyAuthorizationSupervisor:
         self._external_shutdown = ExternalShutdownException
         self._config = config
         self._rdk_socket = rdk_socket
-        self._pedal_pressed = False
+        self._require_pedal = bool(require_pedal)
+        self._pedal_pressed = not self._require_pedal
         self._control_state = ""
-        self._authorization_pending = False
+        self._authorization_pending = not self._require_pedal
         self._last_attempt = 0.0
         self._last_reported_error = ""
         rclpy.init()
@@ -1394,6 +1397,8 @@ class _PolicyAuthorizationSupervisor:
         self._node.create_timer(0.25, self._refresh_if_needed)
 
     def _on_pedal(self, message) -> None:
+        if not self._require_pedal:
+            return
         pressed = bool(message.data)
         if pressed and not self._pedal_pressed:
             # Exactly one local action by the operator starts a new policy
@@ -1405,12 +1410,31 @@ class _PolicyAuthorizationSupervisor:
         self._pedal_pressed = pressed
 
     def _on_control_state(self, message) -> None:
+        previous_state = self._control_state
         self._control_state = str(message.state_name).upper()
         if self._control_state in {"POLICY_ARMED", "ACTIVE"}:
             self._authorization_pending = False
+        elif (
+            not self._require_pedal
+            and (
+                (
+                    self._control_state == "HOLD_LATCHED"
+                    and previous_state != "HOLD_LATCHED"
+                )
+                or (
+                    self._control_state == "READY"
+                    and previous_state
+                    in {"", "DISABLED", "MAINTENANCE", "FAULT"}
+                )
+            )
+        ):
+            self._authorization_pending = True
 
     def _refresh_if_needed(self) -> None:
-        if not self._pedal_pressed or not self._authorization_pending:
+        if (
+            (self._require_pedal and not self._pedal_pressed)
+            or not self._authorization_pending
+        ):
             return
         if self._control_state not in {"READY", "HOLD_LATCHED"}:
             return
@@ -1438,16 +1462,29 @@ class _PolicyAuthorizationSupervisor:
         else:
             detail = (result.stdout or "").strip()
             if result.returncode == 0:
+                # The bridge keeps the accepted token pending until its arm,
+                # hand and observation gates are ready. Do not mint another
+                # token merely because the READY state publication races this
+                # short subprocess.
+                self._authorization_pending = False
                 self._last_reported_error = ""
                 print(
-                    "中踏板：policy 控制已自动授权；策略动作可以申请 lease",
+                    (
+                        "中踏板：policy 控制已自动授权；策略动作可以申请 lease"
+                        if self._require_pedal
+                        else "Policy 已自动授权；RPC 策略动作可直接下发"
+                    ),
                     flush=True,
                 )
                 return
             detail = detail or f"exit code {result.returncode}"
         if detail != self._last_reported_error:
             print(
-                f"中踏板：policy 自动授权暂未完成：{detail}",
+                (
+                    f"中踏板：policy 自动授权暂未完成：{detail}"
+                    if self._require_pedal
+                    else f"Policy 自动授权暂未完成：{detail}"
+                ),
                 file=sys.stderr,
                 flush=True,
             )
@@ -1469,7 +1506,7 @@ def _policy_serve_commands(
 ) -> list[list[str]]:
     """Return the hardware owner stack required by an external policy client."""
 
-    return [
+    commands = [
         _rdk_command(config),
         _control_command(config, rendered),
         [
@@ -1484,14 +1521,18 @@ def _policy_serve_commands(
             "--params-file",
             str(rendered["dftp.yaml"]),
         ],
-        [
-            "flexiv-inspire-pedal-router",
-            "--ros-args",
-            "--params-file",
-            str(rendered["pedal.yaml"]),
-        ],
-        _policy_server_command(settings),
     ]
+    if bool(config.document["flexiv"]["policy_control"]["require_pedal"]):
+        commands.append(
+            [
+                "flexiv-inspire-pedal-router",
+                "--ros-args",
+                "--params-file",
+                str(rendered["pedal.yaml"]),
+            ]
+        )
+    commands.append(_policy_server_command(settings))
+    return commands
 
 
 def _wait_for_policy_services(
@@ -2037,9 +2078,20 @@ def _main(args, config) -> int:
                 tuple(config.document["cameras"]["streams"]),
             )
             if settings["auto_authorize_policy"] and reset_requested:
-                authorizer = _PolicyAuthorizationSupervisor(config, rdk_socket)
+                policy_pedal_required = bool(
+                    config.document["flexiv"]["policy_control"][
+                        "require_pedal"
+                    ]
+                )
+                authorizer = _PolicyAuthorizationSupervisor(
+                    config,
+                    rdk_socket,
+                    require_pedal=policy_pedal_required,
+                )
                 authorization_status = (
                     "中踏板踩下时自动授权 policy；松开停止，再踩自动恢复"
+                    if policy_pedal_required
+                    else "Policy 直连模式：无需中踏板，客户端动作直接下发"
                 )
             else:
                 authorization_status = (

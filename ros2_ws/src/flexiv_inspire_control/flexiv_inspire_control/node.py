@@ -110,6 +110,9 @@ class ControlBridge(Node):
         # Site default: Flexiv remains the motion-safety authority. The bridge
         # only requires fresh, connected and finite observations.
         self.declare_parameter("software_safety_limits_enabled", False)
+        # This bypass applies only while source=policy. Teleop and replay keep
+        # their physical deadman behavior even when policy runs pedal-free.
+        self.declare_parameter("policy_pedal_required", True)
         self.declare_parameter("max_translation_step_m", 0.01)
         self.declare_parameter("max_rotation_step_rad", 0.10)
         self.declare_parameter("max_linear_velocity_m_s", 0.20)
@@ -884,7 +887,7 @@ class ControlBridge(Node):
                         "valid_mask": int(command.valid_mask & (ValidMask.LEFT_ARM | ValidMask.RIGHT_ARM)),
                         "safety_validated": True,
                         "local_permission": self._local_permission,
-                        "physical_pedal": self._physical_pedal,
+                        "physical_pedal": self._effective_motion_pedal(),
                         "local_arm_token": token,
                         **targets,
                     }
@@ -905,7 +908,7 @@ class ControlBridge(Node):
                             cancelled
                             or self._arbiter.snapshot.state
                             is not ControlState.ACTIVE
-                            or not self._physical_pedal
+                            or not self._effective_motion_pedal()
                             or time.monotonic_ns()
                             >= command.expires_monotonic_ns
                         )
@@ -1194,9 +1197,26 @@ class ControlBridge(Node):
         self._collision_clear = bool(message.data)
         self._update_gates(time.monotonic_ns())
 
+    def _effective_motion_pedal(self) -> bool:
+        """Return the source-specific motion enable seen by the bridge."""
+
+        if self._physical_pedal:
+            return True
+        pending = getattr(self, "_pending_arm_source", None)
+        active = self._arbiter.snapshot.active_source
+        if (
+            pending is not CommandSource.POLICY
+            and active is not CommandSource.POLICY
+        ):
+            return False
+        return not bool(
+            self.get_parameter("policy_pedal_required").value
+        )
+
     def _on_pedal_state(self, pressed: bool) -> None:
         self._physical_pedal = pressed
-        if not pressed:
+        effective_pressed = self._effective_motion_pedal()
+        if not effective_pressed:
             # A physical clutch release is the deadman release for every
             # local source, including replay (which has no neutral command
             # stream like Quest teleop). Without this acknowledgement a
@@ -1212,7 +1232,7 @@ class ControlBridge(Node):
                 self._chunk_generation += 1
         self._update_gates(time.monotonic_ns())
         snapshot = self._arbiter.snapshot
-        if not pressed and snapshot.state is ControlState.HOLD_LATCHED:
+        if not effective_pressed and snapshot.state is ControlState.HOLD_LATCHED:
             # Complete the measured hardware hold before the episode
             # controller clears this routine latch and re-arms the clutch.
             self._send_hold_once(snapshot.hold_reason.value)
@@ -1232,6 +1252,16 @@ class ControlBridge(Node):
                 raise ValueError("authorization token is already expired")
             snapshot = self._arbiter.snapshot
             if snapshot.state is ControlState.HOLD_LATCHED:
+                if (
+                    source is CommandSource.POLICY
+                    and not bool(
+                        self.get_parameter("policy_pedal_required").value
+                    )
+                ):
+                    # A pedal-free policy has no release edge. A fresh local
+                    # authorization is the explicit acknowledgement required
+                    # to re-arm after a TTL or heartbeat hold.
+                    self._arbiter.observe_deadman_released(source)
                 self._arbiter.clear_hold(local_acknowledged=True)
                 snapshot = self._arbiter.snapshot
             if snapshot.state is ControlState.READY:
@@ -1253,6 +1283,13 @@ class ControlBridge(Node):
             # A periodic refresh is valid while the same source is armed or
             # active. It must not tear down the daemon lease mid-teleop.
             with self._state_lock:
+                if (
+                    source is CommandSource.POLICY
+                    and not bool(
+                        self.get_parameter("policy_pedal_required").value
+                    )
+                ):
+                    self._local_permission = True
                 self._pending_arm_source = source
                 self._pending_arm_token = token
                 self._pending_arm_token_expiry_ns = expires
@@ -1666,7 +1703,7 @@ class ControlBridge(Node):
         )
         gates = GateInputs(
             local_permission=self._local_permission,
-            physical_pedal=self._physical_pedal,
+            physical_pedal=self._effective_motion_pedal(),
             arms_online=arms_online,
             hands_online=hands_online,
             limits_ok=True if practical_mode else self._limits_ok,
@@ -1974,7 +2011,7 @@ class ControlBridge(Node):
         state.active_source = "" if snapshot.active_source is None else snapshot.active_source.value
         state.hold_reason = snapshot.hold_reason.value
         state.local_permission = self._local_permission
-        state.physical_pedal = self._physical_pedal
+        state.physical_pedal = self._effective_motion_pedal()
         state.ft_zeroed_for_session = snapshot.ft_zero_generation is not None
         now = time.monotonic_ns()
         state.arms_online = all(

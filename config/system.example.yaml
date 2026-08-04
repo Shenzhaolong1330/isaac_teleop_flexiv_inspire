@@ -27,6 +27,8 @@ flexiv:
   rdk_config: apps/flexiv_daemon/config/robots.yaml
   tool_payload_config: apps/flexiv_daemon/config/tool_payload.yaml
   frame_config: config/dual_arm_frames.yaml
+  policy_control:
+    require_pedal: true
   safety:
     software_safety_limits_enabled: false
     # Rizon4s manufacturer defaults. Re-read RobotInfo from both controllers

@@ -54,8 +54,8 @@ robot policy-serve
 
 该命令以前台方式运行，默认先执行本机 Reset，然后启动 RDK、控制桥、Inspire、
 三路相机、脚踏和 loopback TLS Policy RPC。它不会启动 Quest、MANUS、Episode
-Controller、LeRobot 或训练/推理程序。每次新踩下中踏板时，前台进程会自动生成
-一次 policy 授权，失败时才重试；松开停止，再踩自动恢复，不再需要单独运行 authorize-control。
+Controller、LeRobot 或训练/推理程序。本机配置为 policy 直连模式：前台进程自动完成
+policy 授权，不需要中踏板或单独运行 authorize-control。Quest 遥操的踏板逻辑不受影响。
 `Ctrl-C` 关闭 server 及其硬件服务。
 
 只做不允许运动的 shadow 诊断且不希望自动 Home 时，可以使用：
@@ -81,6 +81,6 @@ robot-record --config scripts/config/experiments/pick_place_act_v1/run_policy_sh
 checkpoint、执行 ACT 并验证 24D action，但不申请 lease、不向真机发送动作。
 
 真机模式必须在完成 shadow 验收后使用单独的 `run_policy_guarded.yaml`。Client 可以
-先启动；未踩中踏板时只推理并等待，不会因 lease 暂时不可用而退出。踩下中踏板后
-Server 自动授权并开始下发，动作仍经过 lease、TTL、heartbeat、脚踏、软限位和
+先启动；Server 完成自动授权后，Client 直接申请 lease 并下发。动作仍经过
+lease、TTL、heartbeat、软限位和
 source-exclusive 控制。

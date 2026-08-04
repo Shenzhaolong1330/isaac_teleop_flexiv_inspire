@@ -21,6 +21,6 @@ startup:
   # One-command local preparation. Use --no-reset only for read-only shadow
   # diagnostics when moving/Home is intentionally undesired.
   auto_reset_before_serve: true
-  # Each new middle-pedal press authorizes policy control once; a failed
-  # attempt is retried until the bridge reports POLICY_ARMED.
+  # Local policy authorization is completed automatically by policy-serve.
+  # Whether policy needs the pedal is configured in hardware.yaml.
   auto_authorize_policy: true

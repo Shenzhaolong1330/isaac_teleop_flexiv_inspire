@@ -502,6 +502,7 @@ def test_pending_arm_waits_for_fresh_arm_and_hand_observations() -> None:
         limits_ok=True,
         collision_clear=True,
     )
+    bridge._arbiter.update_gates(bridge._last_gate_inputs)
 
     assert bridge._try_arm_pending_authorization(time.monotonic_ns()) is False
     assert bridge._arbiter.snapshot.state is ControlState.READY
@@ -517,6 +518,54 @@ def test_pending_arm_waits_for_fresh_arm_and_hand_observations() -> None:
     bridge._arbiter.update_gates(bridge._last_gate_inputs)
     assert bridge._try_arm_pending_authorization(time.monotonic_ns()) is True
     assert bridge._arbiter.snapshot.state is ControlState.TELEOP_ARMED
+
+
+def test_policy_direct_authorization_arms_without_physical_pedal() -> None:
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._session_id = "session"
+    bridge._arbiter = ControlArbiter()
+    bridge._arbiter.begin_hardware_session("session")
+    bridge._arbiter.mark_ft_zeroed(
+        session_id="session", connection_generation=1
+    )
+    bridge._arbiter.declare_ready(connection_generation=1)
+    bridge._local_permission = False
+    bridge._physical_pedal = False
+    bridge._pending_arm_source = None
+    bridge._pending_arm_token = None
+    bridge._pending_arm_token_expiry_ns = 0
+    bridge._rdk_control_lease_active = False
+    bridge._last_gate_inputs = GateInputs(
+        local_permission=True,
+        physical_pedal=True,
+        arms_online=True,
+        hands_online=True,
+        limits_ok=True,
+        collision_clear=True,
+    )
+    bridge._arbiter.update_gates(bridge._last_gate_inputs)
+    bridge._hold_sent_for_latch = True
+    bridge._publish_control_state = lambda: None
+    bridge.get_parameter = lambda name: SimpleNamespace(value=False)
+    bridge.get_logger = lambda: SimpleNamespace(error=lambda _message: None)
+
+    bridge._on_arm_authorization(
+        SimpleNamespace(
+            data=json.dumps(
+                {
+                    "session_id": "session",
+                    "source": "policy",
+                    "one_time_token": "fresh-token",
+                    "expires_monotonic_ns": time.monotonic_ns()
+                    + 1_000_000_000,
+                }
+            )
+        )
+    )
+
+    assert bridge._local_permission is True
+    assert bridge._arbiter.snapshot.state is ControlState.POLICY_ARMED
 
 
 def test_hardware_hold_waits_for_single_synchronous_stop() -> None:
@@ -631,6 +680,35 @@ def test_home_gate_does_not_require_physical_pedal() -> None:
     bridge._last_hand_observation_ns = {"left": now, "right": now}
 
     assert bridge._home_gate_failure(now) == ""
+
+
+def test_policy_direct_mode_bypasses_only_policy_pedal() -> None:
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._physical_pedal = False
+    bridge._pending_arm_source = CommandSource.POLICY
+    bridge._arbiter = SimpleNamespace(
+        snapshot=SimpleNamespace(active_source=None)
+    )
+    bridge.get_parameter = lambda name: SimpleNamespace(value=False)
+
+    assert bridge._effective_motion_pedal() is True
+
+    bridge._pending_arm_source = CommandSource.TELEOP
+    assert bridge._effective_motion_pedal() is False
+
+
+def test_policy_direct_mode_does_not_bypass_when_configured_for_pedal() -> None:
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._physical_pedal = False
+    bridge._pending_arm_source = CommandSource.POLICY
+    bridge._arbiter = SimpleNamespace(
+        snapshot=SimpleNamespace(active_source=CommandSource.POLICY)
+    )
+    bridge.get_parameter = lambda name: SimpleNamespace(value=True)
+
+    assert bridge._effective_motion_pedal() is False
 
 
 def test_home_gate_does_not_require_fresh_hand_observations() -> None:

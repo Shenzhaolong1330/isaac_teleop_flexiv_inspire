@@ -35,6 +35,7 @@ def _policy_server() -> Path:
 
 def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     config = load_system_config(_site())
+    assert config.document["flexiv"]["policy_control"]["require_pedal"] is False
     rendered = render_runtime_configs(config, tmp_path / "rendered")
     settings = _load_policy_server_config(config, _policy_server())
     commands = _policy_serve_commands(config, rendered, settings)
@@ -64,12 +65,12 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
         clear_hold_latched=True,
     )
     assert "--clear-hold-latched" in recovery_authorization
-    assert len(commands) == 6
+    assert len(commands) == 5
     assert any("flexiv-rdk-daemon" in command for command in joined)
     assert any("flexiv_inspire_control.node" in command for command in joined)
     assert any("flexiv-inspire-camera-node" in command for command in joined)
     assert any("flexiv-inspire-dftp-node" in command for command in joined)
-    assert any("flexiv-inspire-pedal-router" in command for command in joined)
+    assert not any("flexiv-inspire-pedal-router" in command for command in joined)
     assert any("policy_api.ros_adapter" in command for command in joined)
     forbidden = (
         "teleop_input_node",
@@ -88,6 +89,7 @@ def test_policy_authorizer_authorizes_once_per_pedal_press(monkeypatch, capsys) 
     )
     supervisor._config = SimpleNamespace(document={"session": {"id": "test"}})
     supervisor._rdk_socket = Path("/tmp/rdk.sock")
+    supervisor._require_pedal = True
     supervisor._pedal_pressed = False
     supervisor._control_state = ""
     supervisor._authorization_pending = False
@@ -125,6 +127,7 @@ def test_policy_authorizer_clears_hold_only_on_new_pedal_press(monkeypatch) -> N
     )
     supervisor._config = SimpleNamespace(document={"session": {"id": "test"}})
     supervisor._rdk_socket = Path("/tmp/rdk.sock")
+    supervisor._require_pedal = True
     supervisor._pedal_pressed = False
     supervisor._control_state = "HOLD_LATCHED"
     supervisor._authorization_pending = False
@@ -144,6 +147,36 @@ def test_policy_authorizer_clears_hold_only_on_new_pedal_press(monkeypatch) -> N
 
     assert len(calls) == 1
     assert "--clear-hold-latched" in calls[0][0]
+
+
+def test_policy_authorizer_arms_direct_mode_without_pedal(monkeypatch, capsys) -> None:
+    calls = []
+    supervisor = _PolicyAuthorizationSupervisor.__new__(
+        _PolicyAuthorizationSupervisor
+    )
+    supervisor._config = SimpleNamespace(document={"session": {"id": "test"}})
+    supervisor._rdk_socket = Path("/tmp/rdk.sock")
+    supervisor._require_pedal = False
+    supervisor._pedal_pressed = True
+    supervisor._control_state = ""
+    supervisor._authorization_pending = True
+    supervisor._last_attempt = 0.0
+    supervisor._last_reported_error = ""
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.time.monotonic", lambda: 20.0
+    )
+    monkeypatch.setattr(
+        "flexiv_inspire_isaac.cli.subprocess.run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    supervisor._on_control_state(SimpleNamespace(state_name="READY"))
+    supervisor._refresh_if_needed()
+
+    assert len(calls) == 1
+    assert "--clear-hold-latched" not in calls[0][0]
+    assert "RPC 策略动作可直接下发" in capsys.readouterr().out
 
 
 def test_conversion_manifest_discovers_raw_and_legacy_episodes(tmp_path) -> None:
@@ -365,6 +398,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert parameters["joint_lower_limits_rad"][0] < 0.0
     assert parameters["joint_upper_limits_rad"][5] > 4.5
     assert parameters["software_safety_limits_enabled"] is False
+    assert parameters["policy_pedal_required"] is True
     assert parameters["cartesian_control_mode"] == "position"
     assert parameters["cartesian_impedance_stiffness"] == [
         1200,

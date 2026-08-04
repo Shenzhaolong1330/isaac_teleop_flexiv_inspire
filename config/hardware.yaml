@@ -26,6 +26,10 @@ flexiv:
   rdk_config: apps/flexiv_daemon/config/robots.yaml
   tool_payload_config: apps/flexiv_daemon/config/tool_payload.yaml
   frame_config: config/dual_arm_frames.yaml
+  policy_control:
+    # Policy inference starts sending as soon as its RPC client is connected.
+    # This only bypasses the pedal for source=policy; Quest teleop is unchanged.
+    require_pedal: false
   safety:
     # Practical site mode: trust the Flexiv controller's built-in joint,
     # speed, wrench and temperature protection. The bridge still rejects

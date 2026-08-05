@@ -338,9 +338,19 @@ def main(args=None) -> int:
                 reader = DftpProtocolReader(
                     transport, side, clock_ns=time.monotonic_ns
                 )
+                # Tactile acquisition is 17 Modbus transactions per frame.
+                # Keep it on a second read-only connection so it cannot block
+                # the 200 Hz non-tactile state and command path.
+                tactile_transport = ReadOnlyModbusTcpClient(
+                    host, **transport_kwargs
+                )
+                tactile_reader = DftpProtocolReader(
+                    tactile_transport, side, clock_ns=time.monotonic_ns
+                )
                 self._workers[side] = DftpHandWorker(
                     side,
                     reader,
+                    tactile_reader=tactile_reader,
                     command_sink=command_sink,
                     state_hz=float(self.get_parameter("state_hz").value),
                     tactile_hz=float(self.get_parameter("tactile_hz").value),

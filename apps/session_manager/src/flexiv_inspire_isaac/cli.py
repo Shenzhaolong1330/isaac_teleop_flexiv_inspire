@@ -1277,7 +1277,7 @@ def _load_policy_server_config(config, raw_path: str | Path) -> dict:
     normalized_rates = {}
     for name, default in (
         ("arm_hz", 200.0),
-        ("hand_hz", 15.0),
+        ("hand_hz", 200.0),
         ("tactile_hz", 15.0),
         ("camera_hz", 15.0),
         ("action_hz", 30.0),

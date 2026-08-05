@@ -44,7 +44,7 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     assert settings["bind"] == "127.0.0.1"
     assert settings["rates"] == {
         "arm_hz": 200.0,
-        "hand_hz": 15.0,
+        "hand_hz": 200.0,
         "tactile_hz": 15.0,
         "camera_hz": 15.0,
         "action_hz": 30.0,
@@ -536,7 +536,7 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     assert config.document["recording"]["deviceio_profile"] == "training"
     assert config.document["recording"]["record_only_while_pedal_pressed"] is True
     assert config.document["sampling"]["arm_observation_hz"] == 300.0
-    assert config.document["sampling"]["hand_state_hz"] == 15.0
+    assert config.document["sampling"]["hand_state_hz"] == 200.0
     assert config.document["sampling"]["tactile_hz"] == 15.0
     assert config.document["sampling"]["camera_hz"] == 15.0
     assert config.document["recording"]["live_rerun"] == {

@@ -8,7 +8,9 @@ sampling:
   # RGB、深度和点云作为同一原子帧统一按 15 Hz 采集和记录。
   arm_observation_hz: 300.0
   teleop_command_hz: 60.0
-  hand_state_hz: 15.0
+  # Non-tactile DFTP state is one contiguous Modbus read on a dedicated
+  # connection. Clients may downsample this 200 Hz native stream independently.
+  hand_state_hz: 200.0
   tactile_hz: 15.0
   camera_hz: 15.0
   policy_observation_hz: 15.0

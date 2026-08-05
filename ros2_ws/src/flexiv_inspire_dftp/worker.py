@@ -8,11 +8,12 @@ from typing import Callable, Protocol
 
 from .models import Acquisition, HandCommand, HandState, TactileFrame, TactileSurface
 from .protocol import (
+    HAND_STATE_BLOCK_START,
+    HAND_STATE_BLOCK_WORDS,
     Register,
     TACTILE_LAYOUT,
     TOTAL_TAXELS,
-    decode_modbus_i16,
-    decode_packed_u8,
+    decode_hand_state_block,
     decode_tactile,
 )
 
@@ -84,32 +85,34 @@ class DftpProtocolReader:
 
     def read_state(self) -> HandState:
         frame_start = self.clock_ns()
-        field_times: dict[str, tuple[int, int]] = {}
-
-        def read(name: str, address: int, words: int) -> bytes:
-            start = self.clock_ns()
-            payload = self.transport.read_raw(address, words)
-            field_times[name] = (start, self.clock_ns())
-            return payload
-
-        position = decode_modbus_i16(read("position", Register.POSITION_ACTUAL, 6))
-        angle = decode_modbus_i16(read("angle", Register.ANGLE_ACTUAL, 6))
-        force = decode_modbus_i16(read("force", Register.FORCE_ACTUAL, 6))
-        current = decode_modbus_i16(read("current", Register.CURRENT, 6))
-        errors = decode_packed_u8(read("error", Register.ERROR, 3))
-        status = decode_packed_u8(read("status", Register.STATUS, 3))
-        temperature = decode_packed_u8(read("temperature", Register.TEMPERATURE, 3))
+        payload = self.transport.read_raw(
+            HAND_STATE_BLOCK_START, HAND_STATE_BLOCK_WORDS
+        )
         frame_end = self.clock_ns()
+        values = decode_hand_state_block(payload)
+        # Every field is sampled atomically by the same Modbus transaction.
+        field_times = {
+            name: (frame_start, frame_end)
+            for name in (
+                "position",
+                "angle",
+                "force",
+                "current",
+                "error",
+                "status",
+                "temperature",
+            )
+        }
         self.state_sequence += 1
         return HandState(
             side=self.side,
-            actuator_position=position,
-            actuator_angle=angle,
-            actual_force_g=force,
-            current_ma=current,
-            temperature_c=temperature,
-            error_code=errors,
-            status_code=status,
+            actuator_position=values["position"],
+            actuator_angle=values["angle"],
+            actual_force_g=values["force"],
+            current_ma=values["current"],
+            temperature_c=values["temperature"],
+            error_code=values["error"],
+            status_code=values["status"],
             acquisition=Acquisition(
                 # DFTP exposes no device clock; midpoint is the least biased
                 # host-clock estimate and field_times preserve the uncertainty.
@@ -149,11 +152,11 @@ class DftpCommandSink:
 
 
 class DftpHandWorker:
-    """Own all socket I/O for one hand.
+    """Own deterministic state/command I/O for one hand.
 
-    The tactile frame is deliberately assembled as 17 independent transactions.
-    The command mailbox is checked before and after every surface so an action
-    cannot sit behind a complete tactile frame.
+    Production supplies a second read-only connection for tactile acquisition,
+    so its 17 transactions cannot block the 200 Hz state/command path.  The
+    single-reader fallback is retained for focused tests and compatibility.
     """
 
     def __init__(
@@ -161,6 +164,7 @@ class DftpHandWorker:
         side: str,
         reader: DftpProtocolReader,
         *,
+        tactile_reader: DftpProtocolReader | None = None,
         command_sink: CommandSink | None = None,
         state_hz: float = 50.0,
         tactile_hz: float = 30.0,
@@ -174,8 +178,8 @@ class DftpHandWorker:
     ) -> None:
         if side not in {"left", "right"}:
             raise ValueError("side must be left or right")
-        if not 1.0 <= state_hz <= 100.0:
-            raise ValueError("state_hz must be in 1..100")
+        if not 1.0 <= state_hz <= 200.0:
+            raise ValueError("state_hz must be in 1..200")
         if not 1.0 <= tactile_hz <= 40.0:
             raise ValueError("tactile_hz must be in 1..40")
         if len(safe_force_limits) != 6 or any(
@@ -184,6 +188,7 @@ class DftpHandWorker:
             raise ValueError("safe_force_limits must be six values in 0..3000")
         self.side = side
         self.reader = reader
+        self.tactile_reader = tactile_reader
         self.command_sink = command_sink
         self.state_period_ns = round(1e9 / state_hz)
         self.tactile_period_ns = round(1e9 / tactile_hz)
@@ -193,7 +198,7 @@ class DftpHandWorker:
         # one explicit clock shared with DftpProtocolReader, so frame bounds
         # cannot mix monotonic time with wall-clock surface timestamps.
         self.observation_clock_ns = observation_clock_ns or getattr(
-            reader, "clock_ns", clock_ns
+            tactile_reader or reader, "clock_ns", clock_ns
         )
         self.sleeper = sleeper
         self.on_state = on_state or (lambda _state: None)
@@ -202,6 +207,7 @@ class DftpHandWorker:
         self.mailbox = LatestOnlyMailbox()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._tactile_thread: threading.Thread | None = None
         self._latest_state: HandState | None = None
         self._last_applied: HandCommand | None = None
         self._timeout_hold_sent = False
@@ -232,21 +238,40 @@ class DftpHandWorker:
         )
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._thread is not None or self._tactile_thread is not None:
             raise RuntimeError("worker already started")
         self._stop.clear()
         self._thread = threading.Thread(
             target=self.run, name=f"dftp-{self.side}-worker", daemon=True
         )
         self._thread.start()
+        if self.tactile_reader is not None:
+            self._tactile_thread = threading.Thread(
+                target=self.run_tactile,
+                name=f"dftp-{self.side}-tactile-worker",
+                daemon=True,
+            )
+            self._tactile_thread.start()
 
     def stop(self, timeout_s: float = 2.0) -> None:
         self._stop.set()
         thread, self._thread = self._thread, None
-        if thread is not None:
-            thread.join(timeout_s)
-            if thread.is_alive():
-                raise TimeoutError(f"{self.side} DFTP worker did not stop")
+        tactile_thread, self._tactile_thread = self._tactile_thread, None
+        deadline = time.monotonic() + timeout_s
+        alive = []
+        for name, selected in (
+            ("state", thread),
+            ("tactile", tactile_thread),
+        ):
+            if selected is None:
+                continue
+            selected.join(max(0.0, deadline - time.monotonic()))
+            if selected.is_alive():
+                alive.append(name)
+        if alive:
+            raise TimeoutError(
+                f"{self.side} DFTP {'/'.join(alive)} worker did not stop"
+            )
 
     def run(self) -> None:
         while not self._stop.is_set():
@@ -273,11 +298,44 @@ class DftpHandWorker:
             if now >= next_state:
                 self._read_state_safely()
                 next_state = max(next_state + self.state_period_ns, now)
+            if self.tactile_reader is None and now >= next_tactile:
+                self._read_tactile_frame_safely()
+                next_tactile = max(next_tactile + self.tactile_period_ns, now)
+            next_deadline = (
+                next_state
+                if self.tactile_reader is not None
+                else min(next_state, next_tactile)
+            )
+            remaining_s = max(0.0, (next_deadline - self.clock_ns()) / 1e9)
+            self.sleeper(min(remaining_s, 0.002))
+
+    def run_tactile(self) -> None:
+        """Run low-rate tactile acquisition on its independent connection."""
+
+        assert self.tactile_reader is not None
+        while not self._stop.is_set():
+            try:
+                self.tactile_reader.connect()
+                self._run_tactile_connected()
+            except Exception as exc:
+                self.on_fault(
+                    f"{self.side}: tactile Modbus connection lost: {exc}"
+                )
+            finally:
+                self.tactile_reader.close()
+            if not self._stop.is_set():
+                self.sleeper(0.5)
+
+    def _run_tactile_connected(self) -> None:
+        next_tactile = self.clock_ns()
+        while not self._stop.is_set():
+            now = self.clock_ns()
             if now >= next_tactile:
                 self._read_tactile_frame_safely()
                 next_tactile = max(next_tactile + self.tactile_period_ns, now)
-            next_deadline = min(next_state, next_tactile)
-            remaining_s = max(0.0, (next_deadline - self.clock_ns()) / 1e9)
+            remaining_s = max(
+                0.0, (next_tactile - self.clock_ns()) / 1e9
+            )
             self.sleeper(min(remaining_s, 0.002))
 
     def _read_state_safely(self) -> None:
@@ -296,11 +354,16 @@ class DftpHandWorker:
     def _read_tactile_frame_safely(self) -> None:
         start = self.observation_clock_ns()
         surfaces: list[TactileSurface] = []
+        reader = self.tactile_reader or self.reader
         try:
             for spec in TACTILE_LAYOUT:
-                self._service_command(self.clock_ns())
-                surfaces.append(self.reader.read_surface(spec))
-                self._service_command(self.clock_ns())
+                # In compatibility mode state, tactile and commands share one
+                # connection, so retain command preemption between surfaces.
+                if self.tactile_reader is None:
+                    self._service_command(self.clock_ns())
+                surfaces.append(reader.read_surface(spec))
+                if self.tactile_reader is None:
+                    self._service_command(self.clock_ns())
             end = self.observation_clock_ns()
             self._tactile_sequence += 1
             frame = TactileFrame(

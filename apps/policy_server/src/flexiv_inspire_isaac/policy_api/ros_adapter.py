@@ -656,7 +656,7 @@ def _parse_args(argv=None):
     parser.add_argument("--server-key", type=Path, required=True)
     parser.add_argument("--client-ca", type=Path)
     parser.add_argument("--arm-rate-hz", type=float, default=300.0)
-    parser.add_argument("--hand-rate-hz", type=float, default=15.0)
+    parser.add_argument("--hand-rate-hz", type=float, default=200.0)
     parser.add_argument("--tactile-rate-hz", type=float, default=15.0)
     parser.add_argument("--camera-rate-hz", type=float, default=15.0)
     parser.add_argument("--action-rate-hz", type=float, default=30.0)

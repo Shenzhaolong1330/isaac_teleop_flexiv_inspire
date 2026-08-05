@@ -1,5 +1,7 @@
 import struct
 
+import pytest
+
 from flexiv_inspire_isaac.dftp.models import (
     Acquisition,
     HandCommand,
@@ -166,3 +168,43 @@ def test_tactile_frame_and_surfaces_share_observation_clock():
         <= surface.acquisition_end_ns <= frame.acquisition_end_ns
         for surface in frame.surfaces
     )
+
+
+def test_worker_accepts_200_hz_state_but_rejects_higher_rate():
+    worker = DftpHandWorker("left", Reader([]), state_hz=200.0)
+    assert worker.state_period_ns == 5_000_000
+
+    with pytest.raises(ValueError, match="1..200"):
+        DftpHandWorker("left", Reader([]), state_hz=200.1)
+
+
+def test_separate_tactile_reader_owns_all_surface_transactions():
+    class StateOnlyReader(Reader):
+        def read_surface(self, _spec):
+            raise AssertionError("state connection must not read tactile")
+
+    class TactileReader(Reader):
+        def read_surface(self, spec):
+            self.index += 1
+            return TactileSurface(
+                name=spec.name,
+                rows=spec.rows,
+                cols=spec.cols,
+                values=(0,) * spec.taxels,
+                acquisition_start_ns=self.index,
+                acquisition_end_ns=self.index + 1,
+            )
+
+    tactile = TactileReader([])
+    frames = []
+    worker = DftpHandWorker(
+        "left",
+        StateOnlyReader([]),
+        tactile_reader=tactile,
+        on_tactile=frames.append,
+    )
+
+    worker._read_tactile_frame_safely()
+
+    assert tactile.index == len(TACTILE_LAYOUT)
+    assert len(frames) == 1

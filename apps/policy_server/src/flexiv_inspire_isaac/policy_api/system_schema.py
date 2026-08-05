@@ -29,7 +29,7 @@ NATIVE_ACTION30_NAMES = tuple(
 def build_system_schema(
     *,
     arm_rate_hz: float = 300.0,
-    hand_rate_hz: float = 15.0,
+    hand_rate_hz: float = 200.0,
     tactile_rate_hz: float = 15.0,
     camera_rate_hz: float = 15.0,
     action_rate_hz: float = 30.0,

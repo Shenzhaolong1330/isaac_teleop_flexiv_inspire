@@ -9,12 +9,18 @@ from flexiv_inspire_isaac.dftp.modbus import (
 )
 from flexiv_inspire_isaac.dftp.models import Acquisition, HandState
 from flexiv_inspire_isaac.dftp.protocol import (
+    HAND_STATE_BLOCK_BYTES,
+    HAND_STATE_BLOCK_START,
+    HAND_STATE_BLOCK_WORDS,
+    Register,
     TACTILE_LAYOUT,
     TOTAL_TAXELS,
+    decode_hand_state_block,
     decode_modbus_i16,
     decode_packed_u8,
     decode_tactile,
 )
+from flexiv_inspire_isaac.dftp.worker import DftpProtocolReader
 
 
 def test_official_tactile_layout_is_complete_and_contiguous():
@@ -36,6 +42,57 @@ def test_actuator_words_are_standard_modbus_big_endian():
     payload = struct.pack(">6h", -1, 0, 1, 1000, -4000, 4000)
     assert decode_modbus_i16(payload) == (-1, 0, 1, 1000, -4000, 4000)
     assert decode_packed_u8(bytes((0, 1, 2, 3, 4, 5))) == (0, 1, 2, 3, 4, 5)
+
+
+def _state_block() -> bytes:
+    payload = bytearray(HAND_STATE_BLOCK_BYTES)
+
+    def put(address: int, value: bytes) -> None:
+        offset = address - HAND_STATE_BLOCK_START
+        payload[offset : offset + len(value)] = value
+
+    put(Register.POSITION_ACTUAL, struct.pack(">6h", -6, -5, -4, -3, -2, -1))
+    put(Register.ANGLE_ACTUAL, struct.pack(">6h", 10, 20, 30, 40, 50, 60))
+    put(Register.FORCE_ACTUAL, struct.pack(">6h", 1, 2, 3, 4, 5, 6))
+    put(Register.CURRENT, struct.pack(">6h", 7, 8, 9, 10, 11, 12))
+    put(Register.ERROR, bytes((1, 2, 3, 4, 5, 6)))
+    put(Register.STATUS, bytes((11, 12, 13, 14, 15, 16)))
+    put(Register.TEMPERATURE, bytes((21, 22, 23, 24, 25, 26)))
+    return bytes(payload)
+
+
+def test_contiguous_hand_state_block_decodes_all_non_tactile_fields():
+    decoded = decode_hand_state_block(_state_block())
+
+    assert decoded["position"] == (-6, -5, -4, -3, -2, -1)
+    assert decoded["angle"] == (10, 20, 30, 40, 50, 60)
+    assert decoded["force"] == (1, 2, 3, 4, 5, 6)
+    assert decoded["current"] == (7, 8, 9, 10, 11, 12)
+    assert decoded["error"] == (1, 2, 3, 4, 5, 6)
+    assert decoded["status"] == (11, 12, 13, 14, 15, 16)
+    assert decoded["temperature"] == (21, 22, 23, 24, 25, 26)
+
+
+def test_protocol_reader_uses_one_modbus_transaction_per_state_frame():
+    class Transport:
+        def __init__(self):
+            self.calls = []
+
+        def read_raw(self, address, words):
+            self.calls.append((address, words))
+            return _state_block()
+
+    times = iter((100, 200))
+    transport = Transport()
+    reader = DftpProtocolReader(transport, "left", lambda: next(times))
+
+    state = reader.read_state()
+
+    assert transport.calls == [(HAND_STATE_BLOCK_START, HAND_STATE_BLOCK_WORDS)]
+    assert state.actuator_angle == (10, 20, 30, 40, 50, 60)
+    assert state.acquisition.source_time_ns == 150
+    assert state.acquisition.host_receive_time_ns == 200
+    assert set(state.field_times_ns.values()) == {(100, 200)}
 
 
 def test_hand_state_requires_six_values():

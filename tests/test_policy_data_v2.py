@@ -110,7 +110,7 @@ def _policy_action(
 def test_system_description_exposes_independent_rates_and_minimal_action() -> None:
     schema = build_system_schema(
         arm_rate_hz=200.0,
-        hand_rate_hz=15.0,
+        hand_rate_hz=200.0,
         tactile_rate_hz=15.0,
         camera_rate_hz=15.0,
         action_rate_hz=30.0,
@@ -122,6 +122,7 @@ def test_system_description_exposes_independent_rates_and_minimal_action() -> No
     assert message.schema_hash == schema.schema_hash
     assert channels["arm.left.q"].native_rate_hz == 200.0
     assert channels["camera.head.rgb"].native_rate_hz == 15.0
+    assert channels["hand.left.angle"].native_rate_hz == 200.0
     assert actions["cartesian_delta_rotvec_v1"].rate_hz == 30.0
     assert tuple(actions["cartesian_delta_rotvec_v1"].tensor.shape) == (24,)
     assert tuple(actions["flexiv_inspire_native_rot6d_v1"].tensor.shape) == (30,)

@@ -45,6 +45,19 @@ class Register:
     FORCE_LIMIT = 1498
 
 
+# All non-tactile observations live in one contiguous Modbus address window.
+# Reading the complete window in one function-0x03 transaction removes six
+# request/response round trips from every hand-state frame.  The unused bytes
+# between ANGLE_ACTUAL and FORCE_ACTUAL are intentionally retained.
+HAND_STATE_BLOCK_START = Register.POSITION_ACTUAL
+HAND_STATE_BLOCK_END = Register.TEMPERATURE + 6
+HAND_STATE_BLOCK_BYTES = HAND_STATE_BLOCK_END - HAND_STATE_BLOCK_START
+HAND_STATE_BLOCK_WORDS = HAND_STATE_BLOCK_BYTES // 2
+
+assert HAND_STATE_BLOCK_BYTES == 90
+assert HAND_STATE_BLOCK_WORDS == 45
+
+
 @dataclass(frozen=True)
 class SurfaceSpec:
     name: str
@@ -111,6 +124,34 @@ def decode_packed_u8(payload: bytes, expected_count: int = 6) -> tuple[int, ...]
     if len(payload) != expected_count:
         raise ValueError(f"expected {expected_count} bytes, got {len(payload)}")
     return tuple(payload)
+
+
+def decode_hand_state_block(payload: bytes) -> dict[str, tuple[int, ...]]:
+    """Decode one contiguous non-tactile state read.
+
+    Register addresses in the RH56DFTP manual are byte addresses, while the
+    Modbus request length is expressed in 16-bit words.  Offsets below are
+    therefore calculated in bytes relative to POSITION_ACTUAL.
+    """
+
+    if len(payload) != HAND_STATE_BLOCK_BYTES:
+        raise ValueError(
+            f"expected {HAND_STATE_BLOCK_BYTES} hand-state bytes, got {len(payload)}"
+        )
+
+    def field(address: int, size: int) -> bytes:
+        start = address - HAND_STATE_BLOCK_START
+        return payload[start : start + size]
+
+    return {
+        "position": decode_modbus_i16(field(Register.POSITION_ACTUAL, 12)),
+        "angle": decode_modbus_i16(field(Register.ANGLE_ACTUAL, 12)),
+        "force": decode_modbus_i16(field(Register.FORCE_ACTUAL, 12)),
+        "current": decode_modbus_i16(field(Register.CURRENT, 12)),
+        "error": decode_packed_u8(field(Register.ERROR, 6)),
+        "status": decode_packed_u8(field(Register.STATUS, 6)),
+        "temperature": decode_packed_u8(field(Register.TEMPERATURE, 6)),
+    }
 
 
 def decode_tactile(payload: bytes, spec: SurfaceSpec) -> tuple[int, ...]:

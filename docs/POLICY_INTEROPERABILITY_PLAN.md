@@ -50,7 +50,7 @@ Flexiv / Inspire / Cameras
       v                         v
 Data/Policy RPC v2        现有安全控制路径
       |
-      +---- async Subscribe: vision 15 / arm 200 / hand+tactile 15 Hz
+      +---- async Subscribe: vision 15 / arm 200 / hand 200 / tactile 15 Hz
       +---- sync GetSnapshot: 按策略时间线对齐
       +---- schema negotiation: 名称、形状、单位、坐标系、频率、哈希
       |

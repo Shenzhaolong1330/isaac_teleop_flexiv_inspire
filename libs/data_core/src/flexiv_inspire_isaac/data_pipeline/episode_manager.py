@@ -92,8 +92,8 @@ ROS_BAG_TOPICS = (
 EXPECTED_HZ = {
     "robot/left_arm/state": 300.0,
     "robot/right_arm/state": 300.0,
-    "robot/left_hand/state": 15.0,
-    "robot/right_hand/state": 15.0,
+    "robot/left_hand/state": 200.0,
+    "robot/right_hand/state": 200.0,
     "robot/left_hand/tactile_raw": 15.0,
     "robot/right_hand/tactile_raw": 15.0,
     "camera/head/color/image_raw/compressed": 15.0,

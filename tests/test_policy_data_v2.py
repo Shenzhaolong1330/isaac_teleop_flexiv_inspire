@@ -123,6 +123,18 @@ def test_system_description_exposes_independent_rates_and_minimal_action() -> No
     assert channels["arm.left.q"].native_rate_hz == 200.0
     assert channels["camera.head.rgb"].native_rate_hz == 15.0
     assert channels["hand.left.angle"].native_rate_hz == 200.0
+    for suffix in ("tau", "tau_des", "tau_ext", "tau_interact"):
+        descriptor = channels[f"arm.left.{suffix}"]
+        assert tuple(descriptor.tensor.shape) == (7,)
+        assert descriptor.tensor.unit == "Nm"
+        assert descriptor.native_rate_hz == 200.0
+    for suffix in ("raw_ft", "tcp_wrench"):
+        descriptor = channels[f"arm.left.{suffix}"]
+        assert tuple(descriptor.tensor.shape) == (6,)
+        assert descriptor.tensor.unit == "N+Nm"
+        assert descriptor.native_rate_hz == 200.0
+    assert channels["hand.left.actual_force"].tensor.unit == "g"
+    assert channels["hand.left.actual_force"].native_rate_hz == 200.0
     assert actions["cartesian_delta_rotvec_v1"].rate_hz == 30.0
     assert tuple(actions["cartesian_delta_rotvec_v1"].tensor.shape) == (24,)
     assert tuple(actions["flexiv_inspire_native_rot6d_v1"].tensor.shape) == (30,)

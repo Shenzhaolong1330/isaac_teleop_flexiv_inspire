@@ -51,7 +51,22 @@ def build_system_schema(
                     arm_rate_hz, frame_id=f"{side}_base",
                 ),
                 ChannelDescriptor(
+                    f"{arm_prefix}.tau", "measured_joint_torque",
+                    TensorDescriptor("float64", (7,), ARM_JOINT_NAMES, "Nm"),
+                    arm_rate_hz, frame_id=f"{side}_base",
+                ),
+                ChannelDescriptor(
+                    f"{arm_prefix}.tau_des", "desired_joint_torque",
+                    TensorDescriptor("float64", (7,), ARM_JOINT_NAMES, "Nm"),
+                    arm_rate_hz, frame_id=f"{side}_base",
+                ),
+                ChannelDescriptor(
                     f"{arm_prefix}.tau_ext", "external_joint_torque",
+                    TensorDescriptor("float64", (7,), ARM_JOINT_NAMES, "Nm"),
+                    arm_rate_hz, frame_id=f"{side}_base",
+                ),
+                ChannelDescriptor(
+                    f"{arm_prefix}.tau_interact", "interaction_joint_torque",
                     TensorDescriptor("float64", (7,), ARM_JOINT_NAMES, "Nm"),
                     arm_rate_hz, frame_id=f"{side}_base",
                 ),

@@ -420,7 +420,10 @@ def build_ros_node(
             values_by_suffix = {
                 "q": message.q,
                 "dq": message.dq,
+                "tau": message.tau,
+                "tau_des": message.tau_des,
                 "tau_ext": message.tau_ext,
+                "tau_interact": message.tau_interact,
                 "tcp_pose": (
                     pose.position.x, pose.position.y, pose.position.z,
                     pose.orientation.x, pose.orientation.y,

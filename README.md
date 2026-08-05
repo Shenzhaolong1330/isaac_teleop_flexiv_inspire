@@ -81,6 +81,7 @@ to and from `wxyz`.
 - `ros2_ws/src/flexiv_inspire_dftp/`: project-owned Modbus TCP driver for DFTP-2.
 - `ros2_ws/src/flexiv_inspire_cameras/`: three-camera RGB acquisition.
 - `apps/policy_server/src/flexiv_inspire_isaac/policy_api/`: TLS gRPC PolicyService v1.
+- `apps/policy_client/`: standalone copyable multi-rate remote policy client.
 - `libs/data_core/src/flexiv_inspire_isaac/data_pipeline/`: asynchronous MCAP recording and
   deterministic LeRobot v3 export.
 - `ros2_ws/src/flexiv_inspire_rerun/`: live/offline Rerun visualization.

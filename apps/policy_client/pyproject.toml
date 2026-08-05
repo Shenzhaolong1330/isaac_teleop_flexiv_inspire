@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flexiv-inspire-remote-policy-client"
+version = "0.1.0"
+description = "Copyable multi-rate TLS gRPC client for Flexiv/Inspire policies"
+requires-python = ">=3.10"
+dependencies = [
+  "grpcio>=1.71,<2",
+  "numpy>=1.24",
+  "protobuf>=5.29,<7",
+  "PyYAML>=6",
+]
+
+[project.scripts]
+flexiv-policy-client-smoke = "flexiv_policy_client.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,47 @@
+target: 192.168.110.221:50051
+tls:
+  # CA that signed the RPC server certificate.
+  server_ca: certs/server-ca.crt
+  # Required by the robot server when it binds outside loopback.
+  client_cert: certs/policy-client.crt
+  client_key: certs/policy-client.key
+
+subscriptions:
+  fast:
+    arm.left.q: 200
+    arm.right.q: 200
+    arm.left.dq: 200
+    arm.right.dq: 200
+    arm.left.tcp_pose: 200
+    arm.right.tcp_pose: 200
+    hand.left.angle: 200
+    hand.right.angle: 200
+  force_torque:
+    # Joint torque vectors, Nm.
+    arm.left.tau: 200
+    arm.right.tau: 200
+    arm.left.tau_des: 200
+    arm.right.tau_des: 200
+    arm.left.tau_ext: 200
+    arm.right.tau_ext: 200
+    arm.left.tau_interact: 200
+    arm.right.tau_interact: 200
+    # [fx, fy, fz, mx, my, mz], N + Nm.
+    arm.left.raw_ft: 200
+    arm.right.raw_ft: 200
+    arm.left.tcp_wrench: 200
+    arm.right.tcp_wrench: 200
+    # Six Inspire actuator force values, grams.
+    hand.left.actual_force: 200
+    hand.right.actual_force: 200
+  slow:
+    camera.head.rgb: 15
+    camera.left_wrist.rgb: 15
+    camera.right_wrist.rgb: 15
+    hand.left.tactile: 15
+    hand.right.tactile: 15
+
+action:
+  client_id: remote-policy
+  ttl_ms: 250
+  lease_ms: 2000

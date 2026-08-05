@@ -13,7 +13,7 @@ cameras:
     # Raw depth/point clouds remain in each camera optical frame when blank.
     # fps/depth_fps 是 RealSense 采集档位；最终写盘频率由
     # hardware.yaml 的 sampling.camera_hz 控制。
-    head: {serial: "346522072347", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
+    head: {serial: "213522254002", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
     left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
     right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
 

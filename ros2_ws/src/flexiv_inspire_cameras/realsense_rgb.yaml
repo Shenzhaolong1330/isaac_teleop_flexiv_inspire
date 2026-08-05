@@ -8,7 +8,7 @@ recording:
   depth_enabled: true
 cameras:
   head:
-    serial: "346522072347"
+    serial: "213522254002"
     width: 424
     height: 240
     fps: 30

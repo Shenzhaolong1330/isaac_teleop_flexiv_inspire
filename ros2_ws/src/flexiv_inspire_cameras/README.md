@@ -1,6 +1,7 @@
 # RealSense recording contract
 
-- Three D435i streams are selected by immutable serial number.
+- One D455 head stream and two D435i wrist streams are selected by immutable
+  serial number.
 - RGB plus depth: `424×240 @ 30 Hz`; depth is aligned to the color optical
   frame and stored as native `z16` with depth scale and intrinsics.
 - An organized `xyz_f32_le` point cloud is derived from that aligned depth and

@@ -422,8 +422,8 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     )
     assert parameters["max_joint_velocity_rad_s"] == 2.0
     assert parameters["home_lift_enabled"] is True
-    assert parameters["home_lift_left_safe_z_m"] == -0.377676
-    assert parameters["home_lift_right_safe_z_m"] == -0.413296
+    assert parameters["home_lift_left_safe_z_m"] == -0.177676
+    assert parameters["home_lift_right_safe_z_m"] == -0.213296
     assert parameters["home_lift_max_linear_velocity_m_s"] == 0.12
     assert parameters["home_lift_parallel"] is False
     assert parameters["max_linear_velocity_m_s"] == 0.20

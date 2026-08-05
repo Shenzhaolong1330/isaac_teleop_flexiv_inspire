@@ -71,8 +71,8 @@ flexiv:
       # Confirmed TCP Z values from the mature dual_arm_teleop station setup.
       # This stage never descends: an arm already above its safe Z is skipped.
       enabled: true
-      left_safe_z_m: -0.377676
-      right_safe_z_m: -0.413296
+      left_safe_z_m: -0.177676
+      right_safe_z_m: -0.213296
       max_linear_velocity_m_s: 0.12
       max_angular_velocity_rad_s: 0.50
       max_linear_acceleration_m_s2: 0.50

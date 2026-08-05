@@ -34,8 +34,8 @@
     home_timeout_s: 20.0
     # Vertical-only protective stage before joint-space Home.
     home_lift_enabled: true
-    home_lift_left_safe_z_m: -0.377676
-    home_lift_right_safe_z_m: -0.413296
+    home_lift_left_safe_z_m: -0.177676
+    home_lift_right_safe_z_m: -0.213296
     home_lift_max_linear_velocity_m_s: 0.12
     home_lift_max_angular_velocity_rad_s: 0.50
     home_lift_max_linear_acceleration_m_s2: 0.50

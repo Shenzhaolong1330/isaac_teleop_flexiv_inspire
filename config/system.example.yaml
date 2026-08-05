@@ -73,8 +73,8 @@ flexiv:
       # Vertical-only protective stage before joint-space Home. The target is
       # max(current_z, safe_z), so Reset can never lower an arm here.
       enabled: true
-      left_safe_z_m: -0.377676
-      right_safe_z_m: -0.413296
+      left_safe_z_m: -0.177676
+      right_safe_z_m: -0.213296
       max_linear_velocity_m_s: 0.12
       max_angular_velocity_rad_s: 0.50
       max_linear_acceleration_m_s2: 0.50

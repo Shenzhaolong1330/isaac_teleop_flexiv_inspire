@@ -409,11 +409,12 @@ def test_reset_reuses_valid_ft_zero_when_session_is_already_ready():
     assert _ft_zero_mode("POLICY_ARMED", True) == "reuse"
     assert _ft_zero_mode("REPLAY_ARMED", True) == "reuse"
     assert _ft_zero_mode("HOLD_LATCHED", True) == "reuse"
+    assert _ft_zero_mode("FAULT", True) == "reuse"
     with pytest.raises(RuntimeError, match="valid session F/T zero"):
         _ft_zero_mode("READY", False)
     with pytest.raises(RuntimeError, match="valid session F/T zero"):
         _ft_zero_mode("TELEOP_ARMED", False)
-    with pytest.raises(RuntimeError, match="READY/ARMED/HOLD_LATCHED"):
+    with pytest.raises(RuntimeError, match="READY/ARMED/HOLD_LATCHED/FAULT"):
         _ft_zero_mode("ACTIVE", True)
 
 

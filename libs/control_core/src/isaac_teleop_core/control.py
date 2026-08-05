@@ -400,6 +400,29 @@ class ControlArbiter:
             self._hold_reason = reason
             self._state = ControlState.FAULT
 
+    def recover_fault_for_home(self) -> None:
+        """Return a faulted software arbiter to READY for local Reset/Home.
+
+        The hardware daemon must complete ClearFault -> Enable -> operational
+        before the bridge calls this method.  Keeping this transition separate
+        from normal command arming prevents teleop/policy traffic from using it
+        as a general fault bypass while allowing Reset to perform its Cartesian
+        escape lift.
+        """
+
+        with self._lock:
+            if self._state is not ControlState.FAULT:
+                raise TransitionError("fault recovery requires FAULT")
+            if self._ft_zero_generation is None:
+                raise TransitionError(
+                    "fault recovery Home requires current F/T zero"
+                )
+            self._active_source = None
+            self._hold_reason = HoldReason.NONE
+            self._deadman_release_seen = False
+            self._clear_commands()
+            self._state = ControlState.READY
+
     def observe_deadman_released(self, source: CommandSource) -> None:
         with self._lock:
             if source == self._active_source:

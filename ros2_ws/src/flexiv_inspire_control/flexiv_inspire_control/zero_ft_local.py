@@ -202,6 +202,7 @@ def _publish_home_authorization_and_request(
                 "one_time_token": authorization["one_time_token"],
                 "expires_monotonic_ns": authorization["expires_monotonic_ns"],
                 "clear_hold_latched": clear_hold_latched,
+                "recover_robot_faults": clear_hold_latched,
             },
             separators=(",", ":"),
         )
@@ -268,10 +269,11 @@ def _ft_zero_mode(state_name: str, ft_zeroed_for_session: bool) -> str:
         "POLICY_ARMED",
         "REPLAY_ARMED",
         "HOLD_LATCHED",
+        "FAULT",
     }:
         return "reuse"
     raise RuntimeError(
-        "Reset requires MAINTENANCE, or READY/ARMED/HOLD_LATCHED with a valid "
+        "Reset requires MAINTENANCE, or READY/ARMED/HOLD_LATCHED/FAULT with a valid "
         "session F/T zero; "
         f"got {normalized or 'UNKNOWN'}"
     )

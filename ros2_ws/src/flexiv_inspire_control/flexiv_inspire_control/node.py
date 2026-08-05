@@ -223,8 +223,10 @@ class ControlBridge(Node):
         self._zero_goal_reserved = False
         self._pending_home_token: str | None = None
         self._pending_home_token_expiry_ns = 0
+        self._pending_home_recovery = False
         self._home_authorization_lease_active = False
         self._home_inflight = False
+        self._home_recovery_active = False
         self._home_sequence = 0
         self._home_request_sequence = 0
         self._home_thread: threading.Thread | None = None
@@ -518,6 +520,7 @@ class ControlBridge(Node):
                 self._rdk_control_lease_active = False
                 self._pending_home_token = None
                 self._pending_home_token_expiry_ns = 0
+                self._pending_home_recovery = False
                 self._home_authorization_lease_active = False
                 for mapper in self._clock_mappers.values():
                     mapper.reset()
@@ -548,6 +551,7 @@ class ControlBridge(Node):
                 self._rdk_control_lease_active = False
                 self._pending_home_token = None
                 self._pending_home_token_expiry_ns = 0
+                self._pending_home_recovery = False
                 self._home_authorization_lease_active = False
                 for mapper in self._clock_mappers.values():
                     mapper.reset()
@@ -1455,11 +1459,22 @@ class ControlBridge(Node):
                 snapshot = self._arbiter.snapshot
                 if snapshot.state is ControlState.HOLD_LATCHED:
                     self._arbiter.clear_hold(local_acknowledged=True)
+                elif snapshot.state is ControlState.FAULT:
+                    if not bool(payload.get("recover_robot_faults", False)):
+                        raise RuntimeError(
+                            "FAULT Home requires completed controller recovery"
+                        )
+                    # authorize_home returns only after the daemon has run
+                    # ClearFault -> Enable -> operational on both controllers.
+                    self._arbiter.recover_fault_for_home()
             with self._state_lock:
                 if self._home_inflight:
                     raise RuntimeError("Home is already active")
                 self._pending_home_token = token
                 self._pending_home_token_expiry_ns = expires
+                self._pending_home_recovery = bool(
+                    payload.get("recover_robot_faults", False)
+                )
                 # An explicit fresh authorization must be presented on the
                 # next Home command even if our cached daemon lease appears
                 # active. The daemon may have revoked that lease after an IPC
@@ -1531,7 +1546,10 @@ class ControlBridge(Node):
                     raise RuntimeError(
                         "local Home session authorization is required"
                     )
-                reason = self._home_gate_failure(now)
+                recovery_home = self._pending_home_recovery
+                reason = self._home_gate_failure(
+                    now, recovery_home=recovery_home
+                )
                 if reason:
                     raise RuntimeError(reason)
                 prepare_control = state is not ControlState.READY
@@ -1539,6 +1557,7 @@ class ControlBridge(Node):
                 self._prepare_control_for_home()
             with self._state_lock:
                 self._home_inflight = True
+                self._home_recovery_active = recovery_home
             thread = threading.Thread(
                 target=self._run_home,
                 args=(request_id, prepare_control),
@@ -1565,12 +1584,22 @@ class ControlBridge(Node):
         with self._state_lock:
             self._hold_sent_for_latch = False
 
-    def _home_gate_failure(self, now: int) -> str:
+    def _home_gate_failure(
+        self, now: int, *, recovery_home: bool = False
+    ) -> str:
         if not self._local_permission:
             return "local_permission_missing"
         if not self._collision_clear:
             return "collision_not_clear"
-        if not self._limits_ok or not all(self._arm_safety_ok.values()):
+        # A local Reset recovery exists specifically for the case where the
+        # TCP is pressing an obstacle and the external-force gate is already
+        # exceeded.  Requiring that gate before the vertical escape makes
+        # recovery impossible.  The daemon has already cleared controller
+        # faults and still owns RDK mode/trajectory validation.
+        if (
+            not recovery_home
+            and (not self._limits_ok or not all(self._arm_safety_ok.values()))
+        ):
             return "arm_safety_not_validated"
         if not all(
             self._last_arm_observation_ns[side] > 0
@@ -1609,7 +1638,9 @@ class ControlBridge(Node):
             while not self._stop.is_set():
                 now = time.monotonic_ns()
                 with self._state_lock:
-                    gate_failure = self._home_gate_failure(now)
+                    gate_failure = self._home_gate_failure(
+                        now, recovery_home=self._home_recovery_active
+                    )
                     token = self._pending_home_token or ""
                 if gate_failure:
                     raise RuntimeError(gate_failure)
@@ -1754,8 +1785,10 @@ class ControlBridge(Node):
         finally:
             with self._state_lock:
                 self._home_inflight = False
+                self._home_recovery_active = False
                 self._pending_home_token = None
                 self._pending_home_token_expiry_ns = 0
+                self._pending_home_recovery = False
 
     def _publish_home_status(
         self,

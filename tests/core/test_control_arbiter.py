@@ -228,3 +228,23 @@ def test_prepare_home_rejects_maintenance_without_current_ft_zero() -> None:
 
     with pytest.raises(TransitionError, match="current F/T zero"):
         arbiter.prepare_home()
+
+
+def test_local_reset_can_recover_fault_for_home_with_current_zero() -> None:
+    arbiter = ready_arbiter()
+    arbiter.fault()
+
+    arbiter.recover_fault_for_home()
+
+    assert arbiter.snapshot.state is ControlState.READY
+    assert arbiter.snapshot.active_source is None
+    assert arbiter.snapshot.ft_zero_generation == 1
+
+
+def test_fault_recovery_home_rejects_missing_ft_zero() -> None:
+    arbiter = ControlArbiter()
+    arbiter.begin_hardware_session("session")
+    arbiter.fault()
+
+    with pytest.raises(TransitionError, match="current F/T zero"):
+        arbiter.recover_fault_for_home()

@@ -274,10 +274,11 @@ def test_home_keepalive_allows_blocking_hardware_mode_transition() -> None:
     bridge._pending_home_token_expiry_ns = time.monotonic_ns() + 1_000_000_000
     bridge._home_authorization_lease_active = False
     bridge._home_inflight = True
+    bridge._home_recovery_active = False
     bridge._local_permission = True
     bridge._collision_clear = True
     bridge._ipc_maintenance = MaintenanceClient()
-    bridge._home_gate_failure = lambda _now: ""
+    bridge._home_gate_failure = lambda _now, **_kwargs: ""
     bridge.get_parameter = lambda name: Parameter(values[name])
     statuses = []
     bridge._publish_home_status = lambda *args, **kwargs: statuses.append(
@@ -430,6 +431,68 @@ def test_home_authorization_can_clear_released_invalid_command_hold() -> None:
 
     assert bridge._arbiter.cleared == [True]
     assert bridge._pending_home_token == "fresh-token"
+
+
+def test_reset_home_authorization_recovers_faulted_arbiter() -> None:
+    bridge = ControlBridge.__new__(ControlBridge)
+    bridge._state_lock = threading.RLock()
+    bridge._session_id = "session"
+    bridge._home_inflight = False
+    bridge._home_authorization_lease_active = False
+    bridge._pending_home_token = None
+    bridge._pending_home_token_expiry_ns = 0
+    bridge._pending_home_recovery = False
+    bridge._arbiter = ControlArbiter()
+    bridge._arbiter.begin_hardware_session("session")
+    bridge._arbiter.mark_ft_zeroed(
+        session_id="session", connection_generation=1
+    )
+    bridge._arbiter.declare_ready(connection_generation=1)
+    bridge._arbiter.fault()
+    bridge._publish_home_status = lambda *args, **kwargs: None
+
+    ControlBridge._on_home_authorization(
+        bridge,
+        SimpleNamespace(
+            data=json.dumps(
+                {
+                    "session_id": "session",
+                    "one_time_token": "fresh-token",
+                    "expires_monotonic_ns": time.monotonic_ns()
+                    + 1_000_000_000,
+                    "clear_hold_latched": True,
+                    "recover_robot_faults": True,
+                }
+            )
+        ),
+    )
+
+    assert bridge._arbiter.snapshot.state is ControlState.READY
+    assert bridge._pending_home_recovery is True
+    assert bridge._pending_home_token == "fresh-token"
+
+
+def test_recovery_home_allows_force_limit_but_requires_connected_fault_free_arms() -> None:
+    bridge = ControlBridge.__new__(ControlBridge)
+    now = time.monotonic_ns()
+    bridge._local_permission = True
+    bridge._collision_clear = True
+    bridge._limits_ok = False
+    bridge._arm_safety_ok = {"left": False, "right": False}
+    bridge._last_arm_observation_ns = {"left": now, "right": now}
+    bridge._latest_wire = {
+        "left": {"connected": True, "fault": ""},
+        "right": {"connected": True, "fault": ""},
+    }
+
+    assert bridge._home_gate_failure(now) == "arm_safety_not_validated"
+    assert bridge._home_gate_failure(now, recovery_home=True) == ""
+
+    bridge._latest_wire["right"]["fault"] = "Minor fault"
+    assert (
+        bridge._home_gate_failure(now, recovery_home=True)
+        == "arm_observation_stale"
+    )
 
 
 def test_same_source_arm_authorization_refresh_keeps_existing_lease() -> None:

@@ -94,14 +94,28 @@ def _force_quest_browser_navigation(oob_teleop_adb, url: str) -> None:
                     )
                 )
                 result = json.loads(ws.recv(timeout=5))
-            if result.get("error") or not result.get("result", {}).get(
-                "targetId"
-            ):
+                target_id = result.get("result", {}).get("targetId")
+                if not result.get("error") and target_id:
+                    ws.send(
+                        json.dumps(
+                            {
+                                "id": 2,
+                                "method": "Target.activateTarget",
+                                "params": {"targetId": target_id},
+                            }
+                        )
+                    )
+                    activated = json.loads(ws.recv(timeout=3))
+                    if activated.get("error"):
+                        raise RuntimeError(
+                            "Quest Browser target activation failed: "
+                            f"{activated['error']}"
+                        )
+            if result.get("error") or not target_id:
                 raise RuntimeError(
                     "Quest Browser page creation failed: "
                     f"{result.get('error', result)}"
                 )
-            time.sleep(3.0)
             return
         page = next(
             (
@@ -120,10 +134,43 @@ def _force_quest_browser_navigation(oob_teleop_adb, url: str) -> None:
             ),
         )
         with ws_connect(str(page["webSocketDebuggerUrl"]), open_timeout=3) as ws:
+            # Quest Browser can report immersive-vr unsupported while a tab
+            # is backgrounded. Activate it before navigation so the client's
+            # first capability probe sees the real headset runtime instead of
+            # installing the desktop-only IWER fallback.
+            ws.send(json.dumps({"id": 1, "method": "Page.bringToFront"}))
+            foreground = json.loads(ws.recv(timeout=3))
+            if foreground.get("error"):
+                raise RuntimeError(
+                    "Quest Browser tab activation failed: "
+                    f"{foreground['error']}"
+                )
+            # A previous failed desktop-IWER fallback stores this flag in the
+            # tab's session storage. Clear it before the real Quest page is
+            # reloaded so capability checks cannot inherit the failed mode.
             ws.send(
                 json.dumps(
                     {
-                        "id": 1,
+                        "id": 2,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": (
+                                "sessionStorage.removeItem('iwerWasLoaded')"
+                            )
+                        },
+                    }
+                )
+            )
+            cleared = json.loads(ws.recv(timeout=3))
+            if cleared.get("error"):
+                logging.getLogger("flexiv-inspire-oob-watchdog").debug(
+                    "Could not clear stale Quest XR session flag: %s",
+                    cleared["error"],
+                )
+            ws.send(
+                json.dumps(
+                    {
+                        "id": 3,
                         "method": "Page.navigate",
                         "params": {"url": url},
                     }
@@ -132,10 +179,6 @@ def _force_quest_browser_navigation(oob_teleop_adb, url: str) -> None:
             response = json.loads(ws.recv(timeout=3))
         if response.get("error"):
             raise RuntimeError(f"Quest Browser navigation failed: {response['error']}")
-        # Page.navigate acknowledges before React/three.js has mounted.  The
-        # upstream helper waits for the button but that can precede the XR
-        # canvas by a fraction of a second on Quest cold starts.
-        time.sleep(3.0)
     finally:
         oob_teleop_adb._adb_forward_remove(port)
 
@@ -295,6 +338,46 @@ def _install_cloudxr_client_overrides(
 
     reliable_bookmark._flexiv_original = original_bookmark  # type: ignore[attr-defined]
     oob_teleop_adb.run_adb_headset_bookmark = reliable_bookmark
+
+    # The upstream helper closes the teleop tab before every reconnect. That
+    # is useful once at process startup, but on Quest it turns a recoverable
+    # headset-wake delay into an expensive close/open loop. Clean up once,
+    # then reload and reuse the same foreground tab.
+    current_cleanup = oob_teleop_adb._close_stale_teleop_tabs
+    original_cleanup = getattr(
+        current_cleanup, "_flexiv_original", current_cleanup
+    )
+    cleanup_complete = False
+
+    def cleanup_stale_tabs_once() -> int:
+        nonlocal cleanup_complete
+        if cleanup_complete:
+            return 0
+        cleanup_complete = True
+        return original_cleanup()
+
+    cleanup_stale_tabs_once._flexiv_original = original_cleanup  # type: ignore[attr-defined]
+    oob_teleop_adb._close_stale_teleop_tabs = cleanup_stale_tabs_once
+
+    # Upstream can spend 30 seconds waiting for the button and another 30
+    # seconds waiting for connection state. A healthy USB-local Quest is ready
+    # in a few seconds; fail this attempt promptly and let the watchdog reload
+    # the same page instead of making the operator wait a full minute.
+    current_click = oob_teleop_adb._cdp_session_click_connect
+    original_click = getattr(current_click, "_flexiv_original", current_click)
+
+    async def fast_click_connect(ws_url: str) -> None:
+        try:
+            await asyncio.wait_for(original_click(ws_url), timeout=12.0)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "Quest did not expose a usable native WebXR session within "
+                "12 seconds. Wake the headset and wear it, or cover its "
+                "proximity sensor while it is mounted facing the operator."
+            ) from exc
+
+    fast_click_connect._flexiv_original = original_click  # type: ignore[attr-defined]
+    oob_teleop_adb._cdp_session_click_connect = fast_click_connect
 
     if session_live is not None:
         current_connect = oob_teleop_adb.run_oob_connect

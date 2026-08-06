@@ -86,6 +86,11 @@ case "$TRANSPORT" in
       echo "Quest USB 数据连接未就绪：请解锁头显并允许 USB 调试，然后重试。" >&2
       exit 2
     fi
+    # Wake the display before launching Quest Browser. Without this, Android
+    # accepts the VIEW intent while the browser remains backgrounded and its
+    # first native WebXR capability probe can fail.
+    adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+    echo "提示：Quest 放在身前且未佩戴时，请遮住头显内侧的佩戴/接近传感器，否则原生 WebXR 不会启动。" >&2
     # A crashed CloudXR/WSS run can leave these device-side reverse listeners
     # behind. Clear only the ports owned by this launcher before recreating
     # them; otherwise adb reports "cannot bind listener: Address already in use".

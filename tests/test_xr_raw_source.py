@@ -93,8 +93,11 @@ def test_quest_browser_navigation_uses_existing_isaac_page(monkeypatch):
     _force_quest_browser_navigation(Oob, "https://localhost:8080?oobEnable=1")
 
     assert sent[0] == "ws://isaac-tab"
-    assert sent[1]["method"] == "Page.navigate"
-    assert sent[1]["params"]["url"].endswith("oobEnable=1")
+    assert sent[1]["method"] == "Page.bringToFront"
+    assert sent[2]["method"] == "Runtime.evaluate"
+    assert "iwerWasLoaded" in sent[2]["params"]["expression"]
+    assert sent[3]["method"] == "Page.navigate"
+    assert sent[3]["params"]["url"].endswith("oobEnable=1")
     assert removed == [9223]
 
 
@@ -167,6 +170,8 @@ def test_quest_browser_navigation_creates_page_on_cold_start(monkeypatch):
     assert sent[0] == "ws://browser"
     assert sent[1]["method"] == "Target.createTarget"
     assert sent[1]["params"]["url"].endswith("oobEnable=1")
+    assert sent[2]["method"] == "Target.activateTarget"
+    assert sent[2]["params"]["targetId"] == "created-page"
     assert removed == [9223]
 
 

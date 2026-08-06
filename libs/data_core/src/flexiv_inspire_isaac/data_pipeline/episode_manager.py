@@ -450,6 +450,7 @@ class EpisodeSession:
         storage_subdirectory: str = "",
         episode_index: int = 0,
         attempt: int = 1,
+        task_name: str = "",
         task_description: str = "",
         episode_directory_name: str = "",
         collection_timestamp_local: str = "",
@@ -479,6 +480,11 @@ class EpisodeSession:
         )
         if not re.fullmatch(r"\d{8}_\d{4}", collection_timestamp_local):
             raise ValueError("collection_timestamp_local must use YYYYMMDD_HHMM")
+        task_name = task_name.strip()
+        if task_name and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", task_name
+        ):
+            raise ValueError("task_name must be one safe directory name")
         dataset_root = root / dataset_name if dataset_name else root
         # Keep the storage layer separate from the dataset identity written to
         # the manifest. The collector uses ``raw``; the empty default keeps
@@ -493,8 +499,13 @@ class EpisodeSession:
             if storage_subdirectory
             else dataset_root
         )
+        default_directory_name = (
+            f"{task_name}_episode_{episode_index:03d}_{collection_timestamp_local}"
+            if task_name and episode_index > 0
+            else f"episode_{collection_timestamp_local}"
+        )
         self.directory = storage_root / (
-            episode_directory_name or f"episode_{collection_timestamp_local}"
+            episode_directory_name or default_directory_name
         )
         self.directory.mkdir(parents=True, exist_ok=False)
         self.manifest_path = self.directory / "manifest.json"
@@ -518,6 +529,7 @@ class EpisodeSession:
             episode_index=episode_index,
             attempt=attempt,
             collection_timestamp_local=collection_timestamp_local,
+            task_name=task_name,
             task_description=task_description,
         )
         self.manifest.write_atomic(self.manifest_path)
@@ -1111,6 +1123,7 @@ def _parse_args(argv=None):
     )
     parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--attempt", type=int, default=1)
+    parser.add_argument("--task-name", default="")
     parser.add_argument("--task-description", default="")
     parser.add_argument("--episode-directory-name", default="")
     parser.add_argument("--collection-timestamp-local", default="")
@@ -1197,6 +1210,7 @@ def main(argv=None) -> int:
             storage_subdirectory=options.storage_subdirectory,
             episode_index=options.episode_index,
             attempt=options.attempt,
+            task_name=options.task_name,
             task_description=options.task_description,
             episode_directory_name=options.episode_directory_name,
             collection_timestamp_local=options.collection_timestamp_local,

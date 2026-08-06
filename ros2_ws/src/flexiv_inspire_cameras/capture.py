@@ -364,6 +364,7 @@ class RealSenseRgbCapture:
         self._encode_failures = 0
         self._lock = threading.Lock()
         self._align = self.rs.align(self.rs.stream.color) if self.config.depth_enabled else None
+        self._depth_filters: list[object] = []
         self._world_T_camera: np.ndarray | None = None
         if self.config.extrinsics_mode == "eye_to_hand":
             import yaml
@@ -451,6 +452,64 @@ class RealSenseRgbCapture:
             )
         return pipeline, rs_config
 
+    def _configure_depth_sensor(self, profile) -> None:
+        if not self.config.depth_enabled:
+            return
+        sensor = profile.get_device().first_depth_sensor()
+        preset_values = {
+            "custom": 0.0,
+            "default": 1.0,
+            "hand": 2.0,
+            "high_accuracy": 3.0,
+            "high_density": 4.0,
+            "medium_density": 5.0,
+        }
+
+        def set_supported(option, value: float, name: str) -> None:
+            if not sensor.supports(option):
+                raise RuntimeError(
+                    f"{self.config.name} depth sensor does not support {name}"
+                )
+            option_range = sensor.get_option_range(option)
+            if not float(option_range.min) <= value <= float(option_range.max):
+                raise RuntimeError(
+                    f"{self.config.name} {name}={value:g} is outside device range "
+                    f"[{float(option_range.min):g},{float(option_range.max):g}]"
+                )
+            sensor.set_option(option, value)
+
+        preset = self.config.depth_visual_preset
+        if preset != "unchanged":
+            set_supported(
+                self.rs.option.visual_preset,
+                preset_values[preset],
+                "depth_visual_preset",
+            )
+        # Apply emitter and power after the preset because a preset may replace
+        # the sensor's option block.
+        if self.config.depth_emitter_enabled is not None:
+            set_supported(
+                self.rs.option.emitter_enabled,
+                1.0 if self.config.depth_emitter_enabled else 0.0,
+                "depth_emitter_enabled",
+            )
+        if self.config.depth_laser_power is not None:
+            set_supported(
+                self.rs.option.laser_power,
+                float(self.config.depth_laser_power),
+                "depth_laser_power",
+            )
+
+    def _make_depth_filters(self) -> list[object]:
+        if not self.config.depth_enabled:
+            return []
+        filters: list[object] = []
+        if self.config.depth_spatial_filter_enabled:
+            filters.append(self.rs.spatial_filter())
+        if self.config.depth_temporal_filter_enabled:
+            filters.append(self.rs.temporal_filter())
+        return filters
+
     def run(self) -> None:
         first_connection = True
         while not self._stop.is_set():
@@ -460,7 +519,12 @@ class RealSenseRgbCapture:
                     connected=False, fault=False, reason="connecting"
                 )
                 pipeline, rs_config = self._new_pipeline()
-                pipeline.start(rs_config)
+                profile = pipeline.start(rs_config)
+                self._configure_depth_sensor(profile)
+                # A reconnect starts a new device timeline. Rebuild the
+                # temporal filter so stale depths from the old connection can
+                # never leak into the new stream.
+                self._depth_filters = self._make_depth_filters()
                 if not first_connection:
                     with self._lock:
                         self._reconnects += 1
@@ -508,6 +572,10 @@ class RealSenseRgbCapture:
             depth = frames.get_depth_frame()
             if not depth:
                 raise RuntimeError("frameset did not contain a depth frame")
+            for depth_filter in self._depth_filters:
+                depth = depth_filter.process(depth).as_depth_frame()
+                if not depth:
+                    raise RuntimeError("depth post-processing returned no frame")
             depth_image = np.asanyarray(depth.get_data())
             if depth_image.dtype != np.uint16 or depth_image.shape != (self.config.height, self.config.width):
                 raise RuntimeError("aligned depth frame has unexpected z16 shape")

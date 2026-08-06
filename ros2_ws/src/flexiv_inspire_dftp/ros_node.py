@@ -419,15 +419,24 @@ def main(args=None) -> int:
             self._last_hand_state_ns[side] = time.monotonic_ns()
             self._last_hand_sequence[side] = state.acquisition.sequence
             self._latest_hand_angles[side] = state.actuator_angle
+            self._fault_reason_by_side[side] = ""
             self._state_queue[side].append(state)
 
         def _on_fault(self, side: str, reason: str) -> None:
-            self._fault_latched = True
-            self._control_active = False
+            # A Modbus reconnect is a recoverable transport event, not a
+            # permanent device fault. Tactile uses a separate socket and must
+            # never interrupt motor commands. State reconnect freezes only the
+            # affected hand; the next valid sample clears the offline report
+            # and normal sent_command processing resumes automatically.
+            if "tactile" in reason.lower():
+                self.get_logger().warning(reason)
+                return
             self._fault_reason_by_side[side] = reason
             self._offline_queue[side].append((time.monotonic_ns(), reason))
-            self.get_logger().error(reason)
-            self._request_both_holds(f"driver-fault:{reason}")
+            self.get_logger().warning(reason)
+            self._workers[side].request_hold(
+                self._next_worker_sequence(), f"driver-reconnect:{reason}"
+            )
 
         def _on_control_state(self, message) -> None:
             now = time.monotonic_ns()
@@ -504,9 +513,16 @@ def main(args=None) -> int:
                     now_mono - self._last_hand_state_ns[side]
                     > self._hand_state_timeout_ns
                 ):
-                    self._fault_latched = True
-                    self._request_both_holds(f"{side}-hand-state-stale")
-                    return
+                    # A scheduling gap is recoverable and is not a hardware
+                    # fault. Freeze only the affected hand at its latest
+                    # measured position; the next fresh state/command resumes
+                    # it automatically. The old permanent fault latch made a
+                    # single >200 ms gap disable both hands for the process.
+                    self._workers[side].request_hold(
+                        self._next_worker_sequence(),
+                        f"{side}-hand-state-stale",
+                    )
+                    continue
                 targets = tuple(
                     int(round(value))
                     for value in getattr(point, f"{side}_hand_targets")

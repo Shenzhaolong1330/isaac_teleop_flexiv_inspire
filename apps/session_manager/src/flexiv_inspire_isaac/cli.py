@@ -1120,6 +1120,8 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         "-p",
         f"dataset_name:={recording['dataset_name']}",
         "-p",
+        f"task_name:={recording['task_name']}",
+        "-p",
         f"episode_count:={int(recording['episode_count'])}",
         "-p",
         "task_description:="
@@ -2566,7 +2568,9 @@ def _run_reset(config, args) -> int:
         raise SystemExit(f"工具/负载配置不是文件: {tool_config}")
 
     print(
-        "Reset: 双臂 F/T 清零 -> TCP 竖直抬升 -> 配置的双臂 Home -> 双手张开/闭合/张开",
+        "Reset: 清除双臂控制器故障 -> 双臂 F/T 清零 -> "
+        "TCP 抬升并对齐 Home XY -> 配置的双臂 Home -> "
+        "双手张开/闭合/张开",
         flush=True,
     )
 
@@ -2822,6 +2826,7 @@ def _run_collection(config, rendered: dict[str, Path]) -> int:
     )
     print(
         f"collection starting: {recording['episode_count']} episodes -> {output}\n"
+        f"task name: {recording['task_name']}\n"
         f"task: {recording['task_description']}\n"
         + (
             "capture: middle pedal pressed only; action=sent_command\n"

@@ -132,7 +132,11 @@ def enable_home_lift(payload: dict) -> dict:
     payload.update(
         {
             "lift_enabled": True,
+            "left_lift_target_x_m": 0.925,
+            "left_lift_target_y_m": 0.345,
             "left_lift_safe_z_m": -0.38,
+            "right_lift_target_x_m": 0.952,
+            "right_lift_target_y_m": -0.152,
             "right_lift_safe_z_m": -0.41,
             "lift_max_linear_velocity": 0.10,
             "lift_max_angular_velocity": 0.20,
@@ -330,14 +334,27 @@ def test_ordinary_home_authorization_does_not_clear_controller_fault() -> None:
 
 def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
     value, backend = dispatcher()
+    for side in ("left", "right"):
+        backend.samples[side] = replace(
+            backend.samples[side], q=np.full(7, 0.2)
+        )
     kind, response = value(
         "home_command", 1, home_command(1), (777, 0, 0)
     )
     assert kind == "home_result"
-    assert response["accepted"] and response["completed"]
+    assert response["accepted"] and not response["completed"]
     for side in ("left", "right"):
         assert (side, "joint_position_mode") in backend.events
         assert (side, "send_joint_position") in backend.events
+        backend.samples[side] = replace(
+            backend.samples[side], q=np.zeros(7)
+        )
+    value("observe", 2, {}, (777, 0, 0))
+    follow_up = home_command(2)
+    follow_up["local_authorization_token"] = ""
+    _, completed = value("home_command", 3, follow_up, (777, 0, 0))
+    assert completed["accepted"] and completed["completed"]
+    for side in ("left", "right"):
         assert (side, "cartesian_mode") in backend.events
         assert (side, "send_hold") in backend.events
     assert not value.hold_latched
@@ -345,12 +362,16 @@ def test_home_sends_joint_target_then_returns_to_cartesian_hold() -> None:
 
 def test_home_sends_each_target_immediately_after_its_mode_switch() -> None:
     value, backend = dispatcher()
+    for side in ("left", "right"):
+        backend.samples[side] = replace(
+            backend.samples[side], q=np.full(7, 0.2)
+        )
 
     _, response = value(
         "home_command", 1, home_command(1), (777, 0, 0)
     )
 
-    assert response["accepted"] and response["completed"]
+    assert response["accepted"] and not response["completed"]
     left_mode = backend.events.index(("left", "joint_position_mode"))
     left_target = backend.events.index(("left", "send_joint_position"))
     right_mode = backend.events.index(("right", "joint_position_mode"))
@@ -358,13 +379,52 @@ def test_home_sends_each_target_immediately_after_its_mode_switch() -> None:
     assert left_mode < left_target < right_mode < right_target
 
 
-def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
+def test_home_lifts_only_the_arm_outside_joint_home() -> None:
+    value, backend = dispatcher()
+    # Left is already at the requested joint Home even though its TCP is below
+    # the safe lift Z. Right is away from Home and below its safe lift Z.
+    for side in ("left", "right"):
+        pose = backend.samples[side].tcp_pose_rdk.copy()
+        pose[2] = -0.60
+        q = np.zeros(7) if side == "left" else np.full(7, 0.2)
+        backend.samples[side] = replace(
+            backend.samples[side], q=q, tcp_pose_rdk=pose
+        )
+    request = enable_home_lift(home_command(1))
+
+    _, response = value("home_command", 1, request, (789, 0, 0))
+
+    assert response["accepted"] and not response["completed"]
+    assert ("left", "send_cartesian") not in backend.events
+    assert ("right", "send_cartesian") in backend.events
+    assert "left" not in backend.cartesian_targets
+    np.testing.assert_allclose(
+        backend.cartesian_targets["right"],
+        [0.952, -0.152, -0.41, 1.0, 0.0, 0.0, 0.0],
+    )
+
+    right_pose = backend.samples["right"].tcp_pose_rdk.copy()
+    right_pose[:3] = [0.952, -0.152, -0.41]
+    backend.samples["right"] = replace(
+        backend.samples["right"], tcp_pose_rdk=right_pose
+    )
+    value("observe", 2, {}, (789, 0, 0))
+    follow_up = enable_home_lift(home_command(2))
+    follow_up["local_authorization_token"] = ""
+    _, joint_home = value("home_command", 3, follow_up, (789, 0, 0))
+
+    assert joint_home["accepted"] and not joint_home["completed"]
+    assert ("left", "send_joint_position") not in backend.events
+    assert ("right", "send_joint_position") in backend.events
+
+
+def test_home_pre_aligns_each_tcp_xyz_before_joint_home() -> None:
     value, backend = dispatcher()
     for side in ("left", "right"):
         pose = backend.samples[side].tcp_pose_rdk.copy()
         pose[2] = -0.60
         backend.samples[side] = replace(
-            backend.samples[side], tcp_pose_rdk=pose
+            backend.samples[side], q=np.full(7, 0.2), tcp_pose_rdk=pose
         )
     request = enable_home_lift(home_command(1))
 
@@ -375,15 +435,15 @@ def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
     assert ("left", "set_cartesian_impedance") not in backend.events
     np.testing.assert_allclose(
         backend.cartesian_targets["left"],
-        [0.0, 0.0, -0.38, 1.0, 0.0, 0.0, 0.0],
+        [0.925, 0.345, -0.38, 1.0, 0.0, 0.0, 0.0],
     )
     assert ("left", "send_joint_position") not in backend.events
     assert ("right", "send_cartesian") not in backend.events
 
     left_pose = backend.samples["left"].tcp_pose_rdk.copy()
-    left_pose[2] = -0.38
+    left_pose[:3] = [0.925, 0.345, -0.38]
     backend.samples["left"] = replace(
-        backend.samples["left"], tcp_pose_rdk=left_pose
+        backend.samples["left"], q=np.full(7, 0.2), tcp_pose_rdk=left_pose
     )
     value("observe", 2, {}, (790, 0, 0))
     request = enable_home_lift(home_command(2))
@@ -394,7 +454,7 @@ def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
     assert ("left", "send_joint_position") not in backend.events
 
     right_pose = backend.samples["right"].tcp_pose_rdk.copy()
-    right_pose[2] = -0.41
+    right_pose[:3] = [0.952, -0.152, -0.41]
     backend.samples["right"] = replace(
         backend.samples["right"], tcp_pose_rdk=right_pose
     )
@@ -403,25 +463,37 @@ def test_home_lifts_each_tcp_vertically_before_joint_home() -> None:
     request["local_authorization_token"] = ""
     _, third = value("home_command", 5, request, (790, 0, 0))
 
-    assert third["accepted"] and third["completed"]
+    assert third["accepted"] and not third["completed"]
     for side in ("left", "right"):
         lift_write = backend.events.index((side, "send_cartesian"))
         joint_write = backend.events.index((side, "send_joint_position"))
         assert lift_write < joint_write
+        backend.samples[side] = replace(
+            backend.samples[side], q=np.zeros(7)
+        )
+    value("observe", 6, {}, (790, 0, 0))
+    request = enable_home_lift(home_command(4))
+    request["local_authorization_token"] = ""
+    _, completed = value("home_command", 7, request, (790, 0, 0))
+    assert completed["accepted"] and completed["completed"]
 
 
 def test_home_lift_never_descends_an_arm_already_above_safe_z() -> None:
     value, backend = dispatcher()
+    for side in ("left", "right"):
+        backend.samples[side] = replace(
+            backend.samples[side], q=np.full(7, 0.2)
+        )
     request = enable_home_lift(home_command(1))
     request["left_lift_safe_z_m"] = -0.20
     request["right_lift_safe_z_m"] = -0.20
 
     _, response = value("home_command", 1, request, (791, 0, 0))
 
-    # Mock TCP Z is 0.0, already above -0.20. Home proceeds without issuing a
-    # Cartesian target that could lower either arm.
-    assert response["accepted"] and response["completed"]
-    assert backend.cartesian_targets == {}
+    # Mock TCP Z is 0.0, already above -0.20. XY still aligns, but the target Z
+    # remains at 0.0 and therefore never commands a descent.
+    assert response["accepted"] and not response["completed"]
+    assert backend.cartesian_targets["left"][2] == pytest.approx(0.0)
 
 
 def test_home_lift_timeout_reports_arm_height_and_remaining_distance() -> None:
@@ -429,7 +501,7 @@ def test_home_lift_timeout_reports_arm_height_and_remaining_distance() -> None:
     left_pose = backend.samples["left"].tcp_pose_rdk.copy()
     left_pose[2] = -0.60
     backend.samples["left"] = replace(
-        backend.samples["left"], tcp_pose_rdk=left_pose
+        backend.samples["left"], q=np.full(7, 0.2), tcp_pose_rdk=left_pose
     )
     request = enable_home_lift(home_command(1))
 
@@ -443,9 +515,9 @@ def test_home_lift_timeout_reports_arm_height_and_remaining_distance() -> None:
 
     assert not timed_out["accepted"]
     assert timed_out["reason"].startswith("home_lift_timeout:left(")
-    assert "current_z=-0.6000" in timed_out["reason"]
-    assert "target_z=-0.3800" in timed_out["reason"]
-    assert "remaining=0.2200" in timed_out["reason"]
+    assert "current_xyz=[0.0, 0.0, -0.6]" in timed_out["reason"]
+    assert "target_xyz=[0.925, 0.345, -0.38]" in timed_out["reason"]
+    assert "max_remaining=0.9250" in timed_out["reason"]
 
 
 def test_home_reuses_fresh_bridge_observation_instead_of_polling_rdk_again() -> None:

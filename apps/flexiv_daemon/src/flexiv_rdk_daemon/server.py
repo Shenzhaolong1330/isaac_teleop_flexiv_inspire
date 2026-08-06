@@ -1080,12 +1080,22 @@ class RDKRequestDispatcher:
                             False, False, f"{side}_arm_unhealthy_during_home_lift"
                         )
                 if now - self._home_phase_started_ns > self._home_lift_timeout_ns:
-                    detail = ",".join(
-                        f"{side}(current_z={float(getattr(sample, side).tcp_pose_rdk[2]):.4f},"
-                        f"target_z={float(self._home_lift_targets[side][2]):.4f},"
-                        f"remaining={max(0.0, float(self._home_lift_targets[side][2]) - float(getattr(sample, side).tcp_pose_rdk[2])):.4f})"
-                        for side in self._home_lift_active
-                    )
+                    details = []
+                    for side in self._home_lift_active:
+                        current_xyz = np.asarray(
+                            getattr(sample, side).tcp_pose_rdk[:3],
+                            dtype=np.float64,
+                        )
+                        target_xyz = self._home_lift_targets[side][:3]
+                        remaining = float(
+                            np.max(np.abs(target_xyz - current_xyz))
+                        )
+                        details.append(
+                            f"{side}(current_xyz={current_xyz.tolist()},"
+                            f"target_xyz={target_xyz.tolist()},"
+                            f"max_remaining={remaining:.4f})"
+                        )
+                    detail = ",".join(details)
                     self._latch_hold_locked(
                         "home_lift_timeout", force_hardware_hold=True
                     )
@@ -1093,9 +1103,18 @@ class RDKRequestDispatcher:
                         False, False, f"home_lift_timeout:{detail}"
                     )
                 reached = all(
-                    float(getattr(sample, side).tcp_pose_rdk[2])
-                    >= float(self._home_lift_targets[side][2])
-                    - float(lift["tolerance_m"])
+                    float(
+                        np.max(
+                            np.abs(
+                                self._home_lift_targets[side][:3]
+                                - np.asarray(
+                                    getattr(sample, side).tcp_pose_rdk[:3],
+                                    dtype=np.float64,
+                                )
+                            )
+                        )
+                    )
+                    <= float(lift["tolerance_m"])
                     for side in self._home_lift_active
                 )
                 if reached:
@@ -1107,7 +1126,7 @@ class RDKRequestDispatcher:
                             )
                         else:
                             self._start_joint_home_locked(
-                                targets, limits, now
+                                sample, targets, limits, now
                             )
                     except Exception:
                         self._latch_hold_locked(
@@ -1117,10 +1136,16 @@ class RDKRequestDispatcher:
                         raise
                 if self._home_phase == "lift":
                     remaining = max(
-                        max(
-                            0.0,
-                            float(self._home_lift_targets[side][2])
-                            - float(getattr(sample, side).tcp_pose_rdk[2]),
+                        float(
+                            np.max(
+                                np.abs(
+                                    self._home_lift_targets[side][:3]
+                                    - np.asarray(
+                                        getattr(sample, side).tcp_pose_rdk[:3],
+                                        dtype=np.float64,
+                                    )
+                                )
+                            )
                         )
                         for side in self._home_lift_active
                     )
@@ -1209,6 +1234,7 @@ class RDKRequestDispatcher:
             raise ValueError("Home lift_enabled must be a bool")
         lift: dict[str, Any] = {
             "enabled": lift_enabled_raw,
+            "target_xy": {},
             "safe_z": {},
             "motion_limits": (0.0, 0.0, 0.0, 0.0),
             "tolerance_m": 0.0,
@@ -1219,6 +1245,26 @@ class RDKRequestDispatcher:
         }
         lift_signature: tuple[object, ...] = (False,)
         if lift_enabled_raw:
+            target_xy = {
+                side: np.asarray(
+                    [
+                        payload.get(f"{side}_lift_target_x_m", np.nan),
+                        payload.get(f"{side}_lift_target_y_m", np.nan),
+                    ],
+                    dtype=np.float64,
+                )
+                for side in ("left", "right")
+            }
+            if any(
+                value.shape != (2,)
+                or not np.all(np.isfinite(value))
+                or np.any(value < -2.0)
+                or np.any(value > 2.0)
+                for value in target_xy.values()
+            ):
+                raise ValueError(
+                    "Home lift target XY values must be finite in [-2,2]"
+                )
             safe_z = {
                 side: float(payload.get(f"{side}_lift_safe_z_m", np.nan))
                 for side in ("left", "right")
@@ -1276,6 +1322,7 @@ class RDKRequestDispatcher:
                 raise ValueError("Home lift damping ratio must be in [0.3,0.8]")
             lift = {
                 "enabled": True,
+                "target_xy": target_xy,
                 "safe_z": safe_z,
                 "motion_limits": motion_limits,
                 "tolerance_m": lift_tolerance,
@@ -1286,6 +1333,8 @@ class RDKRequestDispatcher:
             }
             lift_signature = (
                 True,
+                *tuple(float(value) for value in target_xy["left"]),
+                *tuple(float(value) for value in target_xy["right"]),
                 safe_z["left"],
                 safe_z["right"],
                 *motion_limits,
@@ -1317,13 +1366,23 @@ class RDKRequestDispatcher:
         if lift["enabled"]:
             needing_lift: list[str] = []
             for side in ("left", "right"):
-                current = getattr(sample, side).tcp_pose_rdk.copy()
+                arm = getattr(sample, side)
+                # Home is evaluated independently for each arm. An arm whose
+                # joints already match its configured Home must not be lifted
+                # merely because Home Z is below the protective lift height.
+                if self._arm_at_joint_home(arm.q, targets[side], limits[2]):
+                    continue
+                current = arm.tcp_pose_rdk.copy()
                 target = current.copy()
+                target[:2] = lift["target_xy"][side]
                 target[2] = max(
                     float(current[2]), float(lift["safe_z"][side])
                 )
                 self._home_lift_targets[side] = target
-                if target[2] > current[2] + float(lift["tolerance_m"]):
+                if (
+                    float(np.max(np.abs(target[:3] - current[:3])))
+                    > float(lift["tolerance_m"])
+                ):
                     needing_lift.append(side)
             if needing_lift:
                 if lift["parallel"]:
@@ -1333,7 +1392,23 @@ class RDKRequestDispatcher:
                     self._home_lift_queue = needing_lift[1:]
                 self._start_home_lift_locked(active, lift, now)
                 return
-        self._start_joint_home_locked(targets, limits, now)
+        self._start_joint_home_locked(sample, targets, limits, now)
+
+    @staticmethod
+    def _arm_at_joint_home(
+        current: np.ndarray,
+        target: np.ndarray,
+        tolerance: float,
+    ) -> bool:
+        current_q = np.asarray(current, dtype=np.float64).reshape(-1)
+        target_q = np.asarray(target, dtype=np.float64).reshape(-1)
+        return bool(
+            current_q.shape == (7,)
+            and target_q.shape == (7,)
+            and np.all(np.isfinite(current_q))
+            and np.all(np.isfinite(target_q))
+            and float(np.max(np.abs(current_q - target_q))) <= float(tolerance)
+        )
 
     def _start_home_lift_locked(
         self,
@@ -1363,6 +1438,7 @@ class RDKRequestDispatcher:
 
     def _start_joint_home_locked(
         self,
+        sample: Any,
         targets: dict[str, np.ndarray],
         limits: tuple[float, float, float, float],
         now: int,
@@ -1375,6 +1451,10 @@ class RDKRequestDispatcher:
         # same per-arm SwitchMode -> SendJointPosition ordering used by the
         # proven dual_arm_teleop reset implementation.
         for side in ("left", "right"):
+            if self._arm_at_joint_home(
+                getattr(sample, side).q, targets[side], limits[2]
+            ):
+                continue
             self._backend.switch_joint_position_mode(
                 side, local_console=True
             )

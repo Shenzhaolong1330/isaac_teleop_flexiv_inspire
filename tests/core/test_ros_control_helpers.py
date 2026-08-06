@@ -255,7 +255,11 @@ def test_home_keepalive_allows_blocking_hardware_mode_transition() -> None:
         "home_max_velocity_rad_s": 0.5,
         "home_max_acceleration_rad_s2": 1.0,
         "home_tolerance_rad": 0.01,
+        "home_lift_left_target_x_m": 0.925,
+        "home_lift_left_target_y_m": 0.345,
         "home_lift_left_safe_z_m": -0.3,
+        "home_lift_right_target_x_m": 0.952,
+        "home_lift_right_target_y_m": -0.152,
         "home_lift_right_safe_z_m": -0.3,
         "home_lift_max_linear_velocity_m_s": 0.12,
         "home_lift_max_angular_velocity_rad_s": 0.5,
@@ -889,11 +893,11 @@ def test_one_observation_ipc_timeout_keeps_last_good_arm_sample() -> None:
     assert bridge._arm_safety_ok == {"left": True, "right": True}
 
 
-def test_hand_monitor_ipc_timeout_does_not_offline_valid_ros_hand() -> None:
+def test_hand_monitor_ipc_is_decoupled_from_valid_ros_hand_callback() -> None:
     class IPC:
         @staticmethod
         def request(_kind, _payload):
-            raise TimeoutError("mock scheduling hiccup")
+            raise AssertionError("ROS callback must not perform daemon IPC")
 
     class Logger:
         @staticmethod
@@ -910,6 +914,12 @@ def test_hand_monitor_ipc_timeout_does_not_offline_valid_ros_hand() -> None:
         "left": np.zeros(6, dtype=np.float64),
         "right": np.zeros(6, dtype=np.float64),
     }
+    bridge._latest_hand_metadata = {
+        "source_sequence": 0,
+        "source_time_ns": 0,
+        "source_clock_domain": "",
+    }
+    bridge._hand_ipc_wakeup = threading.Event()
     bridge._update_gates = lambda _now: None
     bridge.get_logger = lambda: Logger()
     message = SimpleNamespace(
@@ -927,3 +937,4 @@ def test_hand_monitor_ipc_timeout_does_not_offline_valid_ros_hand() -> None:
 
     assert bool(bridge._hand_connected["left"]) is True
     np.testing.assert_array_equal(bridge._hand_angles["left"], np.ones(6))
+    assert bridge._hand_ipc_wakeup.is_set()

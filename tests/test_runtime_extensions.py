@@ -463,6 +463,24 @@ def test_episode_session_can_store_raw_below_dataset_root(tmp_path):
         episode.abort(reason="test-complete")
 
 
+def test_episode_session_uses_task_name_for_default_new_directory(tmp_path):
+    episode = _episode_session(
+        tmp_path,
+        dataset_name="pick_place",
+        storage_subdirectory="raw",
+        episode_index=7,
+        task_name="red_block_pick",
+        collection_timestamp_local="20260806_1530",
+    )
+    try:
+        assert episode.directory.name == (
+            "red_block_pick_episode_007_20260806_1530"
+        )
+        assert episode.manifest.task_name == "red_block_pick"
+    finally:
+        episode.abort(reason="test-complete")
+
+
 def test_startup_abort_closes_recorder_and_writes_failed_manifest(tmp_path):
     episode = _episode_session(tmp_path)
     episode.abort(reason="fault:rosbag-start")

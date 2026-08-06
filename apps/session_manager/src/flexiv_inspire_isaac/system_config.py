@@ -130,6 +130,7 @@ def load_system_config(path: str | Path) -> SystemConfig:
         "arm_observation_hz",
         "teleop_command_hz",
         "hand_state_hz",
+        "hand_daemon_sync_hz",
         "tactile_hz",
         "camera_hz",
         "policy_observation_hz",
@@ -167,6 +168,14 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError(
             "flexiv.safety.software_safety_limits_enabled must be a bool"
         )
+    if not isinstance(safety.get("require_hands_for_arm_control"), bool):
+        raise SystemConfigError(
+            "flexiv.safety.require_hands_for_arm_control must be a bool"
+        )
+    _positive(
+        safety.get("hand_observation_timeout_ms"),
+        "flexiv.safety.hand_observation_timeout_ms",
+    )
     joint_lower = _vector(
         safety.get("joint_lower_limits_rad"),
         "flexiv.safety.joint_lower_limits_rad",
@@ -295,6 +304,13 @@ def load_system_config(path: str | Path) -> SystemConfig:
     if not isinstance(lift.get("enabled"), bool):
         raise SystemConfigError("flexiv.home.lift.enabled must be a bool")
     for side in ("left", "right"):
+        for axis in ("x", "y"):
+            target = float(lift.get(f"{side}_target_{axis}_m"))
+            if not -2.0 <= target <= 2.0:
+                raise SystemConfigError(
+                    f"flexiv.home.lift.{side}_target_{axis}_m must be finite "
+                    "and in [-2,2]"
+                )
         safe_z = float(lift.get(f"{side}_safe_z_m"))
         if not -2.0 <= safe_z <= 2.0:
             raise SystemConfigError(
@@ -539,6 +555,36 @@ def load_system_config(path: str | Path) -> SystemConfig:
             )
         if stream.get("pixel_format") != "rgb8":
             raise SystemConfigError(f"cameras.streams.{name}.pixel_format must be rgb8")
+        preset = str(stream.get("depth_visual_preset", "unchanged"))
+        if preset not in {
+            "unchanged",
+            "custom",
+            "default",
+            "hand",
+            "high_accuracy",
+            "high_density",
+            "medium_density",
+        }:
+            raise SystemConfigError(
+                f"cameras.streams.{name}.depth_visual_preset is unsupported"
+            )
+        for key in (
+            "depth_spatial_filter_enabled",
+            "depth_temporal_filter_enabled",
+        ):
+            if key in stream and not isinstance(stream[key], bool):
+                raise SystemConfigError(f"cameras.streams.{name}.{key} must be a bool")
+        if "depth_emitter_enabled" in stream and not isinstance(
+            stream["depth_emitter_enabled"], bool
+        ):
+            raise SystemConfigError(
+                f"cameras.streams.{name}.depth_emitter_enabled must be a bool"
+            )
+        laser_power = stream.get("depth_laser_power")
+        if laser_power is not None and not 0.0 <= float(laser_power) <= 360.0:
+            raise SystemConfigError(
+                f"cameras.streams.{name}.depth_laser_power must be in [0,360]"
+            )
         extrinsics = str(stream.get("extrinsics", "")).strip()
         if extrinsics and Path(extrinsics).suffix.lower() not in {".yaml", ".yml"}:
             raise SystemConfigError(
@@ -628,6 +674,17 @@ def load_system_config(path: str | Path) -> SystemConfig:
         )
     ):
         raise SystemConfigError("recording.dataset_name is invalid")
+    task_name = str(recording.get("task_name", "")).strip()
+    if (
+        not task_name
+        or len(task_name) > 96
+        or any(
+            character
+            not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+            for character in task_name
+        )
+    ):
+        raise SystemConfigError("recording.task_name is invalid")
     if not str(recording.get("output_root", "")).strip():
         raise SystemConfigError("recording.output_root is required")
     count = int(recording.get("episode_count", 0))
@@ -804,6 +861,11 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     "hand_reset_open_timeout_s": float(
                         inspire["reset"]["open_timeout_s"]
                     ),
+                    # State is still acquired at the configured native rate;
+                    # this only tolerates short scheduler/Modbus jitter.
+                    "hand_state_timeout_ms": float(
+                        safety["hand_observation_timeout_ms"]
+                    ),
                 }
             }
         },
@@ -814,6 +876,13 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     "frame_config": str(config.resolve(flexiv["frame_config"])),
                     "foot_pedal": pedal["device"],
                     "observation_rate_hz": sampling["arm_observation_hz"],
+                    "hand_daemon_sync_hz": sampling["hand_daemon_sync_hz"],
+                    "hand_observation_timeout_ms": float(
+                        safety["hand_observation_timeout_ms"]
+                    ),
+                    "require_hands_for_arm_control": bool(
+                        safety["require_hands_for_arm_control"]
+                    ),
                     "software_safety_limits_enabled": bool(
                         safety["software_safety_limits_enabled"]
                     ),
@@ -864,8 +933,20 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                     "home_tolerance_rad": flexiv["home"]["tolerance_rad"],
                     "home_timeout_s": flexiv["home"]["timeout_s"],
                     "home_lift_enabled": bool(flexiv["home"]["lift"]["enabled"]),
+                    "home_lift_left_target_x_m": float(
+                        flexiv["home"]["lift"]["left_target_x_m"]
+                    ),
+                    "home_lift_left_target_y_m": float(
+                        flexiv["home"]["lift"]["left_target_y_m"]
+                    ),
                     "home_lift_left_safe_z_m": float(
                         flexiv["home"]["lift"]["left_safe_z_m"]
+                    ),
+                    "home_lift_right_target_x_m": float(
+                        flexiv["home"]["lift"]["right_target_x_m"]
+                    ),
+                    "home_lift_right_target_y_m": float(
+                        flexiv["home"]["lift"]["right_target_y_m"]
                     ),
                     "home_lift_right_safe_z_m": float(
                         flexiv["home"]["lift"]["right_safe_z_m"]

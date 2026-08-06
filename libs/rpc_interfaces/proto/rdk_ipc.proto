@@ -204,6 +204,10 @@ message HomeCommand {
   bool lift_parallel = 25;
   repeated double lift_cartesian_stiffness = 26;
   repeated double lift_cartesian_damping_ratio = 27;
+  double left_lift_target_x_m = 28;
+  double left_lift_target_y_m = 29;
+  double right_lift_target_x_m = 30;
+  double right_lift_target_y_m = 31;
 }
 
 message HomeResult {

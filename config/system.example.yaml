@@ -10,6 +10,7 @@ sampling:
   arm_observation_hz: 300.0
   teleop_command_hz: 60.0
   hand_state_hz: 200.0
+  hand_daemon_sync_hz: 25.0
   tactile_hz: 15.0
   camera_hz: 15.0
   policy_observation_hz: 15.0
@@ -31,6 +32,8 @@ flexiv:
     require_pedal: true
   safety:
     software_safety_limits_enabled: false
+    require_hands_for_arm_control: false
+    hand_observation_timeout_ms: 500.0
     # Rizon4s manufacturer defaults. Re-read RobotInfo from both controllers
     # during site commissioning and reject the hardware session on mismatch.
     # Degrees: [-160,-130,-170,-107,-170,-80,-170] and
@@ -70,10 +73,14 @@ flexiv:
     timeout_s: 20.0
     quest_button: right_primary_click
     lift:
-      # Vertical-only protective stage before joint-space Home. The target is
-      # max(current_z, safe_z), so Reset can never lower an arm here.
+      # XYZ pre-alignment before joint-space Home. Z is
+      # max(current_z, safe_z), so Reset never lowers an arm here.
       enabled: true
+      left_target_x_m: 0.925266862
+      left_target_y_m: 0.345229030
       left_safe_z_m: -0.177676
+      right_target_x_m: 0.952098012
+      right_target_y_m: -0.152109638
       right_safe_z_m: -0.213296
       max_linear_velocity_m_s: 0.12
       max_angular_velocity_rad_s: 0.50
@@ -110,7 +117,19 @@ cameras:
   # Keeps RGB + z16 depth + XYZ in one DeviceIO record under 2 MiB.
   pointcloud_stride: 2
   streams:
-    head:        {serial: "213522254002", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: true}}
+    head:
+      serial: "346522072347"
+      width: 424
+      height: 240
+      fps: 15
+      pixel_format: rgb8
+      extrinsics: ""
+      depth_visual_preset: high_density
+      depth_emitter_enabled: true
+      depth_laser_power: 210
+      depth_spatial_filter_enabled: true
+      depth_temporal_filter_enabled: true
+      recording: {rgb: true, depth: true, pointcloud: true}
     left_wrist:  {serial: "342522074353", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
     right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: true, pointcloud: false}}
 
@@ -190,6 +209,7 @@ lerobot_export:
 
 recording:
   dataset_name: example_dataset
+  task_name: pick_place
   episode_count: 10
   output_root: sessions
   task_description: "Pick up the object and place it in the target area."

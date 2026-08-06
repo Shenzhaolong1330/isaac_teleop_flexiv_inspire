@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import flexiv_inspire_isaac.episode_control as episode_control
-from flexiv_inspire_isaac.episode_control import EpisodeController
+from flexiv_inspire_isaac.episode_control import (
+    EpisodeController,
+    _next_task_episode_index,
+)
 from flexiv_inspire_isaac.pedal_router import PedalRouter
 from flexiv_inspire_control.foot_pedal import FootPedalMonitor, KEY_DOWN, KEY_SPACE
 
@@ -18,6 +21,22 @@ def test_transient_stream_holds_can_be_rearmed_by_pedal_cycle() -> None:
         "hand_offline",
         "safety_limit",
     } <= episode_control._ROUTINE_CONTROL_HOLD_REASONS
+
+
+def test_task_episode_index_continues_across_collection_processes(
+    tmp_path: Path,
+) -> None:
+    for name in (
+        "pick_place_episode_001_20260806_1000",
+        "pick_place_episode_007_20260806_1100",
+        "pick_place_episode_007_20260806_1100_01",
+        "other_task_episode_099_20260806_1200",
+        "episode_000001_20260805_0900",
+    ):
+        (tmp_path / name).mkdir()
+
+    assert _next_task_episode_index(tmp_path, "pick_place") == 8
+    assert _next_task_episode_index(tmp_path, "new_task") == 1
 
 
 class _Publisher:
@@ -66,6 +85,7 @@ class _FakeController:
         self.values = {
             "sessions_root": "/tmp/sessions",
             "dataset_name": "pick_place",
+            "task_name": "red_block_pick",
             "task_description": "Pick up the red block.",
             "session_id": "test-session",
             "tool_config": "/tmp/tool.yaml",
@@ -106,6 +126,7 @@ def test_episode_command_contains_configured_identity_prompt_and_internal_attemp
     assert command[command.index("--storage-subdirectory") + 1] == "raw"
     assert command[command.index("--episode-index") + 1] == "3"
     assert command[command.index("--attempt") + 1] == "2"
+    assert command[command.index("--task-name") + 1] == "red_block_pick"
     assert command[command.index("--deviceio-profile") + 1] == "training"
     assert "--no-ros-mcap" in command
     assert "--record-only-while-pedal-pressed" in command
@@ -114,7 +135,7 @@ def test_episode_command_contains_configured_identity_prompt_and_internal_attemp
     )
     episode_name = command[command.index("--episode-directory-name") + 1]
     match = re.fullmatch(
-        r"episode_000003_(\d{8}_\d{4})",
+        r"red_block_pick_episode_003_(\d{8}_\d{4})",
         episode_name,
     )
     assert match is not None
@@ -129,14 +150,19 @@ def test_episode_command_adds_suffix_when_minute_directory_exists(
     fake = _FakeController("")
     fake.values["sessions_root"] = str(tmp_path)
     timestamp = "20260802_1349"
-    existing = tmp_path / "pick_place" / "raw" / f"episode_000003_{timestamp}"
+    existing = (
+        tmp_path
+        / "pick_place"
+        / "raw"
+        / f"red_block_pick_episode_003_{timestamp}"
+    )
     existing.mkdir(parents=True)
     monkeypatch.setattr(episode_control, "local_minute_timestamp", lambda: timestamp)
 
     command = EpisodeController._command(fake)
 
     assert command[command.index("--episode-directory-name") + 1] == (
-        f"episode_000003_{timestamp}_01"
+        f"red_block_pick_episode_003_{timestamp}_01"
     )
     assert command[command.index("--collection-timestamp-local") + 1] == timestamp
 
@@ -144,10 +170,20 @@ def test_episode_command_adds_suffix_when_minute_directory_exists(
 def test_discard_deletes_only_current_episode_directory(tmp_path: Path) -> None:
     fake = _FakeController("")
     fake.values["sessions_root"] = str(tmp_path)
-    episode = tmp_path / "pick_place" / "raw" / "episode_000003_20260803_1500"
+    episode = (
+        tmp_path
+        / "pick_place"
+        / "raw"
+        / "red_block_pick_episode_003_20260803_1500"
+    )
     episode.mkdir(parents=True)
     (episode / "manifest.json").write_text("{}", encoding="utf-8")
-    sibling = tmp_path / "pick_place" / "raw" / "episode_000002_20260803_1459"
+    sibling = (
+        tmp_path
+        / "pick_place"
+        / "raw"
+        / "red_block_pick_episode_002_20260803_1459"
+    )
     sibling.mkdir()
     fake._current_manifest = episode / "manifest.json"
     logger = _Logger()

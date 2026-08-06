@@ -75,6 +75,7 @@ class EpisodeManifest:
     episode_index: int = 0
     attempt: int = 1
     collection_timestamp_local: str = ""
+    task_name: str = ""
     task_description: str = ""
     pause_count: int = 0
     paused_duration_ns: int = 0

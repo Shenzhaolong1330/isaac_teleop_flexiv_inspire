@@ -23,6 +23,12 @@ def test_three_camera_config_records_aligned_depth_and_pointcloud_at_30():
         assert camera.pointcloud_enabled is (camera.name == "head")
         assert camera.pointcloud_stride == 2
         assert camera.jpeg_quality == 90
+    assert cameras["head"].depth_visual_preset == "high_density"
+    assert cameras["head"].depth_emitter_enabled is True
+    assert cameras["head"].depth_laser_power == 210
+    assert cameras["head"].depth_spatial_filter_enabled is True
+    assert cameras["head"].depth_temporal_filter_enabled is True
+    assert cameras["left_wrist"].depth_visual_preset == "unchanged"
 
 
 def test_camera_cli_defaults_follow_the_packaged_config():

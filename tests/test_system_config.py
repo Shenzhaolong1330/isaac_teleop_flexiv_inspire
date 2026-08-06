@@ -387,6 +387,11 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert camera["recording"]["depth_enabled"] is True
     assert camera["cameras"]["head"]["pointcloud_enabled"] is True
     assert camera["cameras"]["head"]["pointcloud_stride"] == 2
+    assert camera["cameras"]["head"]["depth_visual_preset"] == "high_density"
+    assert camera["cameras"]["head"]["depth_emitter_enabled"] is True
+    assert camera["cameras"]["head"]["depth_laser_power"] == 210
+    assert camera["cameras"]["head"]["depth_spatial_filter_enabled"] is True
+    assert camera["cameras"]["head"]["depth_temporal_filter_enabled"] is True
     assert camera["cameras"]["left_wrist"]["pointcloud_enabled"] is False
     receiver = yaml.safe_load(rendered["isaac_camera_receiver.yaml"].read_text())
     assert set(receiver["cameras"]) == {"head"}
@@ -399,6 +404,9 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert parameters["joint_upper_limits_rad"][5] > 4.5
     assert parameters["software_safety_limits_enabled"] is False
     assert parameters["policy_pedal_required"] is True
+    assert parameters["hand_daemon_sync_hz"] == 25.0
+    assert parameters["hand_observation_timeout_ms"] == 500.0
+    assert parameters["require_hands_for_arm_control"] is False
     assert parameters["cartesian_control_mode"] == "position"
     assert parameters["cartesian_impedance_stiffness"] == [
         1200,
@@ -422,7 +430,11 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     )
     assert parameters["max_joint_velocity_rad_s"] == 2.0
     assert parameters["home_lift_enabled"] is True
+    assert parameters["home_lift_left_target_x_m"] == 0.925266862
+    assert parameters["home_lift_left_target_y_m"] == 0.345229030
     assert parameters["home_lift_left_safe_z_m"] == -0.177676
+    assert parameters["home_lift_right_target_x_m"] == 0.952098012
+    assert parameters["home_lift_right_target_y_m"] == -0.152109638
     assert parameters["home_lift_right_safe_z_m"] == -0.213296
     assert parameters["home_lift_max_linear_velocity_m_s"] == 0.12
     assert parameters["home_lift_parallel"] is False
@@ -518,6 +530,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert not any(item.startswith("manus_calibration:=") for item in episode)
     assert not any(item.startswith("camera_head_extrinsics:=") for item in episode)
     assert f"dataset_name:={config.document['recording']['dataset_name']}" in episode
+    assert f"task_name:={config.document['recording']['task_name']}" in episode
     assert f"episode_count:={config.document['recording']['episode_count']}" in episode
     assert any(
         item.startswith('task_description:="')
@@ -529,7 +542,8 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
 def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_path):
     config = load_system_config(_site())
 
-    assert config.document["recording"]["dataset_name"] == "pick_place_demo"
+    assert config.document["recording"]["dataset_name"] == "test_demo"
+    assert config.document["recording"]["task_name"] == "try_tasks"
     assert config.document["recording"]["episode_count"] == 10
     assert config.document["recording"]["auto_reset_before_record"] is True
     assert config.document["recording"]["ros_mcap_enabled"] is False
@@ -680,6 +694,23 @@ def test_system_config_rejects_missing_recording_prompt(tmp_path):
         assert "task_description" in str(exc)
     else:
         raise AssertionError("empty VLA task description was accepted")
+
+
+def test_system_config_rejects_invalid_recording_task_name(tmp_path):
+    data = yaml.safe_load(_example().read_text())
+    data["flexiv"]["rdk_config"] = str(
+        Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
+    )
+    data["recording"]["task_name"] = "pick/place"
+    path = tmp_path / "bad-task-name.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    try:
+        load_system_config(path)
+    except SystemConfigError as exc:
+        assert "task_name" in str(exc)
+    else:
+        raise AssertionError("unsafe recording task name was accepted")
 
 
 def test_composed_config_rejects_duplicate_fragment_keys(tmp_path):

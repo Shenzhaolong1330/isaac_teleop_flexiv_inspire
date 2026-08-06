@@ -143,7 +143,11 @@ class ControlBridge(Node):
         self.declare_parameter("home_tolerance_rad", 0.01)
         self.declare_parameter("home_timeout_s", 20.0)
         self.declare_parameter("home_lift_enabled", True)
+        self.declare_parameter("home_lift_left_target_x_m", 0.925266862)
+        self.declare_parameter("home_lift_left_target_y_m", 0.345229030)
         self.declare_parameter("home_lift_left_safe_z_m", -0.177676)
+        self.declare_parameter("home_lift_right_target_x_m", 0.952098012)
+        self.declare_parameter("home_lift_right_target_y_m", -0.152109638)
         self.declare_parameter("home_lift_right_safe_z_m", -0.213296)
         self.declare_parameter("home_lift_max_linear_velocity_m_s", 0.12)
         self.declare_parameter("home_lift_max_angular_velocity_rad_s", 0.50)
@@ -165,6 +169,15 @@ class ControlBridge(Node):
         self.declare_parameter("max_external_torque_nm", 8.0)
         self.declare_parameter("max_joint_temperature_c", 75.0)
         self.declare_parameter("hand_reference_tolerance", 1.0)
+        # The native hand stream can run at 200 Hz.  Do not perform a blocking
+        # daemon round trip from every ROS callback; mirror only the latest
+        # bimanual sample on a small, dedicated worker instead.
+        self.declare_parameter("hand_daemon_sync_hz", 25.0)
+        self.declare_parameter("hand_observation_timeout_ms", 500.0)
+        # A missing dexterous hand must not latch the Flexiv arms.  The actual
+        # hand availability is still reported on /control/state and hand
+        # commands remain unavailable until that hand reconnects.
+        self.declare_parameter("require_hands_for_arm_control", False)
         self.declare_parameter("frame_config", "")
         frame_config = str(self.get_parameter("frame_config").value).strip()
         if not frame_config:
@@ -208,6 +221,13 @@ class ControlBridge(Node):
         self._hand_angles: dict[str, np.ndarray | None] = {
             "left": None, "right": None
         }
+        self._latest_hand_metadata: dict[str, object] = {
+            "source_sequence": 0,
+            "source_time_ns": 0,
+            "source_clock_domain": "",
+        }
+        self._hand_ipc_wakeup = threading.Event()
+        self._hand_ipc_thread: threading.Thread | None = None
         self._arm_safety_ok = {"left": False, "right": False}
         self._local_permission = False
         self._physical_pedal = False
@@ -322,6 +342,12 @@ class ControlBridge(Node):
             daemon=True,
         )
         self._poll_thread.start()
+        self._hand_ipc_thread = threading.Thread(
+            target=self._hand_observation_loop,
+            name="hand-observation-daemon-sync",
+            daemon=True,
+        )
+        self._hand_ipc_thread.start()
         self._publish_control_state()
 
     def _create_arm_publishers(self, side: str) -> dict[str, object]:
@@ -337,10 +363,13 @@ class ControlBridge(Node):
 
     def destroy_node(self) -> bool:
         self._stop.set()
+        self._hand_ipc_wakeup.set()
         for client in (self._ipc_observation, self._ipc_command, self._ipc_maintenance, self._ipc_hand):
             client.close()
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=1.0)
+        if self._hand_ipc_thread is not None:
+            self._hand_ipc_thread.join(timeout=1.0)
         if self._home_thread is not None:
             self._home_thread.join(timeout=1.0)
         self._zero_action.destroy()
@@ -378,6 +407,17 @@ class ControlBridge(Node):
                 "cartesian_damping_ratio must be a finite 6-vector in [0.3,0.8]"
             )
         for side in ("left", "right"):
+            for axis in ("x", "y"):
+                target = float(
+                    self.get_parameter(
+                        f"home_lift_{side}_target_{axis}_m"
+                    ).value
+                )
+                if not np.isfinite(target) or not -2.0 <= target <= 2.0:
+                    raise RuntimeError(
+                        f"home_lift_{side}_target_{axis}_m must be finite "
+                        "and in [-2,2]"
+                    )
             safe_z = float(
                 self.get_parameter(f"home_lift_{side}_safe_z_m").value
             )
@@ -797,6 +837,18 @@ class ControlBridge(Node):
             self._update_gates(receive_ns)
             self._arbiter.submit(command, now_monotonic_ns=receive_ns)
         except Exception as exc:
+            if (
+                isinstance(exc, TransitionError)
+                and str(exc) == "command source is not armed"
+            ):
+                # The mapper intentionally keeps publishing while READY/HOLD
+                # so recording and input state remain continuous.  Dropping
+                # those packets is expected; logging/rejecting all 60 packets
+                # per second starves observation and IPC callbacks.
+                self._publish_trace(
+                    message, None, None, "source_not_armed", receive_ns
+                )
+                return
             logger = getattr(self, "_logger", None)
             if logger is not None:
                 logger.error(
@@ -1255,44 +1307,98 @@ class ControlBridge(Node):
             self._hand_connected[side] = valid
             self._last_hand_observation_ns[side] = now
             self._hand_angles[side] = angle.copy() if valid else None
-        if not valid:
-            self._update_gates(now)
-            return
-        source_time_ns = (
-            int(message.acquisition.source_time.sec) * 1_000_000_000
-            + int(message.acquisition.source_time.nanosec)
-        )
-        try:
-            kind, response = self._ipc_hand.request(
-                "hand_observation",
-                {
-                    "left": self._current_hand_angles("left").tolist(),
-                    "right": self._current_hand_angles("right").tolist(),
-                    "host_receive_monotonic_ns": str(now),
-                    "source_sequence": str(message.sequence),
-                    "source_time_ns": str(source_time_ns),
+            if valid:
+                source_time_ns = (
+                    int(message.acquisition.source_time.sec) * 1_000_000_000
+                    + int(message.acquisition.source_time.nanosec)
+                )
+                self._latest_hand_metadata = {
+                    "source_sequence": int(message.sequence),
+                    "source_time_ns": source_time_ns,
                     "source_clock_domain": str(
                         message.acquisition.source_clock_domain
                     ),
-                },
-            )
-            if kind != "command_ack" or not response.get("accepted", False):
-                raise RuntimeError(response.get("reason", kind))
-        except Exception as exc:
-            # The ROS hand observation itself is still valid.  This IPC copy
-            # is used by the daemon's maintenance monitor and must not make a
-            # healthy Inspire hand appear offline during normal teleop.
-            self.get_logger().warning(
-                f"hand observation IPC temporarily unavailable: {exc}",
-                throttle_duration_sec=1.0,
-            )
+                }
+        if not valid:
+            self._update_gates(now)
+            return
+        self._hand_ipc_wakeup.set()
         self._update_gates(now)
+
+    def _hand_observation_loop(self) -> None:
+        """Mirror the newest paired hand state without blocking ROS callbacks."""
+
+        rate_hz = float(self.get_parameter("hand_daemon_sync_hz").value)
+        if not math.isfinite(rate_hz) or rate_hz <= 0.0:
+            self.get_logger().error("hand_daemon_sync_hz must be positive")
+            return
+        period_s = 1.0 / rate_hz
+        while not self._stop.is_set():
+            self._hand_ipc_wakeup.wait(timeout=period_s)
+            self._hand_ipc_wakeup.clear()
+            if self._stop.is_set():
+                break
+            started = time.monotonic()
+            now = time.monotonic_ns()
+            with self._state_lock:
+                connected = dict(self._hand_connected)
+                received = dict(self._last_hand_observation_ns)
+                angles = {
+                    side: None
+                    if self._hand_angles[side] is None
+                    else self._hand_angles[side].copy()
+                    for side in ("left", "right")
+                }
+                metadata = dict(self._latest_hand_metadata)
+            # Keep the daemon maintenance cache strict: only copy an actually
+            # paired and fresh sample. Arm teleoperation is independently
+            # decoupled from this maintenance-only cache below.
+            timeout_ns = int(
+                float(self.get_parameter("hand_observation_timeout_ms").value)
+                * 1_000_000
+            )
+            if all(
+                connected[side]
+                and angles[side] is not None
+                and now - received[side] <= timeout_ns
+                for side in ("left", "right")
+            ):
+                try:
+                    kind, response = self._ipc_hand.request(
+                        "hand_observation",
+                        {
+                            "left": angles["left"].tolist(),
+                            "right": angles["right"].tolist(),
+                            "host_receive_monotonic_ns": str(now),
+                            "source_sequence": str(
+                                metadata["source_sequence"]
+                            ),
+                            "source_time_ns": str(metadata["source_time_ns"]),
+                            "source_clock_domain": str(
+                                metadata["source_clock_domain"]
+                            ),
+                        },
+                    )
+                    if kind != "command_ack" or not response.get(
+                        "accepted", False
+                    ):
+                        raise RuntimeError(response.get("reason", kind))
+                except Exception as exc:
+                    self.get_logger().warning(
+                        f"hand observation IPC temporarily unavailable: {exc}",
+                        throttle_duration_sec=1.0,
+                    )
+            self._stop.wait(max(0.0, period_s - (time.monotonic() - started)))
 
     def _current_hand_angles(self, side: str) -> np.ndarray:
         with self._state_lock:
             value = self._hand_angles[side]
             received = self._last_hand_observation_ns[side]
-        if value is None or time.monotonic_ns() - received > 100_000_000:
+        timeout_ns = int(
+            float(self.get_parameter("hand_observation_timeout_ms").value)
+            * 1_000_000
+        )
+        if value is None or time.monotonic_ns() - received > timeout_ns:
             raise RuntimeError(f"{side} hand measurement is absent or stale")
         return value.copy()
 
@@ -1674,8 +1780,20 @@ class ControlBridge(Node):
                     "lift_enabled": bool(
                         self.get_parameter("home_lift_enabled").value
                     ),
+                    "left_lift_target_x_m": float(
+                        self.get_parameter("home_lift_left_target_x_m").value
+                    ),
+                    "left_lift_target_y_m": float(
+                        self.get_parameter("home_lift_left_target_y_m").value
+                    ),
                     "left_lift_safe_z_m": float(
                         self.get_parameter("home_lift_left_safe_z_m").value
+                    ),
+                    "right_lift_target_x_m": float(
+                        self.get_parameter("home_lift_right_target_x_m").value
+                    ),
+                    "right_lift_target_y_m": float(
+                        self.get_parameter("home_lift_right_target_y_m").value
                     ),
                     "right_lift_safe_z_m": float(
                         self.get_parameter("home_lift_right_safe_z_m").value
@@ -1825,11 +1943,22 @@ class ControlBridge(Node):
             getattr(self, "_pending_arm_source", None) is CommandSource.POLICY
             or getattr(snapshot, "active_source", None) is CommandSource.POLICY
         )
-        hands_online = all(
+        hand_timeout_ns = int(
+            float(self.get_parameter("hand_observation_timeout_ms").value)
+            * 1_000_000
+        )
+        observed_hands_online = all(
             self._hand_connected[side]
-            and now - self._last_hand_observation_ns[side] <= 200_000_000
+            and now - self._last_hand_observation_ns[side] <= hand_timeout_ns
             for side in ("left", "right")
-        ) or direct_policy
+        )
+        hands_online = (
+            observed_hands_online
+            or direct_policy
+            or not bool(
+                self.get_parameter("require_hands_for_arm_control").value
+            )
+        )
         arms_online = all(
             self._last_arm_observation_ns[side] > 0
             and now - self._last_arm_observation_ns[side] <= 100_000_000
@@ -2164,9 +2293,13 @@ class ControlBridge(Node):
             and not str(self._latest_wire.get(side, {}).get("fault", ""))
             for side in ("left", "right")
         )
+        hand_timeout_ns = int(
+            float(self.get_parameter("hand_observation_timeout_ms").value)
+            * 1_000_000
+        )
         state.hands_online = all(
             self._hand_connected[side]
-            and now - self._last_hand_observation_ns[side] <= 200_000_000
+            and now - self._last_hand_observation_ns[side] <= hand_timeout_ns
             for side in ("left", "right")
         )
         state.rdk_connection_generation = self._connection_generation or 0

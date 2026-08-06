@@ -47,6 +47,25 @@ _EMPTY_ACTION_COMPLETION_REASON = (
 )
 
 
+def _next_task_episode_index(storage_root: Path, task_name: str) -> int:
+    """Continue one task's numbering across separate collection processes."""
+
+    if not storage_root.is_dir():
+        return 1
+    pattern = re.compile(
+        rf"{re.escape(task_name)}_episode_(\d{{3,}})_\d{{8}}_\d{{4}}"
+        rf"(?:_\d{{2}})?"
+    )
+    maximum = 0
+    for child in storage_root.iterdir():
+        if not child.is_dir():
+            continue
+        match = pattern.fullmatch(child.name)
+        if match is not None:
+            maximum = max(maximum, int(match.group(1)))
+    return maximum + 1
+
+
 def _is_empty_action_attempt(manifest: dict[str, object]) -> bool:
     """Return true only for a normally stopped episode with no sent action."""
 
@@ -72,6 +91,7 @@ class EpisodeController(Node):
         defaults = {
             "sessions_root": "sessions",
             "dataset_name": "dataset",
+            "task_name": "task",
             "episode_count": 1,
             "task_description": "",
             "session_id": "",
@@ -104,7 +124,15 @@ class EpisodeController(Node):
         self._lock = threading.RLock()
         self._process: subprocess.Popen[str] | None = None
         self._sequence = 0
-        self._episode_index = 1
+        sessions_root = Path(
+            str(self.get_parameter("sessions_root").value)
+        ).expanduser().resolve()
+        dataset_name = str(self.get_parameter("dataset_name").value).strip()
+        task_name = str(self.get_parameter("task_name").value).strip()
+        self._episode_index = _next_task_episode_index(
+            sessions_root / dataset_name / _RAW_EPISODE_DIRECTORY,
+            task_name,
+        )
         self._attempt = 1
         self._completed_episodes = 0
         self._current_manifest: Path | None = None
@@ -167,6 +195,11 @@ class EpisodeController(Node):
             raise RuntimeError(
                 "dataset_name must use 1..96 letters, digits, '.', '_' or '-'"
             )
+        task_name = str(self.get_parameter("task_name").value).strip()
+        if not _NAME.fullmatch(task_name):
+            raise RuntimeError(
+                "task_name must use 1..96 letters, digits, '.', '_' or '-'"
+            )
         count = int(self.get_parameter("episode_count").value)
         if not 1 <= count <= 100_000:
             raise RuntimeError("episode_count must be in [1,100000]")
@@ -191,8 +224,10 @@ class EpisodeController(Node):
     def _command(self) -> list[str]:
         self._sequence += 1
         collection_timestamp = local_minute_timestamp()
+        task_name = str(self.get_parameter("task_name").value).strip()
         base_episode_name = (
-            f"episode_{self._episode_index:06d}_{collection_timestamp}"
+            f"{task_name}_episode_{self._episode_index:03d}_"
+            f"{collection_timestamp}"
         )
         root = Path(self._required("sessions_root")).expanduser().resolve()
         dataset = str(self.get_parameter("dataset_name").value).strip()
@@ -221,6 +256,8 @@ class EpisodeController(Node):
             str(self._episode_index),
             "--attempt",
             str(self._attempt),
+            "--task-name",
+            task_name,
             "--episode-directory-name",
             episode_name,
             "--collection-timestamp-local",
@@ -272,6 +309,7 @@ class EpisodeController(Node):
         progress = {
             "state": state,
             "dataset_name": str(self.get_parameter("dataset_name").value),
+            "task_name": str(self.get_parameter("task_name").value),
             "episode_index": self._episode_index,
             "attempt": self._attempt,
             "completed_episodes": self._completed_episodes,
@@ -339,7 +377,13 @@ class EpisodeController(Node):
             ) from exc
         if (
             episode_directory.parent != dataset_root
-            or not episode_directory.name.startswith("episode_")
+            or re.fullmatch(
+                rf"{re.escape(str(self.get_parameter('task_name').value).strip())}"
+                rf"_episode_{self._episode_index:03d}_\d{{8}}_\d{{4}}"
+                rf"(?:_\d{{2}})?",
+                episode_directory.name,
+            )
+            is None
         ):
             raise RuntimeError(
                 f"refusing unexpected episode deletion target: {episode_directory}"

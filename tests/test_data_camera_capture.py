@@ -136,6 +136,58 @@ class FakeDepthRs:
         return FakeAlign()
 
 
+class FakeOptionRange:
+    min = 0.0
+    max = 360.0
+
+
+class FakeDepthSensor:
+    def __init__(self):
+        self.values = {}
+
+    @staticmethod
+    def supports(_option):
+        return True
+
+    @staticmethod
+    def get_option_range(_option):
+        return FakeOptionRange()
+
+    def set_option(self, option, value):
+        self.values[option] = value
+
+
+class FakeDeviceProfile:
+    def __init__(self, sensor):
+        self.sensor = sensor
+
+    def first_depth_sensor(self):
+        return self.sensor
+
+
+class FakePipelineProfile:
+    def __init__(self, sensor):
+        self.sensor = sensor
+
+    def get_device(self):
+        return FakeDeviceProfile(self.sensor)
+
+
+class FakeTunedDepthRs(FakeDepthRs):
+    class option:
+        visual_preset = "visual_preset"
+        emitter_enabled = "emitter_enabled"
+        laser_power = "laser_power"
+
+    @staticmethod
+    def spatial_filter():
+        return "spatial"
+
+    @staticmethod
+    def temporal_filter():
+        return "temporal"
+
+
 class FakePipeline:
     def wait_for_frames(self, timeout_ms):
         assert timeout_ms == 1000
@@ -186,6 +238,35 @@ def test_capture_once_records_aligned_z16_and_organized_pointcloud():
     envelope = frame.to_record_envelope()
     assert envelope.payload["depth_frame_id"] == "head_color_optical_frame"
     assert envelope.payload["pointcloud_encoding"] == "xyz_f32_le"
+
+
+def test_depth_tuning_is_applied_after_preset_and_builds_selected_filters():
+    config = depth_camera_config()
+    config = CameraConfig(
+        **{
+            **config.__dict__,
+            "depth_visual_preset": "high_density",
+            "depth_emitter_enabled": True,
+            "depth_laser_power": 210.0,
+            "depth_spatial_filter_enabled": True,
+            "depth_temporal_filter_enabled": True,
+        }
+    )
+    capture = RealSenseRgbCapture(
+        config,
+        rs_module=FakeTunedDepthRs(),
+        jpeg_encoder=lambda image, quality, pixel_format: b"jpeg-payload",
+    )
+    sensor = FakeDepthSensor()
+
+    capture._configure_depth_sensor(FakePipelineProfile(sensor))
+
+    assert sensor.values == {
+        "visual_preset": 4.0,
+        "emitter_enabled": 1.0,
+        "laser_power": 210.0,
+    }
+    assert capture._make_depth_filters() == ["spatial", "temporal"]
 
 
 def test_fixed_camera_extrinsics_transform_pointcloud_to_world(tmp_path):

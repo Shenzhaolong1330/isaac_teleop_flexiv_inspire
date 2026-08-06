@@ -790,6 +790,7 @@ def test_foreground_collection_ctrl_c_finalizes_controller_and_stops_pedal(
             "recording": {
                 "episode_count": 2,
                 "dataset_name": "test_dataset",
+                "task_name": "test_task",
                 "output_root": "sessions",
                 "task_description": "test task",
             },

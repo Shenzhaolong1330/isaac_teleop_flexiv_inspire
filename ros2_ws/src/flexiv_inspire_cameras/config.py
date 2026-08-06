@@ -30,6 +30,11 @@ class CameraConfig:
     depth_width: int | None = None
     depth_height: int | None = None
     depth_fps: int | None = None
+    depth_visual_preset: str = "unchanged"
+    depth_emitter_enabled: bool | None = None
+    depth_laser_power: float | None = None
+    depth_spatial_filter_enabled: bool = False
+    depth_temporal_filter_enabled: bool = False
     pointcloud_enabled: bool = False
     pointcloud_stride: int = 2
     record_depth: bool = True
@@ -57,6 +62,32 @@ class CameraConfig:
                     raise ValueError(f"{name} must be in {minimum}..{maximum} when depth is enabled")
         elif self.pointcloud_enabled:
             raise ValueError("pointcloud_enabled requires depth_enabled")
+        presets = {
+            "unchanged",
+            "custom",
+            "default",
+            "hand",
+            "high_accuracy",
+            "high_density",
+            "medium_density",
+        }
+        if self.depth_visual_preset not in presets:
+            raise ValueError(
+                "depth_visual_preset must be unchanged, custom, default, hand, "
+                "high_accuracy, high_density or medium_density"
+            )
+        if self.depth_emitter_enabled is not None and not isinstance(
+            self.depth_emitter_enabled, bool
+        ):
+            raise ValueError("depth_emitter_enabled must be a bool or null")
+        if self.depth_laser_power is not None and not (
+            0.0 <= float(self.depth_laser_power) <= 360.0
+        ):
+            raise ValueError("depth_laser_power must be in 0..360")
+        if not isinstance(self.depth_spatial_filter_enabled, bool):
+            raise ValueError("depth_spatial_filter_enabled must be a bool")
+        if not isinstance(self.depth_temporal_filter_enabled, bool):
+            raise ValueError("depth_temporal_filter_enabled must be a bool")
         if not 1 <= self.pointcloud_stride <= 32:
             raise ValueError("pointcloud_stride must be in 1..32")
         if not 1 <= self.jpeg_quality <= 100:

@@ -144,7 +144,11 @@ def test_typed_codec_roundtrips_home_and_cartesian_impedance_fields() -> None:
         "collision_clear": True,
         "local_authorization_token": "token",
         "lift_enabled": True,
+        "left_lift_target_x_m": 0.925266862,
+        "left_lift_target_y_m": 0.345229030,
         "left_lift_safe_z_m": -0.377676,
+        "right_lift_target_x_m": 0.952098012,
+        "right_lift_target_y_m": -0.152109638,
         "right_lift_safe_z_m": -0.413296,
         "lift_max_linear_velocity": 0.12,
         "lift_max_angular_velocity": 0.5,
@@ -161,6 +165,8 @@ def test_typed_codec_roundtrips_home_and_cartesian_impedance_fields() -> None:
     assert decoded_home["request_sequence"] == "42"
     assert decoded_home["right_joint_positions"] == [0.1] * 7
     assert decoded_home["lift_enabled"] is True
+    assert decoded_home["left_lift_target_x_m"] == pytest.approx(0.925266862)
+    assert decoded_home["right_lift_target_y_m"] == pytest.approx(-0.152109638)
     assert decoded_home["left_lift_safe_z_m"] == pytest.approx(-0.377676)
     assert decoded_home["lift_cartesian_stiffness"] == [
         3000.0, 3000.0, 3000.0, 200.0, 200.0, 200.0

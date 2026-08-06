@@ -88,7 +88,7 @@ class _Preflight(Node):
             reason = str(payload.get("reason", "")).strip()
             if state == "moving" and reason != self._last_home_progress:
                 if reason == "home_lift_in_progress":
-                    print("Home: 正在竖直抬升 TCP 到安全高度", flush=True)
+                    print("Home: 正在抬升 TCP 并同步对齐 Home XY", flush=True)
                 elif reason == "home_in_progress":
                     print("Home: 安全高度已到达，正在执行关节 Home", flush=True)
                 self._last_home_progress = reason

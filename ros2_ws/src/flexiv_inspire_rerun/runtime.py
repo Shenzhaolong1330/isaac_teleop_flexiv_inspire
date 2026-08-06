@@ -500,18 +500,30 @@ class RerunVisualizer:
             ],
             name="Control",
         )
+        # Keep every live modality visible in one deterministic dashboard.
+        # Nested containers preserve usable camera sizes while avoiding the
+        # six-tab workflow that required the operator to keep switching views.
+        overview = rrb.Vertical(
+            cameras,
+            rrb.Horizontal(
+                tactile,
+                pointclouds,
+                column_shares=[2.0, 3.0],
+                name="Contact + geometry",
+            ),
+            rrb.Horizontal(
+                arms,
+                hands,
+                control,
+                column_shares=[2.0, 2.0, 1.0],
+                name="Robot + control",
+            ),
+            row_shares=[2.4, 1.2, 1.4],
+            name="Live overview",
+        )
         self.stream.send_blueprint(
             rrb.Blueprint(
-                rrb.Tabs(
-                    cameras,
-                    tactile,
-                    pointclouds,
-                    arms,
-                    hands,
-                    control,
-                    active_tab=0,
-                    name="Live data",
-                ),
+                overview,
                 auto_views=False,
                 collapse_panels=True,
             ),

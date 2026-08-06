@@ -196,6 +196,9 @@ def test_default_blueprint_keeps_other_live_modalities_visible(monkeypatch) -> N
             self.parts = parts
             self.kwargs = kwargs
 
+    class _Vertical(_Horizontal):
+        pass
+
     class _Tabs(_Horizontal):
         pass
 
@@ -212,7 +215,7 @@ def test_default_blueprint_keeps_other_live_modalities_visible(monkeypatch) -> N
     fake_blueprint = ModuleType("rerun.blueprint")
     fake_blueprint.Blueprint = _Blueprint
     fake_blueprint.Horizontal = _Horizontal
-    fake_blueprint.Vertical = _Horizontal
+    fake_blueprint.Vertical = _Vertical
     fake_blueprint.Tabs = _Tabs
     fake_blueprint.Spatial2DView = _Spatial2DView
     fake_blueprint.Spatial3DView = _Spatial3DView
@@ -237,6 +240,35 @@ def test_default_blueprint_keeps_other_live_modalities_visible(monkeypatch) -> N
         "make_active": True,
         "make_default": True,
     }
+    root = captured["parts"][0]
+    assert isinstance(root, _Vertical)
+    assert root.kwargs["name"] == "Live overview"
+    assert root.kwargs["row_shares"] == [2.4, 1.2, 1.4]
+
+    def descendants(node):
+        yield node
+        for child in getattr(node, "parts", ()):
+            yield from descendants(child)
+
+    layout = list(descendants(root))
+    assert not any(isinstance(node, _Tabs) for node in layout)
+    view_names = {
+        node.kwargs.get("name")
+        for node in layout
+        if hasattr(node, "kwargs")
+    }
+    assert {
+        "head RGB",
+        "head depth",
+        "Left hand tactile (palm view)",
+        "Right hand tactile (palm view)",
+        "head point cloud",
+        "left arm",
+        "right arm",
+        "left hand",
+        "right hand",
+        "Control",
+    } <= view_names
 
 
 def test_visualizer_disconnects_even_when_flush_fails() -> None:

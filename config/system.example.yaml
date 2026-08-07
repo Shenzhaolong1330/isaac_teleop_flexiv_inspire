@@ -139,7 +139,7 @@ cameras:
 # does not stop collection; Quest pose freshness still gates arm commands.
 xr_video:
   enabled: true
-  auto_start_with_record: true
+  auto_start_with_record: false
   # Set auto_start_with_record=false (or use --no-xr) to skip video display.
   transport: lan              # lan | usb_tcp (USB-local WebRTC via adb reverse)
   wifi_connection: Deepybo-Prime

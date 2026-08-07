@@ -640,6 +640,20 @@ def test_quest_input_does_not_depend_on_xr_video_branch(tmp_path):
     assert not any("run_isaac_camera_receiver.sh" in command for command in joined)
 
 
+def test_system_config_rejects_non_boolean_xr_record_switch(tmp_path):
+    data = yaml.safe_load(_example().read_text())
+    data["xr_video"]["auto_start_with_record"] = "false"
+    path = tmp_path / "bad-xr-switch.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    try:
+        load_system_config(path)
+    except SystemConfigError as exc:
+        assert "xr_video.auto_start_with_record must be boolean" in str(exc)
+    else:
+        raise AssertionError("string XR video switch was accepted")
+
+
 def test_system_config_rejects_invalid_joint_limits(tmp_path):
     data = yaml.safe_load(_example().read_text())
     data["flexiv"]["safety"]["joint_lower_limits_rad"][0] = 3.0

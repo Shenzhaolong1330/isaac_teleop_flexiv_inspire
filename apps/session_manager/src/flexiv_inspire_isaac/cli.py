@@ -1855,8 +1855,11 @@ def _main(args, config) -> int:
         return subprocess.call(command)
     if args.operation == "record":
         rendered = render_runtime_configs(config, runtime / config.sha256[:12])
+        xr_video_enabled = bool(config.document["xr_video"]["enabled"])
         default_xr = bool(config.document["xr_video"]["auto_start_with_record"])
-        include_xr = args.with_xr or (default_xr and not args.no_xr)
+        include_xr = xr_video_enabled and (
+            args.with_xr or (default_xr and not args.no_xr)
+        )
         commands = _commands(config, rendered, include_xr_receiver=include_xr)
         if args.dry_run:
             print(json.dumps(commands, indent=2))
@@ -1988,7 +1991,8 @@ def _main(args, config) -> int:
                 )
         print(
             f"started {len(processes)} supporting services; "
-            f"XR receiver={'on' if include_xr else 'off'}",
+            "Quest tracking=on; "
+            f"XR video={'on' if include_xr else 'off'}",
             flush=True,
         )
         try:

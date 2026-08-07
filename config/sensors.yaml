@@ -33,7 +33,9 @@ cameras:
 
 xr_video:
   enabled: true
-  auto_start_with_record: true
+  # Controls only the camera return shown in Quest. Quest controller poses,
+  # MANUS finger input, arm teleoperation and Inspire commands still start.
+  auto_start_with_record: false
   # RTP/OpenXR video is an optional operator display. Failure does not stop
   # recording or teleoperation; Quest pose freshness and the middle pedal gate
   # arm motion independently.

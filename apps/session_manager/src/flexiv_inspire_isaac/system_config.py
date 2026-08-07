@@ -125,6 +125,10 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError(
             "session.runtime_root and session.sessions_root are required"
         )
+    xr = _mapping(root.get("xr_video"), "xr_video")
+    for key in ("enabled", "auto_start_with_record"):
+        if not isinstance(xr.get(key), bool):
+            raise SystemConfigError(f"xr_video.{key} must be boolean")
     sampling = _mapping(root.get("sampling"), "sampling")
     for key in (
         "arm_observation_hz",
@@ -590,7 +594,6 @@ def load_system_config(path: str | Path) -> SystemConfig:
             raise SystemConfigError(
                 f"cameras.streams.{name}.extrinsics must be a YAML file"
             )
-    xr = _mapping(root.get("xr_video"), "xr_video")
     if xr.get("transport") not in {"lan", "usb_tcp"}:
         raise SystemConfigError("xr_video.transport must be lan or usb_tcp")
     if xr.get("transport") == "lan" and not str(xr.get("wifi_connection", "")).strip():

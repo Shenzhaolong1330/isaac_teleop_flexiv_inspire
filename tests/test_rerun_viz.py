@@ -430,6 +430,30 @@ def test_offline_deviceio_uses_common_time_not_per_source_sequence() -> None:
     assert ("robot/left_arm/record/source_sequence", 23876) in scalar_calls
 
 
+def test_curve_labels_are_semantic_and_unique_across_series() -> None:
+    labels = RerunVisualizer._semantic_vector_labels
+
+    assert labels("robot/left_arm/q", 7) == [f"q_j{i}" for i in range(1, 8)]
+    assert labels("robot/left_arm/dq", 7) == [f"dq_j{i}" for i in range(1, 8)]
+    assert labels("robot/right_arm/external_wrench", 6) == [
+        "wrench_fx",
+        "wrench_fy",
+        "wrench_fz",
+        "wrench_tx",
+        "wrench_ty",
+        "wrench_tz",
+    ]
+    assert labels("robot/left_hand/actual_force", 6) == [
+        "force_little",
+        "force_ring",
+        "force_middle",
+        "force_index",
+        "force_thumb_bend",
+        "force_thumb_rotate",
+    ]
+    assert labels("unknown/vector", 2) == ["vector_0", "vector_1"]
+
+
 def test_live_depth_and_pointcloud_are_decoded_without_ros_helpers() -> None:
     class Stream:
         def __init__(self):

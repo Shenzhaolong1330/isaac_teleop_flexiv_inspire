@@ -599,6 +599,49 @@ class RerunVisualizer:
             self._series_configured.add(path)
         self.stream.log(path, self.rr.Scalars(array))
 
+    @staticmethod
+    def _semantic_vector_labels(path: str, size: int) -> list[str]:
+        """Return stable, unique legend labels for live and offline curves."""
+
+        field = path.rstrip("/").rsplit("/", 1)[-1]
+        if field in {"q", "dq", "tau", "tau_des", "tau_ext", "tau_interact"}:
+            if size == 7:
+                return [f"{field}_j{index + 1}" for index in range(size)]
+        if field in {"external_wrench", "tcp_wrench", "raw_ft"} and size == 6:
+            prefix = (
+                "wrench" if field in {"external_wrench", "tcp_wrench"} else "raw_ft"
+            )
+            return [f"{prefix}_{axis}" for axis in ("fx", "fy", "fz", "tx", "ty", "tz")]
+        if field in {"tcp_twist", "tcp_velocity"} and size == 6:
+            axes = ("vx", "vy", "vz", "wx", "wy", "wz")
+            return [f"tcp_twist_{axis}" for axis in axes]
+        hand_fields = {
+            "angle": "angle",
+            "angle_rad": "angle",
+            "position": "position",
+            "actual_force": "force",
+            "current": "current",
+            "temperature": "temperature",
+            "temperature_c": "temperature",
+            "error": "error",
+            "error_code": "error",
+            "status": "status",
+            "status_code": "status",
+        }
+        if "_hand/" in path and field in hand_fields and size == 6:
+            fingers = (
+                "little",
+                "ring",
+                "middle",
+                "index",
+                "thumb_bend",
+                "thumb_rotate",
+            )
+            return [f"{hand_fields[field]}_{finger}" for finger in fingers]
+        if field in {"rotation6d", "tcp_pose_rotation6d"} and size == 6:
+            return [f"rotation6d_{name}" for name in ROT6D_FIRST_TWO_COLUMNS.split(",")]
+        return [f"{field}_{index}" for index in range(size)]
+
     def _scalar(self, path: str, value: float | int | bool) -> None:
         self.stream.log(path, self.rr.Scalars(float(value)))
 
@@ -812,15 +855,15 @@ class RerunVisualizer:
             mapped_host_ns=int(acquisition.get("mapped_host_time_ns", 0)),
         )
         root = f"robot/{side}_arm"
-        joint_labels = [f"j{index + 1}" for index in range(7)]
         for name in ("q", "dq", "tau", "tau_des", "tau_ext", "tau_interact"):
-            self._vector(f"{root}/{name}", payload[name], joint_labels)
+            path = f"{root}/{name}"
+            self._vector(path, payload[name], self._semantic_vector_labels(path, 7))
         temperature = payload.get("temperature", ())
         if temperature:
             self._vector(
                 f"{root}/temperature_c",
                 temperature,
-                [f"sensor_{index}" for index in range(len(temperature))],
+                [f"temperature_sensor_{index}" for index in range(len(temperature))],
             )
         pose = payload["tcp_pose"]
         translation = np.asarray(pose["position"], dtype=np.float64)
@@ -837,7 +880,7 @@ class RerunVisualizer:
         self._vector(
             f"{root}/tcp/rotation6d",
             rotation6d,
-            ROT6D_FIRST_TWO_COLUMNS.split(","),
+            [f"rotation6d_{name}" for name in ROT6D_FIRST_TWO_COLUMNS.split(",")],
         )
         self.stream.log(
             f"{root}/tcp/decoded_rotation",
@@ -846,17 +889,38 @@ class RerunVisualizer:
         self._vector(
             f"{root}/tcp_twist",
             payload["tcp_twist"],
-            ("vx", "vy", "vz", "wx", "wy", "wz"),
+            (
+                "tcp_twist_vx",
+                "tcp_twist_vy",
+                "tcp_twist_vz",
+                "tcp_twist_wx",
+                "tcp_twist_wy",
+                "tcp_twist_wz",
+            ),
         )
         self._vector(
             f"{root}/raw_ft",
             payload["raw_ft"],
-            ("fx", "fy", "fz", "tx", "ty", "tz"),
+            (
+                "raw_ft_fx",
+                "raw_ft_fy",
+                "raw_ft_fz",
+                "raw_ft_tx",
+                "raw_ft_ty",
+                "raw_ft_tz",
+            ),
         )
         self._vector(
             f"{root}/external_wrench",
             payload["tcp_wrench"],
-            ("fx", "fy", "fz", "tx", "ty", "tz"),
+            (
+                "wrench_fx",
+                "wrench_fy",
+                "wrench_fz",
+                "wrench_tx",
+                "wrench_ty",
+                "wrench_tz",
+            ),
         )
         self._scalar(f"{root}/connected", bool(payload.get("connected", False)))
         self._scalar(
@@ -875,7 +939,6 @@ class RerunVisualizer:
             mapped_host_ns=int(acquisition.get("mapped_host_time_ns", 0)),
         )
         root = f"robot/{side}_hand"
-        labels = ("little", "ring", "middle", "index", "thumb_bend", "thumb_rotate")
         for field, suffix in (
             ("angle", "angle_rad"),
             ("position", "position"),
@@ -885,7 +948,8 @@ class RerunVisualizer:
             ("error", "error_code"),
             ("status", "status_code"),
         ):
-            self._vector(f"{root}/{suffix}", payload[field], labels)
+            path = f"{root}/{suffix}"
+            self._vector(path, payload[field], self._semantic_vector_labels(path, 6))
         self._scalar(f"{root}/connected", bool(payload.get("connected", False)))
         self._scalar(f"{root}/faulted", bool(payload.get("fault", False)))
         reason = str(payload.get("fault_reason", ""))
@@ -904,7 +968,7 @@ class RerunVisualizer:
         self._vector(
             f"robot/{side}_hand/manus_ergonomics_rad",
             values,
-            names,
+            [f"manus_{name}" for name in names],
         )
 
     def log_tactile(self, payload: Mapping[str, Any]) -> None:
@@ -1097,11 +1161,8 @@ class RerunVisualizer:
             if all(isinstance(item, (bool, int, float)) for item in value):
                 array = np.asarray(value, dtype=np.float64)
                 if np.all(np.isfinite(array)):
-                    self._vector(
-                        path,
-                        array,
-                        [f"value_{index}" for index in range(array.size)],
-                    )
+                    labels = self._semantic_vector_labels(path, array.size)
+                    self._vector(path, array, labels)
 
     @staticmethod
     def _duration_payload_ns(value: Any) -> int:

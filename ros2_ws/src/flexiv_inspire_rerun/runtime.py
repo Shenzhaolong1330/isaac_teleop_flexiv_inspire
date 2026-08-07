@@ -1155,7 +1155,14 @@ class RerunVisualizer:
 
         normalized = topic.strip("/")
         root = self._offline_entity_root(normalized, payload)
-        self._set_time(playback_time_ns, sequence=sequence)
+        # DeviceIO sequence numbers are local to each producer/topic. Exposing
+        # them as one global Rerun timeline makes, for example, camera frame
+        # #1139 coexist with arm sample #23876 and leaves the arm plots blank
+        # while viewing the camera. Offline playback therefore uses only the
+        # common playback clock; the original sequence remains inspectable as
+        # ordinary per-stream metadata below.
+        self._set_time(playback_time_ns)
+        self._scalar(f"{root}/record/source_sequence", sequence)
         self._scalar(f"{root}/record/valid", valid)
         self._scalar(f"{root}/record/timing_valid", timing_valid)
         self._scalar(f"{root}/record/original_time_seconds", original_time_ns * 1e-9)

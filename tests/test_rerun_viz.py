@@ -386,6 +386,27 @@ def test_offline_deviceio_uses_live_arm_and_hand_entity_paths() -> None:
     assert not any("/state/q" in path for path in visualizer.stream.paths)
 
 
+def test_offline_deviceio_uses_common_time_not_per_source_sequence() -> None:
+    time_calls = []
+    scalar_calls = []
+    visualizer = object.__new__(RerunVisualizer)
+    visualizer._set_time = lambda *args, **kwargs: time_calls.append((args, kwargs))
+    visualizer._scalar = lambda path, value: scalar_calls.append((path, value))
+    visualizer._text_if_changed = lambda *args, **kwargs: None
+    visualizer.log_deviceio(
+        topic="/robot/left_arm/state",
+        payload={},
+        playback_time_ns=123,
+        original_time_ns=456,
+        sequence=23876,
+        valid=True,
+        timing_valid=True,
+    )
+
+    assert time_calls == [((123,), {})]
+    assert ("robot/left_arm/record/source_sequence", 23876) in scalar_calls
+
+
 def test_live_depth_and_pointcloud_are_decoded_without_ros_helpers() -> None:
     class Stream:
         def __init__(self):

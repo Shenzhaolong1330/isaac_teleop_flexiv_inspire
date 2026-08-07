@@ -359,19 +359,47 @@ def test_right_pedal_empty_action_discards_and_restarts_same_episode() -> None:
     assert fake.starts == 1
     assert fake._finished is False
     assert fake.events[-2:] == ["start", "authorize"]
-    assert "没有实际发送的机械臂命令" in fake.logger.warnings[-1]
+    assert "记录不完整" in fake.logger.warnings[-1]
 
 
-def test_only_missing_sent_command_is_classified_as_empty_action() -> None:
-    manifest = {
-        "completed": False,
-        "completion_reason": episode_control._EMPTY_ACTION_COMPLETION_REASON,
-        "streams": {},
-    }
+def test_failed_episode_is_deleted_even_after_recorder_already_exited(
+    tmp_path: Path,
+) -> None:
+    fake = _FakeController("")
+    fake.values["sessions_root"] = str(tmp_path)
+    fake._lock = threading.RLock()
+    fake._process = SimpleNamespace(poll=lambda: 1)
+    fake._publish_progress = lambda _state: None
+    logger = _Logger()
+    fake.get_logger = lambda: logger
+    episode = (
+        tmp_path
+        / "pick_place"
+        / "raw"
+        / "red_block_pick_episode_003_20260807_1400"
+    )
+    episode.mkdir(parents=True)
+    fake._current_manifest = episode / "manifest.json"
+    fake._current_manifest.write_text(
+        json.dumps(
+            {
+                "completed": False,
+                "completion_reason": "operator-stop; required streams have no valid samples",
+                "streams": {
+                    "episode/events": {"samples": 2, "invalid": 0}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake._delete_discarded_episode = lambda: EpisodeController._delete_discarded_episode(fake)
 
-    assert episode_control._is_empty_action_attempt(manifest) is True
-    manifest["completion_reason"] += "; rosbag: write failed"
-    assert episode_control._is_empty_action_attempt(manifest) is False
+    completed = EpisodeController._stop(fake, rerecord=False)
+
+    assert completed is False
+    assert not episode.exists()
+    assert fake._current_manifest is None
+    assert "已自动删除" in logger.warnings[-1]
 
 
 def test_left_pedal_discards_homes_and_restarts_same_index() -> None:

@@ -42,11 +42,6 @@ _ROUTINE_CONTROL_HOLD_REASONS = {
     "hand_offline",
     "safety_limit",
 }
-_EMPTY_ACTION_COMPLETION_REASON = (
-    "operator-stop; required streams have no valid samples: control/sent_command"
-)
-
-
 def _next_task_episode_index(storage_root: Path, task_name: str) -> int:
     """Continue one task's numbering across separate collection processes."""
 
@@ -64,25 +59,6 @@ def _next_task_episode_index(storage_root: Path, task_name: str) -> int:
         if match is not None:
             maximum = max(maximum, int(match.group(1)))
     return maximum + 1
-
-
-def _is_empty_action_attempt(manifest: dict[str, object]) -> bool:
-    """Return true only for a normally stopped episode with no sent action."""
-
-    if bool(manifest.get("completed", False)):
-        return False
-    if str(manifest.get("completion_reason", "")) != _EMPTY_ACTION_COMPLETION_REASON:
-        return False
-    streams = manifest.get("streams", {})
-    if not isinstance(streams, dict):
-        return False
-    stats = streams.get("control/sent_command")
-    if not isinstance(stats, dict):
-        return True
-    try:
-        return int(stats.get("samples", 0)) - int(stats.get("invalid", 0)) <= 0
-    except (TypeError, ValueError):
-        return False
 
 
 class EpisodeController(Node):
@@ -397,19 +373,20 @@ class EpisodeController(Node):
         with self._lock:
             process = self._process
             self._process = None
-        if process is None or process.poll() is not None:
+        if process is None:
             return False
-        self._publish_progress("DISCARDING" if rerecord else "FINALIZING")
-        process.send_signal(signal.SIGUSR1 if rerecord else signal.SIGINT)
-        try:
-            process.wait(timeout=30.0)
-        except subprocess.TimeoutExpired:
-            process.terminate()
+        if process.poll() is None:
+            self._publish_progress("DISCARDING" if rerecord else "FINALIZING")
+            process.send_signal(signal.SIGUSR1 if rerecord else signal.SIGINT)
             try:
-                process.wait(timeout=5.0)
+                process.wait(timeout=30.0)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5.0)
+                process.terminate()
+                try:
+                    process.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5.0)
         manifest = {}
         if self._current_manifest is not None and self._current_manifest.is_file():
             manifest = json.loads(self._current_manifest.read_text(encoding="utf-8"))
@@ -418,16 +395,15 @@ class EpisodeController(Node):
             raise RuntimeError("discarded episode was incorrectly marked completed")
         if rerecord:
             self._delete_discarded_episode()
-        if not rerecord and _is_empty_action_attempt(manifest):
-            # The recorder has already stopped, so this cannot be recovered by
-            # sending it SIGHUP. Treat it exactly like an operator discard and
-            # let the episode workflow start a fresh attempt at the same index.
-            self._delete_discarded_episode()
-            return False
         if not rerecord and not completed:
-            raise RuntimeError(
-                f"episode finalization failed: {manifest.get('completion_reason', 'manifest missing')}"
+            reason = str(
+                manifest.get("completion_reason", "manifest missing")
             )
+            self._delete_discarded_episode()
+            self.get_logger().warning(
+                f"episode 记录失败，已自动删除并将重录当前编号: {reason}"
+            )
+            return False
         return completed
 
     def _pause(self) -> None:
@@ -756,8 +732,8 @@ class EpisodeController(Node):
                 completed = self._stop(rerecord=False)
                 if not completed:
                     self.get_logger().warning(
-                        "右踏板：当前 episode 没有实际发送的机械臂命令，"
-                        "本条不计数；已丢弃并自动重新录制当前条"
+                        "右踏板：当前 episode 记录不完整，"
+                        "本条不计数；已自动删除并重新录制当前条"
                     )
                     self._attempt += 1
                     self._start()
@@ -834,7 +810,6 @@ class EpisodeController(Node):
             return
         process = self._process
         if process is not None and process.poll() is not None:
-            self._process = None
             self._fail(f"recorder:unexpected_exit:{process.returncode}")
             return
         if (
@@ -868,7 +843,7 @@ class EpisodeController(Node):
     def _fail(self, reason: str) -> None:
         self.get_logger().error(reason)
         try:
-            if self._process is not None and self._process.poll() is None:
+            if self._process is not None:
                 self._stop(rerecord=True)
         except Exception as stop_exc:
             reason = f"{reason}; discard_failed:{stop_exc}"

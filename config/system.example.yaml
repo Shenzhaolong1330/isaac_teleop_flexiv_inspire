@@ -177,6 +177,14 @@ xr_video:
 teleop:
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
+  quest_input:
+    provider: oculus_reader       # oculus_reader | isaac_openxr
+    publish_rate_hz: 60.0
+    stale_timeout_ms: 120.0
+    oculus_reader:
+      adb_serial: ""
+      package_name: com.rail.oculus.teleop
+      auto_install_apk: true
   manus_calibration: ""
   manus_ergonomics:
     enabled: true

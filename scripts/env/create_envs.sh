@@ -110,5 +110,6 @@ install_local_projects rdk-py310 libs/control_core apps/flexiv_daemon
 install_local_projects ros-py312 libs/control_core .
 install_local_projects isaac-py312 libs/control_core .
 install_local_projects data-py312 libs/control_core .
+bash "${ROOT}/scripts/env/install_oculus_reader.sh"
 
 printf 'Created and synchronized four isolated environments under %s/envs\n' "${ROOT}"

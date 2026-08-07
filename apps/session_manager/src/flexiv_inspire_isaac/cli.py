@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -45,6 +46,8 @@ _MANAGED_PROCESS_MARKERS = (
     "isaac-flexiv-episode",
     "flexiv_inspire_isaac.xr_raw_ros_source",
     "flexiv-inspire-xr-raw-source",
+    "flexiv_inspire_isaac.oculus_reader_ros_source",
+    "flexiv-inspire-oculus-reader-source",
     "flexiv_inspire_control.manus_ergonomics_source",
     "flexiv-inspire-manus-ergonomics-source",
     "flexiv_inspire_isaac.rerun_viz.cli",
@@ -240,7 +243,7 @@ def _report_manus_status(
 ) -> bool:
     """Report current MANUS state without making it a record startup gate.
 
-    Quest/OpenXR and MANUS may complete their handshake in either order.  The
+    Quest tracking and MANUS may complete their handshake in either order.  The
     teleop node already degrades to arm-only commands and automatically adds
     both hand command bits on the first valid MANUS frame, so the launcher only
     needs to report status and must never tear down an otherwise usable run.
@@ -1086,6 +1089,56 @@ def _xr_raw_source_command(config) -> list[str]:
     return command
 
 
+def _quest_input_config(config) -> dict:
+    """Return the provider config while preserving legacy site files."""
+
+    configured = config.document["teleop"].get("quest_input")
+    if configured is None:
+        return {
+            "provider": "isaac_openxr",
+            "publish_rate_hz": 60.0,
+            "stale_timeout_ms": 120.0,
+            "oculus_reader": {
+                "adb_serial": "",
+                "package_name": "com.rail.oculus.teleop",
+                "auto_install_apk": True,
+            },
+        }
+    return configured
+
+
+def _oculus_reader_source_command(config) -> list[str]:
+    quest = _quest_input_config(config)
+    oculus = quest["oculus_reader"]
+    command = [
+        sys.executable,
+        "-m",
+        "flexiv_inspire_isaac.oculus_reader_ros_source",
+        "--ros-args",
+        "-p",
+        f"rate_hz:={float(quest['publish_rate_hz'])}",
+        "-p",
+        f"stale_timeout_s:={float(quest['stale_timeout_ms']) / 1000.0}",
+        "-p",
+        f"package_name:={oculus['package_name']}",
+        "-p",
+        "auto_install_apk:=" + str(bool(oculus["auto_install_apk"])).lower(),
+    ]
+    adb_serial = str(oculus["adb_serial"]).strip()
+    if adb_serial:
+        command.extend(["-p", f"adb_serial:={adb_serial}"])
+    return command
+
+
+def _quest_input_source_command(config) -> list[str]:
+    provider = str(_quest_input_config(config)["provider"])
+    if provider == "oculus_reader":
+        return _oculus_reader_source_command(config)
+    if provider == "isaac_openxr":
+        return _xr_raw_source_command(config)
+    raise ValueError(f"unsupported Quest input provider: {provider}")
+
+
 def _manus_plugin_command(config) -> list[str]:
     ergonomics = config.document["teleop"]["manus_ergonomics"]
     return [
@@ -1629,8 +1682,8 @@ def _commands(
     if rerun_command is not None:
         commands.append(rerun_command)
     # Quest controllers and MANUS are command inputs, not part of the optional
-    # camera display branch.
-    commands.append(_xr_raw_source_command(config))
+    # camera display branch. Exactly one provider owns the stable XR topics.
+    commands.append(_quest_input_source_command(config))
     if bool(root["teleop"]["manus_ergonomics"]["enabled"]):
         commands.append(_manus_ergonomics_source_command(config))
     commands.append(_manus_plugin_command(config))
@@ -1782,12 +1835,65 @@ def _parser() -> argparse.ArgumentParser:
     )
     xr_view.add_argument("--dry-run", action="store_true")
     sub.add_parser(
-        "xr-doctor", help="check ffmpeg, Docker, IsaacTeleop and CloudXR prerequisites"
+        "xr-doctor", help="check the selected Quest input provider prerequisites"
     )
     return parser
 
 
 def _xr_doctor(config) -> int:
+    quest = _quest_input_config(config)
+    provider = str(quest["provider"])
+    if provider == "oculus_reader":
+        adb = shutil.which("adb")
+        checks = {
+            "adb": adb is not None,
+            "oculus_reader_python": importlib.util.find_spec("oculus_reader")
+            is not None,
+            "quest_usb_device": False,
+        }
+        devices: list[str] = []
+        if adb is not None:
+            try:
+                result = subprocess.run(
+                    [adb, "devices", "-l"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    devices = [
+                        line.split()[0]
+                        for line in result.stdout.splitlines()[1:]
+                        if len(line.split()) >= 2 and line.split()[1] == "device"
+                    ]
+            except subprocess.TimeoutExpired:
+                pass
+        configured = str(quest["oculus_reader"]["adb_serial"]).strip()
+        checks["quest_usb_device"] = (
+            configured in devices if configured else len(devices) == 1
+        )
+        ready = all(checks.values())
+        if not checks["oculus_reader_python"]:
+            next_step = "sync requirements/ros-py312.lock"
+        elif not checks["quest_usb_device"]:
+            next_step = "unlock Quest, allow USB debugging, then run robot xr-doctor"
+        else:
+            next_step = "robot record"
+        print(
+            json.dumps(
+                {
+                    "ready": ready,
+                    "provider": provider,
+                    "devices": devices,
+                    "checks": checks,
+                    "next": next_step,
+                },
+                indent=2,
+            )
+        )
+        return 0 if ready else 2
+
     root = _project_root(config)
     ffmpeg = str(config.document["xr_video"]["ffmpeg"])
     transport = str(config.document["xr_video"]["transport"])
@@ -1839,6 +1945,7 @@ def _xr_doctor(config) -> int:
         json.dumps(
             {
                 "ready": ready,
+                "provider": provider,
                 "transport": transport,
                 "checks": checks,
                 "next": next_step,
@@ -2019,7 +2126,7 @@ def _main(args, config) -> int:
                 )
         print(
             f"started {len(processes)} supporting services; "
-            "Quest tracking=on; "
+            f"Quest tracking={_quest_input_config(config)['provider']}; "
             f"XR video={'on' if include_xr else 'off'}",
             flush=True,
         )

@@ -418,6 +418,39 @@ def load_system_config(path: str | Path) -> SystemConfig:
         "quest_squeeze_either",
     }:
         raise SystemConfigError("teleop.deadman_source is unsupported")
+    quest_input_raw = teleop.get("quest_input")
+    if quest_input_raw is not None:
+        quest_input = _mapping(quest_input_raw, "teleop.quest_input")
+        if quest_input.get("provider") not in {"oculus_reader", "isaac_openxr"}:
+            raise SystemConfigError(
+                "teleop.quest_input.provider must be oculus_reader or isaac_openxr"
+            )
+        _positive(
+            quest_input.get("publish_rate_hz"),
+            "teleop.quest_input.publish_rate_hz",
+            upper=240.0,
+        )
+        _positive(
+            quest_input.get("stale_timeout_ms"),
+            "teleop.quest_input.stale_timeout_ms",
+            upper=2000.0,
+        )
+        oculus = _mapping(
+            quest_input.get("oculus_reader"),
+            "teleop.quest_input.oculus_reader",
+        )
+        if not isinstance(oculus.get("adb_serial"), str):
+            raise SystemConfigError(
+                "teleop.quest_input.oculus_reader.adb_serial must be a string"
+            )
+        if not str(oculus.get("package_name", "")).strip():
+            raise SystemConfigError(
+                "teleop.quest_input.oculus_reader.package_name is required"
+            )
+        if not isinstance(oculus.get("auto_install_apk"), bool):
+            raise SystemConfigError(
+                "teleop.quest_input.oculus_reader.auto_install_apk must be a bool"
+            )
     manus_ergonomics = _mapping(
         teleop.get("manus_ergonomics"), "teleop.manus_ergonomics"
     )

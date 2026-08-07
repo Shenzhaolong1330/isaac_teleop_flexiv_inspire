@@ -88,6 +88,16 @@ xr_video:
 teleop:
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
+  # Quest controls only wrist position/orientation and buttons. OculusReader
+  # is the lightweight USB default; isaac_openxr remains a selectable fallback.
+  quest_input:
+    provider: oculus_reader       # oculus_reader | isaac_openxr
+    publish_rate_hz: 60.0
+    stale_timeout_ms: 120.0
+    oculus_reader:
+      adb_serial: ""              # required only when multiple ADB devices exist
+      package_name: com.rail.oculus.teleop
+      auto_install_apk: true
   # Operator-specific left/right MANUS Ergonomics calibration. The tracked
   # bootstrap remains available for comparison or rollback.
   manus_calibration: artifacts/calibration/manus_ergonomics_site_20260803.yaml

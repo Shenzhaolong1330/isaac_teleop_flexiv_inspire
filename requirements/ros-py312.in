@@ -16,3 +16,4 @@ psutil>=6,<8
 zstandard>=0.23,<1
 msgpack>=1,<2
 pytest==8.4.2
+pure-python-adb==0.3.0.dev0

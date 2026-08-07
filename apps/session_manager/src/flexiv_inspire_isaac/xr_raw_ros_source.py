@@ -15,7 +15,6 @@ import time
 import urllib.request
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-import msgpack
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose, PoseArray, TransformStamped
@@ -41,9 +40,8 @@ from isaacteleop.teleop_session_manager import (
     TeleopSession,
     TeleopSessionConfig,
 )
-from isaac_teleop_core.octet_sequence import encode_octet_sequence
-
 from .openxr_errors import is_retryable_openxr_session_error
+from .quest_input_contract import controller_payload, encode_controller_payload
 
 
 def _force_quest_browser_navigation(oob_teleop_adb, url: str) -> None:
@@ -768,27 +766,25 @@ class XrRawRosSource(Node):
 
         left = result["controller_left"]
         right = result["controller_right"]
-        payload = {
-            "timestamp": time.time_ns(),
-            "left_squeeze_value": _controller_value(
+        payload = controller_payload(
+            timestamp_ns=time.time_ns(),
+            left_squeeze_value=_controller_value(
                 left, ControllerInputIndex.SQUEEZE_VALUE, 0.0
             ),
-            "right_squeeze_value": _controller_value(
+            right_squeeze_value=_controller_value(
                 right, ControllerInputIndex.SQUEEZE_VALUE, 0.0
             ),
-            "left_primary_click": _controller_click(
+            left_primary_click=_controller_click(
                 left, ControllerInputIndex.PRIMARY_CLICK
             ),
-            "right_primary_click": _controller_click(
+            right_primary_click=_controller_click(
                 right, ControllerInputIndex.PRIMARY_CLICK
             ),
-            "left_is_active": not left.is_none,
-            "right_is_active": not right.is_none,
-        }
-        controller_message = ByteMultiArray()
-        controller_message.data = encode_octet_sequence(
-            msgpack.packb(payload, use_bin_type=True)
+            left_is_active=not left.is_none,
+            right_is_active=not right.is_none,
         )
+        controller_message = ByteMultiArray()
+        controller_message.data = encode_controller_payload(payload)
         self._controller_pub.publish(controller_message)
 
     def _publish_hands(self, result: dict, now) -> None:

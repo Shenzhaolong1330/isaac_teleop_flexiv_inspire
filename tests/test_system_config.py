@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 from flexiv_inspire_isaac.cli import (
     _PolicyAuthorizationSupervisor,
@@ -494,16 +495,15 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
         "-m",
         "flexiv_inspire_control.teleop_input_node",
     ]
-    xr_source = next(
-        command for command in commands if command[0].endswith("run_xr_raw_source.sh")
+    quest_source = next(
+        command
+        for command in commands
+        if "flexiv_inspire_isaac.oculus_reader_ros_source" in command
     )
-    assert xr_source[xr_source.index("--transport") + 1] == "lan"
-    assert xr_source[xr_source.index("--wifi-connection") + 1] == "Deepybo-Prime"
-    assert xr_source[xr_source.index("--client-per-eye-width") + 1] == "1792"
-    assert xr_source[xr_source.index("--client-per-eye-height") + 1] == "1536"
-    assert xr_source[xr_source.index("--client-frame-rate") + 1] == "72"
-    assert xr_source[xr_source.index("--client-max-bitrate-mbps") + 1] == "80"
-    assert xr_source[xr_source.index("--client-codec") + 1] == "h264"
+    assert "rate_hz:=60.0" in quest_source
+    assert "stale_timeout_s:=0.12" in quest_source
+    assert "package_name:=com.rail.oculus.teleop" in quest_source
+    assert "auto_install_apk:=true" in quest_source
     assert any(command[0].endswith("run_manus_plugin.sh") for command in commands)
     ergonomics_source = next(
         command
@@ -576,6 +576,16 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "enable_tex_sub_image_2d": True,
     }
     assert config.document["xr_video"]["display"]["lock_mode"] == "world"
+    assert config.document["teleop"]["quest_input"] == {
+        "provider": "oculus_reader",
+        "publish_rate_hz": 60.0,
+        "stale_timeout_ms": 120.0,
+        "oculus_reader": {
+            "adb_serial": "",
+            "package_name": "com.rail.oculus.teleop",
+            "auto_install_apk": True,
+        },
+    }
     assert config.document["teleop"]["manus_ergonomics"] == {
         "enabled": True,
         "udp_host": "127.0.0.1",
@@ -634,10 +644,49 @@ def test_quest_input_does_not_depend_on_xr_video_branch(tmp_path):
 
     commands = _commands(config, rendered, include_xr_receiver=True)
     joined = [" ".join(command) for command in commands]
-    assert any("run_xr_raw_source.sh" in command for command in joined)
+    assert any("oculus_reader_ros_source" in command for command in joined)
     assert any("run_manus_plugin.sh" in command for command in joined)
     assert not any("flexiv-inspire-xr-bridge" in command for command in joined)
     assert not any("run_isaac_camera_receiver.sh" in command for command in joined)
+
+
+def test_isaac_openxr_remains_a_selectable_quest_input_provider(tmp_path):
+    config = load_system_config(_example())
+    config.document["teleop"]["quest_input"]["provider"] = "isaac_openxr"
+    rendered = render_runtime_configs(config, tmp_path / "rendered")
+
+    commands = _commands(config, rendered, include_xr_receiver=False)
+    joined = [" ".join(command) for command in commands]
+    assert any("run_xr_raw_source.sh" in command for command in joined)
+    assert not any("oculus_reader_ros_source" in command for command in joined)
+
+
+def test_legacy_config_without_quest_provider_keeps_isaac_openxr(tmp_path):
+    config = load_system_config(_example())
+    config.document["teleop"].pop("quest_input")
+    rendered = render_runtime_configs(config, tmp_path / "rendered")
+
+    joined = [
+        " ".join(command)
+        for command in _commands(config, rendered, include_xr_receiver=False)
+    ]
+    assert any("run_xr_raw_source.sh" in command for command in joined)
+    assert not any("oculus_reader_ros_source" in command for command in joined)
+
+
+def test_system_config_rejects_unknown_quest_input_provider(tmp_path):
+    data = yaml.safe_load(_example().read_text())
+    root = Path(__file__).parents[1]
+    data["flexiv"]["rdk_config"] = str(
+        root / "apps/flexiv_daemon/config/robots.yaml"
+    )
+    data["flexiv"]["frame_config"] = str(root / "config/dual_arm_frames.yaml")
+    data["teleop"]["quest_input"]["provider"] = "automatic"
+    path = tmp_path / "bad-quest-provider.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(SystemConfigError, match="quest_input.provider"):
+        load_system_config(path)
 
 
 def test_system_config_rejects_non_boolean_xr_record_switch(tmp_path):

@@ -212,6 +212,51 @@ def test_camera_extrinsics_are_hashed_into_episode_manifest_inputs() -> None:
     assert "camera_head=/tmp/head-extrinsics.yaml" in command
 
 
+def test_camera_disconnect_is_prominent_and_recovery_is_reported_once() -> None:
+    logger = _Logger()
+    fake = SimpleNamespace(
+        _camera_status_by_name={},
+        get_logger=lambda: logger,
+    )
+    disconnected = _control(
+        json.dumps(
+            {
+                "camera_name": "right_wrist",
+                "serial": "347622074577",
+                "connected": False,
+                "fault": True,
+                "reason": "capture-failed:RuntimeError:No device connected",
+            }
+        )
+    )
+
+    EpisodeController._on_camera_status(fake, "right_wrist", disconnected)
+    EpisodeController._on_camera_status(fake, "right_wrist", disconnected)
+
+    assert len(logger.errors) == 1
+    assert "数据流中断：右腕相机" in logger.errors[0]
+    assert "episode 会自动作废重录" in logger.errors[0]
+
+    EpisodeController._on_camera_status(
+        fake,
+        "right_wrist",
+        _control(
+            json.dumps(
+                {
+                    "camera_name": "right_wrist",
+                    "serial": "347622074577",
+                    "connected": True,
+                    "fault": False,
+                    "reason": "streaming",
+                }
+            )
+        ),
+    )
+
+    assert len(logger.infos) == 1
+    assert "数据流恢复：右腕相机" in logger.infos[0]
+
+
 class _EpisodeWorkflow:
     def __init__(self, episode_count: int = 2) -> None:
         self._lock = threading.RLock()

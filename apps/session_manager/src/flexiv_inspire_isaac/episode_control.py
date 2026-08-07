@@ -42,6 +42,50 @@ _ROUTINE_CONTROL_HOLD_REASONS = {
     "hand_offline",
     "safety_limit",
 }
+
+_CAMERA_LABELS = {
+    "head": "头部相机",
+    "left_wrist": "左腕相机",
+    "right_wrist": "右腕相机",
+}
+
+_STREAM_LABELS = {
+    "camera/head/color/image_raw/compressed": "头部 RGB",
+    "camera/left_wrist/color/image_raw/compressed": "左腕 RGB",
+    "camera/right_wrist/color/image_raw/compressed": "右腕 RGB",
+    "robot/left_arm/state": "左臂状态",
+    "robot/right_arm/state": "右臂状态",
+    "robot/left_hand/state": "左手状态",
+    "robot/right_hand/state": "右手状态",
+    "robot/left_hand/tactile_raw": "左手触觉",
+    "robot/right_hand/tactile_raw": "右手触觉",
+    "control/sent_command": "已下发动作",
+}
+
+
+def _terminal_banner(logger, title: str, *details: str, level: str = "info") -> None:
+    """Print one unmistakable collection transition in the foreground terminal."""
+
+    border = "═" * 72
+    lines = [f"\n╔{border}╗", f"  {title}"]
+    lines.extend(f"  {detail}" for detail in details if detail)
+    lines.append(f"╚{border}╝")
+    getattr(logger, level)("\n".join(lines))
+
+
+def _human_completion_reason(reason: str) -> str:
+    marker = "required streams have no valid samples: "
+    if marker not in reason:
+        return reason
+    missing = reason.split(marker, 1)[1].split(";", 1)[0]
+    labels = [
+        _STREAM_LABELS.get(item.strip(), item.strip())
+        for item in missing.split(",")
+        if item.strip()
+    ]
+    return "缺少有效数据流：" + "、".join(labels)
+
+
 def _next_task_episode_index(storage_root: Path, task_name: str) -> int:
     """Continue one task's numbering across separate collection processes."""
 
@@ -127,6 +171,7 @@ class EpisodeController(Node):
         self._next_ready_wait_log_ns = 0
         self._startup_done = False
         self._finished = False
+        self._camera_status_by_name: dict[str, tuple[bool, bool, str]] = {}
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._status = self.create_publisher(String, "/episode/status", qos)
@@ -146,6 +191,13 @@ class EpisodeController(Node):
         self.create_subscription(
             ControlState, "/control/state", self._on_control_state, qos
         )
+        for camera in _CAMERA_LABELS:
+            self.create_subscription(
+                String,
+                f"/camera/{camera}/color/status",
+                lambda message, name=camera: self._on_camera_status(name, message),
+                qos,
+            )
         self.create_timer(0.25, self._tick)
         self.get_logger().info(
             "数采控制：左踏板=丢弃当前条并 Home 后重录；"
@@ -298,6 +350,53 @@ class EpisodeController(Node):
             f"{progress['target_episodes']}"
         )
 
+    def _episode_label(self) -> str:
+        return (
+            f"episode={self._episode_index:03d} attempt={self._attempt} "
+            f"completed={self._completed_episodes}/"
+            f"{int(self.get_parameter('episode_count').value)}"
+        )
+
+    def _on_camera_status(self, camera: str, message: String) -> None:
+        """Surface camera disconnects hidden in supporting-service log files."""
+
+        try:
+            payload = json.loads(message.data)
+            if not isinstance(payload, dict):
+                raise ValueError("camera status must be a JSON object")
+            status = (
+                bool(payload.get("connected", False)),
+                bool(payload.get("fault", False)),
+                str(payload.get("reason", "unknown")),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(
+                f"ignored malformed {camera} camera status: {exc}"
+            )
+            return
+        previous = self._camera_status_by_name.get(camera)
+        self._camera_status_by_name[camera] = status
+        if previous == status:
+            return
+        connected, fault, reason = status
+        label = _CAMERA_LABELS.get(camera, camera)
+        serial = str(payload.get("serial", "")).strip()
+        identity = f"{label}" + (f"（{serial}）" if serial else "")
+        if fault:
+            _terminal_banner(
+                self.get_logger(),
+                f"⚠ 数据流中断：{identity}",
+                f"原因：{reason}",
+                "该相机恢复前请勿继续采集；没有有效帧的 episode 会自动作废重录。",
+                level="error",
+            )
+        elif connected and (previous is None or not previous[0] or previous[1]):
+            _terminal_banner(
+                self.get_logger(),
+                f"✓ 数据流恢复：{identity}",
+                "后续踩下中踏板时会正常写入该相机画面。",
+            )
+
     def _read_recorder_state(self) -> dict[str, object]:
         try:
             value = json.loads(self._state_file().read_text(encoding="utf-8"))
@@ -334,6 +433,21 @@ class EpisodeController(Node):
             self._stop(rerecord=True)
             raise
         self._publish_progress("RECORDING")
+        destination = "" if self._current_manifest is None else str(
+            self._current_manifest.parent
+        )
+        mode = (
+            "等待中踏板；仅中踏板按住期间写入训练数据"
+            if bool(self.get_parameter("record_only_while_pedal_pressed").value)
+            else "正在持续写入数据"
+        )
+        _terminal_banner(
+            self.get_logger(),
+            f"● EPISODE {self._episode_index:03d} 已开始",
+            self._episode_label(),
+            mode,
+            f"目录：{destination}",
+        )
 
     def _delete_discarded_episode(self) -> None:
         """Delete only the exact episode directory owned by this controller."""
@@ -388,22 +502,45 @@ class EpisodeController(Node):
                     process.kill()
                     process.wait(timeout=5.0)
         manifest = {}
+        episode_directory = (
+            None if self._current_manifest is None else self._current_manifest.parent
+        )
         if self._current_manifest is not None and self._current_manifest.is_file():
             manifest = json.loads(self._current_manifest.read_text(encoding="utf-8"))
         completed = bool(manifest.get("completed", False))
         if rerecord and completed:
             raise RuntimeError("discarded episode was incorrectly marked completed")
         if rerecord:
+            _terminal_banner(
+                self.get_logger(),
+                f"↺ EPISODE {self._episode_index:03d} 已丢弃",
+                "不会计入完成数量；Home 后自动重录当前编号。",
+                level="warning",
+            )
             self._delete_discarded_episode()
         if not rerecord and not completed:
             reason = str(
                 manifest.get("completion_reason", "manifest missing")
+            )
+            _terminal_banner(
+                self.get_logger(),
+                f"✗ EPISODE {self._episode_index:03d} 无效，自动重录",
+                _human_completion_reason(reason),
+                "本条不计数，目录将删除。请先恢复缺失的数据流。",
+                level="error",
             )
             self._delete_discarded_episode()
             self.get_logger().warning(
                 f"episode 记录失败，已自动删除并将重录当前编号: {reason}"
             )
             return False
+        if completed:
+            _terminal_banner(
+                self.get_logger(),
+                f"✓ EPISODE {self._episode_index:03d} 保存完成",
+                "必需数据流完整性校验通过。",
+                f"目录：{episode_directory or ''}",
+            )
         return completed
 
     def _pause(self) -> None:
@@ -495,12 +632,16 @@ class EpisodeController(Node):
             previous = self._last_announced_control_state
             self._last_announced_control_state = announced
             if self._control_state_name == "ACTIVE":
-                self.get_logger().info(
-                    "中踏板：机械臂运动已使能，Quest 腕部位姿正在发送"
+                _terminal_banner(
+                    self.get_logger(),
+                    f"▶ 正在记录动作 · EPISODE {self._episode_index:03d}",
+                    "中踏板已按下：机械臂运动已使能，观测与动作正在写入。",
                 )
             elif previous is not None and previous[0] == "ACTIVE":
-                self.get_logger().info(
-                    "中踏板：机械臂运动已停止；松开后再次踩下会重新取当前位置为零点"
+                _terminal_banner(
+                    self.get_logger(),
+                    f"Ⅱ 动作记录已暂停 · EPISODE {self._episode_index:03d}",
+                    "中踏板已松开：机械臂停止；本条尚未结束。再次踩下可继续。",
                 )
             if self._control_state_name == "HOLD_LATCHED":
                 detail = "机械臂进入 HOLD_LATCHED：" + (
@@ -655,18 +796,25 @@ class EpisodeController(Node):
             return
         try:
             if command in {"stop", "toggle"}:
-                self.get_logger().info(
-                    "右踏板：保存当前 episode；Home 完成后自动开始下一条"
+                _terminal_banner(
+                    self.get_logger(),
+                    f"■ 右踏板：结束并保存 EPISODE {self._episode_index:03d}",
+                    "正在暂停写入并执行 Home；校验通过后自动开始下一条。",
                 )
                 self._begin_home("next")
             elif command == "rerecord":
-                self.get_logger().info(
-                    "左踏板：丢弃当前 episode；Home 完成后重新录制本条"
+                _terminal_banner(
+                    self.get_logger(),
+                    f"↺ 左踏板：放弃 EPISODE {self._episode_index:03d}",
+                    "正在暂停写入并执行 Home；随后重新录制当前编号。",
+                    level="warning",
                 )
                 self._begin_home("discard")
             elif command == "home":
-                self.get_logger().info(
-                    "Quest A：暂停当前 episode；Home 完成后继续本条"
+                _terminal_banner(
+                    self.get_logger(),
+                    f"⌂ Quest A：暂停 EPISODE {self._episode_index:03d} 并 Home",
+                    "Home 期间不记录；完成后继续当前条。",
                 )
                 self._begin_home("pause")
             else:

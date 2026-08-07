@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import signal
 import stat
+import subprocess
 from types import ModuleType, SimpleNamespace
 import sys
 
@@ -121,6 +122,44 @@ def test_reset_recovers_fault_by_restarting_bridge_then_retrying(tmp_path, monke
     assert service_starts == [config, config]
 
 
+def test_reset_recovers_stale_ros_service_reuse_before_zeroing(tmp_path, monkeypatch):
+    tool_config = tmp_path / "tool_payload.yaml"
+    tool_config.write_text("schema_version: 1\n", encoding="utf-8")
+    calls = 0
+    module = ModuleType("flexiv_inspire_control.zero_ft_local")
+
+    def fake_main(_argv: list[str]) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError(
+                "Reset 等待状态超时：控制状态 /control/state、"
+                "左手状态（未收到 ROS 消息）、右手状态（未收到 ROS 消息）"
+            )
+        return 0
+
+    module.main = fake_main
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(cli.sys, "stdin", _InteractiveInput())
+    monkeypatch.setattr(
+        cli, "_ensure_rdk_daemon", lambda config: tmp_path / "rdk.sock"
+    )
+    service_starts = []
+    monkeypatch.setattr(
+        cli, "_ensure_reset_ros_services", lambda config: service_starts.append(config)
+    )
+    restarts = []
+    monkeypatch.setattr(
+        cli, "_restart_reset_ros_processes", lambda: restarts.append(True)
+    )
+    config = _Config(tmp_path, tool_config)
+
+    assert cli._run_reset(config, SimpleNamespace(preview_seconds=0.0)) == 0
+    assert calls == 2
+    assert restarts == [True]
+    assert service_starts == [config, config]
+
+
 def test_reset_restarts_stuck_rdk_stack_then_retries_once(tmp_path, monkeypatch):
     tool_config = tmp_path / "tool_payload.yaml"
     tool_config.write_text("schema_version: 1\n", encoding="utf-8")
@@ -202,6 +241,26 @@ def test_reset_parser_needs_no_confirmation_argument():
 
     assert args.operation == "reset"
     assert args.preview_seconds == 2.0
+
+
+def test_background_ros_services_get_rclpy_without_parent_ros_setup(monkeypatch):
+    # A user may have activated the venv directly, which gives the prompt
+    # ``(ros-py312)`` but omits the setup.bash PYTHONPATH overlay.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("AMENT_PREFIX_PATH", raising=False)
+    environment = cli._command_environment(
+        [sys.executable, "-m", "example", "--ros-args"]
+    )
+
+    probe = subprocess.run(
+        [sys.executable, "-c", "import rclpy; print(rclpy.__file__)"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert "/opt/ros/jazzy/" in probe.stdout
 
 
 def test_policy_serve_parser_has_independent_server_config():

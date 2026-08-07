@@ -676,7 +676,35 @@ def _ensure_write_permit(path: Path) -> None:
 
 def _command_environment(command: Sequence[str]) -> dict[str, str] | None:
     if "--allow-hardware-writes" not in command:
-        return None
+        if "--ros-args" not in command:
+            return None
+        # ``(ros-py312)`` only identifies the virtualenv; it does not prove
+        # that the caller sourced /opt/ros/jazzy/setup.bash.  Background
+        # bridge/hand/pedal processes must nevertheless always get rclpy and
+        # the workspace overlays.  Derive their environment explicitly so a
+        # bare activated venv cannot make Reset fail with
+        # ``ModuleNotFoundError: rclpy``.
+        environment = os.environ.copy()
+        project_root = Path(__file__).resolve().parents[4]
+        setup_script = project_root / "ros2_ws" / "install" / "setup.bash"
+        shell = "source /opt/ros/jazzy/setup.bash"
+        if setup_script.is_file():
+            shell += f" && source {setup_script}"
+        shell += " && env -0"
+        try:
+            raw = subprocess.check_output(
+                ["/bin/bash", "-c", shell], env=environment
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(f"无法构造 ROS 子进程环境: {exc}") from exc
+        return {
+            key.decode("utf-8", errors="surrogateescape"): value.decode(
+                "utf-8", errors="surrogateescape"
+            )
+            for item in raw.split(b"\0")
+            if item
+            for key, _, value in (item.partition(b"="),)
+        }
     environment = os.environ.copy()
     environment["ISAAC_TELEOP_ALLOW_HARDWARE_WRITES"] = _HARDWARE_WRITE_VALUE
     executable = Path(command[0]).resolve()
@@ -2604,12 +2632,25 @@ def _run_reset(config, args) -> int:
     try:
         return zero_ft_main(zero_args)
     except (RuntimeError, TimeoutError) as exc:
+        message = str(exc)
+        # A matching process name only proves that an old bridge/DFTP process
+        # still exists.  It does not prove that this ROS domain is receiving
+        # /control/state and both hand-state streams.  Recover that stale
+        # service reuse locally, before any F/T or Home request is issued.
+        if "Reset 等待状态超时" in message:
+            print(
+                "Reset: 未收到控制或双手状态，正在重启 ROS 控制桥和手部服务后重试一次",
+                flush=True,
+            )
+            _restart_reset_ros_processes()
+            _ensure_reset_ros_services(config)
+            return zero_ft_main(zero_args)
+
         # The bridge intentionally latches a hardware command failure as
         # FAULT, but the F/T action can only run from MAINTENANCE. Restarting
         # the ROS bridge resets that software latch while keeping the same RDK
         # daemon; the retried F/T transaction then invokes RDK ClearFault on
         # both real controllers before Enable/ZeroFT/Home.
-        message = str(exc)
         if "got FAULT" in message:
             print(
                 "Reset: 检测到控制 FAULT，正在重启 ROS 控制桥并调用 RDK ClearFault",

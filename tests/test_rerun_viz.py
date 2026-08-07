@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import sys
 from types import ModuleType
+from types import SimpleNamespace
 import threading
 import time
 
@@ -19,6 +20,7 @@ from flexiv_inspire_isaac.rerun_viz.runtime import (
     tactile_sensor_mask,
 )
 from flexiv_inspire_isaac.rerun_viz.ros_node import VisualizationRateLimiter
+from flexiv_inspire_isaac.rerun_viz.offline import _anchor_visualization_records
 
 
 def _surfaces() -> list[dict]:
@@ -151,6 +153,27 @@ def test_visualization_rate_limiter_downsamples_without_delaying_latest() -> Non
     assert not limiter.allow("arm:left", 5.0, now_monotonic_ns=1_100_000_000)
     assert limiter.allow("arm:left", 5.0, now_monotonic_ns=1_200_000_000)
     assert limiter.allow("camera:head", 10.0, now_monotonic_ns=1_100_000_000)
+
+
+def test_offline_realtime_starts_at_first_live_sample_but_keeps_metadata() -> None:
+    source = iter(
+        (
+            SimpleNamespace(topic="/maintenance/ft_zero_event", timestamp_ns=1),
+            SimpleNamespace(topic="/episode/events", timestamp_ns=2),
+            SimpleNamespace(topic="/camera/head/color", timestamp_ns=71_000_000_000),
+            SimpleNamespace(topic="/robot/left_arm/state", timestamp_ns=71_010_000_000),
+        )
+    )
+
+    records, anchor_ns = _anchor_visualization_records(source)
+
+    assert anchor_ns == 71_000_000_000
+    assert [record.topic for record in records] == [
+        "/maintenance/ft_zero_event",
+        "/episode/events",
+        "/camera/head/color",
+        "/robot/left_arm/state",
+    ]
 
 
 def _bare_visualizer():

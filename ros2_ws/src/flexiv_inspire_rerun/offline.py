@@ -33,6 +33,20 @@ def _visualization_rate(record, visualize) -> float:
     return visualize.telemetry_hz
 
 
+def _anchor_visualization_records(records):
+    """Keep leading metadata but start realtime pacing at the first live sample."""
+
+    leading = []
+    for record in records:
+        leading.append(record)
+        topic = record.topic.strip("/").lower()
+        if topic.startswith(("camera/", "robot/", "control/")):
+            return chain(leading, records), record.timestamp_ns
+    if leading:
+        return iter(leading), leading[0].timestamp_ns
+    return iter(()), None
+
+
 def run_offline(
     config_path: str | Path,
     *,
@@ -44,11 +58,11 @@ def run_offline(
         spec, dataset_root=dataset_root, episode=episode_selector
     )
     episode = resolve_episode(spec, for_hardware=False)
-    records = iter_deviceio_records(episode.deviceio_mcap)
-    first = next(records, None)
-    if first is None:
+    records, source_start = _anchor_visualization_records(
+        iter_deviceio_records(episode.deviceio_mcap)
+    )
+    if source_start is None:
         raise PlaybackConfigError("deviceio MCAP contains no JSON records")
-    source_start = first.timestamp_ns
     timeline_start = source_start
     wall_start = time.monotonic_ns()
     visualize = spec.visualize
@@ -62,7 +76,7 @@ def run_offline(
     seen = 0
     last_logged_ns: dict[str, int] = {}
     try:
-        for record in chain((first,), records):
+        for record in records:
             seen += 1
             rate = _visualization_rate(record, visualize)
             previous = last_logged_ns.get(record.topic)

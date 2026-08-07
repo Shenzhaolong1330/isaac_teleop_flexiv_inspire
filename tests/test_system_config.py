@@ -542,9 +542,9 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
 def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_path):
     config = load_system_config(_site())
 
-    assert config.document["recording"]["dataset_name"] == "test_demo"
-    assert config.document["recording"]["task_name"] == "try_tasks"
-    assert config.document["recording"]["episode_count"] == 10
+    assert config.document["recording"]["dataset_name"] == "open_boxes_first_try"
+    assert config.document["recording"]["task_name"] == "open_boxes"
+    assert config.document["recording"]["episode_count"] == 20
     assert config.document["recording"]["auto_reset_before_record"] is True
     assert config.document["recording"]["ros_mcap_enabled"] is False
     assert config.document["recording"]["deviceio_profile"] == "training"

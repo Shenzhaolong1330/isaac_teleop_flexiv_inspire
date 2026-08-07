@@ -3,7 +3,7 @@ schema_version: 1
 
 source:
   # episode: all | latest | 数字 episode_index | 完整目录名；自动发现 raw/ 与旧平铺数据。
-  dataset_root: sessions/pick_place_demo
+  dataset_root: sessions/open_boxes_first_try
   # all: 批量转换所有已完成 episode；已有非空输出会自动跳过。
   episode: all
   # manifest 非空时优先于 dataset_root/episode。
@@ -12,7 +12,7 @@ source:
   mcap_files: []
 
 output:
-  root: sessions/pick_place_demo/lerobot
+  root: sessions/open_boxes_first_try/lerobot
   # true: <root>/<episode目录名>/<action view>/
   # false: 直接把 root 当作最终 LeRobot 文件夹。
   episode_subdirectory: true

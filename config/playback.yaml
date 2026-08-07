@@ -4,9 +4,9 @@ site_config: config/site.yaml
 
 dataset:
   # `robot visualize` 和 `robot replay` 都只从这里选择数据。
-  root: sessions/pick_place_demo
+  root: sessions/open_boxes_first_try
   # latest | numeric episode_index | exact episode directory name.
-  episode: 3
+  episode: 1
   require_completed: true
 
 visualize:

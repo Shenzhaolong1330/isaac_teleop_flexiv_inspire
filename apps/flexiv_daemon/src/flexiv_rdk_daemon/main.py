@@ -196,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
         interlock,
         deviceio_emitter=deviceio,
         cartesian_limits=config.cartesian_limits,
+        world_frame=config.world_frame,
+        world_from_base=config.world_from_base,
     )
     dispatcher.start_watchdog()
     codec = StructEnvelopeCodec() if args.dev_struct_ipc else None

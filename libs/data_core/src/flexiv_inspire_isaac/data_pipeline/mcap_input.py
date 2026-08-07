@@ -256,7 +256,13 @@ def _derive_compact_arm_streams(
             payload = sample.value
             if not isinstance(payload, Mapping):
                 continue
-            pose = payload.get("tcp_pose_rdk_xyz_wxyz")
+            # New native captures contain the measured shared-world TCP pose.
+            # Keep the local RDK fallback so historical DeviceIO MCAPs remain
+            # exportable without rewriting them.
+            pose = payload.get(
+                "tcp_pose_world_xyz_wxyz",
+                payload.get("tcp_pose_rdk_xyz_wxyz"),
+            )
             if isinstance(pose, (list, tuple)) and len(pose) == 7:
                 derived["tcp_pose"].append(
                     replace(
@@ -268,7 +274,12 @@ def _derive_compact_arm_streams(
                     )
                 )
             for output, field_name in (
-                ("tcp_twist", "tcp_velocity"),
+                (
+                    "tcp_twist",
+                    "tcp_velocity_world"
+                    if "tcp_velocity_world" in payload
+                    else "tcp_velocity",
+                ),
                 ("raw_ft", "raw_ft"),
                 ("tcp_wrench", "external_wrench"),
             ):

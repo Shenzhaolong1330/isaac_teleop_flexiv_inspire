@@ -674,12 +674,20 @@ def test_system_config_rejects_command_limit_above_daemon_ceiling(tmp_path):
         Path(__file__).parents[1] / "apps/flexiv_daemon/config/tool_payload.yaml"
     )
     daemon_data = yaml.safe_load(daemon_source.read_text(encoding="utf-8"))
+    daemon_data["capture_frame_config"] = "frames.yaml"
     daemon_path = tmp_path / "robots.yaml"
     daemon_path.write_text(yaml.safe_dump(daemon_data), encoding="utf-8")
     (tmp_path / "tool_payload.yaml").write_text(
         tool_source.read_text(encoding="utf-8"), encoding="utf-8"
     )
+    (tmp_path / "frames.yaml").write_text(
+        (Path(__file__).parents[1] / "config/dual_arm_frames.yaml").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
     data["flexiv"]["rdk_config"] = str(daemon_path)
+    data["flexiv"]["frame_config"] = str(tmp_path / "frames.yaml")
     data["flexiv"]["safety"]["max_linear_velocity_m_s"] = 0.36
     data["flexiv"]["safety"]["max_tcp_linear_speed_m_s"] = 0.50
     path = tmp_path / "bad-daemon-limit.yaml"
@@ -695,9 +703,11 @@ def test_system_config_rejects_command_limit_above_daemon_ceiling(tmp_path):
 
 def test_system_config_rejects_missing_recording_prompt(tmp_path):
     data = yaml.safe_load(_example().read_text())
+    root = Path(__file__).parents[1]
     data["flexiv"]["rdk_config"] = str(
-        Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
+        root / "apps/flexiv_daemon/config/robots.yaml"
     )
+    data["flexiv"]["frame_config"] = str(root / "config/dual_arm_frames.yaml")
     data["recording"]["task_description"] = ""
     path = tmp_path / "bad-recording.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
@@ -712,9 +722,11 @@ def test_system_config_rejects_missing_recording_prompt(tmp_path):
 
 def test_system_config_rejects_invalid_recording_task_name(tmp_path):
     data = yaml.safe_load(_example().read_text())
+    root = Path(__file__).parents[1]
     data["flexiv"]["rdk_config"] = str(
-        Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
+        root / "apps/flexiv_daemon/config/robots.yaml"
     )
+    data["flexiv"]["frame_config"] = str(root / "config/dual_arm_frames.yaml")
     data["recording"]["task_name"] = "pick/place"
     path = tmp_path / "bad-task-name.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")

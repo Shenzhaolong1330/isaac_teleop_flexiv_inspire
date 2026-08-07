@@ -360,8 +360,21 @@ def _native_arm_state_vector(value: Any) -> np.ndarray:
     parts = [_field_vector(value, field, 7) for field in joint_fields]
     parts.extend(
         (
-            _vector(value.get("tcp_pose_rdk_xyz_wxyz"), 7),
-            _vector(value.get("tcp_velocity"), 6),
+            # Native captures from current RDK daemons carry a world-frame
+            # pose/twist.  Historical local-frame recordings remain readable.
+            _vector(
+                value.get(
+                    "tcp_pose_world_xyz_wxyz",
+                    value.get("tcp_pose_rdk_xyz_wxyz"),
+                ),
+                7,
+            ),
+            _vector(
+                value.get(
+                    "tcp_velocity_world", value.get("tcp_velocity")
+                ),
+                6,
+            ),
             _vector(value.get("raw_ft"), 6),
             _vector(value.get("external_wrench"), 6),
         )

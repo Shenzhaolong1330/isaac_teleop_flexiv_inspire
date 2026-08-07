@@ -14,6 +14,9 @@ right:
   expected_software_prefix: v3.11
   required_license: RDK-Professional
 tool_payload_config: tool_payload.yaml
+# Native DeviceIO records retain RDK-local values and additionally write
+# TCP pose/twist in this measured shared world frame.
+capture_frame_config: ../../../config/dual_arm_frames.yaml
 control:
   target_rate_hz: 300
   default_mode: observe_only

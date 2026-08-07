@@ -20,6 +20,12 @@ from .ft_zero import (
 )
 from .ipc import peer_has_local_tty
 from isaac_teleop_core.deviceio import record_envelope
+from isaac_teleop_core.rotation6d import (
+    matrix_to_quaternion_xyzw,
+    quaternion_xyzw_to_matrix,
+    rdk_pose_to_ros_pose,
+    ros_pose_to_rdk_pose,
+)
 
 
 class DaemonInterlock(MaintenanceInterlock):
@@ -290,6 +296,8 @@ class RDKRequestDispatcher:
             0.50,
             1.0,
         ),
+        world_frame: str = "world",
+        world_from_base: dict[str, Any] | None = None,
         watchdog_period_s: float = 0.005,
     ) -> None:
         self._backend = backend
@@ -301,6 +309,33 @@ class RDKRequestDispatcher:
         self._control_authorizations = control_authorizations or LocalControlAuthorization()
         self._home_authorizations = home_authorizations or LocalHomeAuthorization()
         self._deviceio_emitter = deviceio_emitter
+        self._world_frame = str(world_frame).strip()
+        if not self._world_frame:
+            raise ValueError("world_frame must be non-empty")
+        raw_transforms = world_from_base or {
+            side: {
+                "translation_m": (0.0, 0.0, 0.0),
+                "rotation_xyzw": (0.0, 0.0, 0.0, 1.0),
+            }
+            for side in ("left", "right")
+        }
+        if set(raw_transforms) != {"left", "right"}:
+            raise ValueError("world_from_base requires left and right transforms")
+        self._world_from_base: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for side in ("left", "right"):
+            transform = raw_transforms[side]
+            if isinstance(transform, dict):
+                translation_value = transform.get("translation_m")
+                rotation_value = transform.get("rotation_xyzw")
+            else:
+                translation_value = getattr(transform, "translation_m", None)
+                rotation_value = getattr(transform, "rotation_xyzw", None)
+            translation = np.asarray(translation_value, dtype=np.float64).reshape(-1)
+            if translation.shape != (3,) or not np.all(np.isfinite(translation)):
+                raise ValueError(f"{side} world transform translation must be finite 3-D")
+            # This utility validates and normalizes a non-zero quaternion.
+            rotation = quaternion_xyzw_to_matrix(rotation_value)
+            self._world_from_base[side] = (translation, rotation)
         configured_limits = np.asarray(
             cartesian_limits, dtype=np.float64
         ).reshape(-1)
@@ -503,14 +538,46 @@ class RDKRequestDispatcher:
                 "mapped_host_time_ns": host_ns,
                 "timing_valid": True,
             }
-            pose = list(arm["tcp_pose_rdk_xyz_wxyz"])
+            try:
+                pose_local = np.asarray(
+                    arm["tcp_pose_rdk_xyz_wxyz"], dtype=np.float64
+                )
+                velocity_local = np.asarray(arm["tcp_velocity"], dtype=np.float64)
+                pose_world, velocity_world = self._tcp_base_to_world(
+                    side, pose_local, velocity_local
+                )
+            except (KeyError, TypeError, ValueError, FloatingPointError):
+                # Recording is strictly observational: an invalid sample must
+                # not interrupt the controller observation/update path.
+                continue
+            # Never alter legacy local-RDK fields: older exporters and tools
+            # continue to see exactly the values they expect.  New data carries
+            # the measured common-frame values alongside them.
+            state_payload = dict(arm)
+            state_payload.update(
+                {
+                    "tcp_pose_world_xyz_wxyz": pose_world.tolist(),
+                    "tcp_velocity_world": velocity_world.tolist(),
+                    "tcp_pose_world_frame_id": self._world_frame,
+                    "tcp_velocity_world_frame_id": self._world_frame,
+                }
+            )
             payloads = {
-                f"/robot/{side}_arm/state": arm,
+                f"/robot/{side}_arm/state": state_payload,
                 f"/robot/{side}_arm/tcp_pose": {
-                    "xyz": pose[:3],
-                    "quaternion_xyzw": [pose[4], pose[5], pose[6], pose[3]],
+                    "xyz": pose_world[:3].tolist(),
+                    "quaternion_xyzw": [
+                        float(pose_world[4]),
+                        float(pose_world[5]),
+                        float(pose_world[6]),
+                        float(pose_world[3]),
+                    ],
+                    "frame_id": self._world_frame,
                 },
-                f"/robot/{side}_arm/tcp_twist": {"values": list(arm["tcp_velocity"])},
+                f"/robot/{side}_arm/tcp_twist": {
+                    "values": velocity_world.tolist(),
+                    "frame_id": self._world_frame,
+                },
                 f"/robot/{side}_arm/raw_ft": {"values": list(arm["raw_ft"])},
                 f"/robot/{side}_arm/tcp_wrench": {"values": list(arm["external_wrench"])},
             }
@@ -520,6 +587,34 @@ class RDKRequestDispatcher:
                 except (BufferError, RuntimeError, ValueError):
                     # Native capture must never delay or fault the RDK observation path.
                     pass
+
+    def _tcp_base_to_world(
+        self,
+        side: str,
+        pose_rdk: np.ndarray,
+        velocity_base: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Transform RDK TCP pose/twist from controller base into ``world``."""
+
+        position_base, quaternion_base = rdk_pose_to_ros_pose(pose_rdk)
+        translation, rotation_world_from_base = self._world_from_base[side]
+        position_world = rotation_world_from_base @ position_base + translation
+        orientation_world = rotation_world_from_base @ quaternion_xyzw_to_matrix(
+            quaternion_base
+        )
+        pose_world = ros_pose_to_rdk_pose(
+            position_world, matrix_to_quaternion_xyzw(orientation_world)
+        )
+        velocity = np.asarray(velocity_base, dtype=np.float64).reshape(-1)
+        if velocity.shape != (6,) or not np.all(np.isfinite(velocity)):
+            raise ValueError("tcp_velocity must contain six finite values")
+        velocity_world = np.concatenate(
+            (
+                rotation_world_from_base @ velocity[:3],
+                rotation_world_from_base @ velocity[3:],
+            )
+        )
+        return pose_world, velocity_world
 
     def _authorize_control(self, pid: int, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         session = str(payload.get("session_id", ""))

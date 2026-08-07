@@ -53,6 +53,19 @@ class ConfiguredRobot:
 
 
 @dataclass(frozen=True)
+class CaptureBaseTransform:
+    """``world_T_base`` used by the native DeviceIO capture path.
+
+    The RDK reports Cartesian quantities in each controller's local base.
+    Keeping this small representation in the RDK-only package lets the raw
+    recorder add a shared frame without depending on the ROS control bridge.
+    """
+
+    translation_m: tuple[float, float, float]
+    rotation_xyzw: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
 class DaemonConfiguration:
     source_path: Path
     schema_version: int
@@ -63,6 +76,9 @@ class DaemonConfiguration:
     max_packet_bytes: int
     tool_payload_path: Path
     ft_zero: dict[str, Any]
+    capture_frame_path: Path
+    world_frame: str
+    world_from_base: dict[str, CaptureBaseTransform]
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,63 @@ class ToolPayloadIdentity:
     canonical_json: str
 
 
+def _finite_vector(value: Any, size: int, name: str) -> tuple[float, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) != size:
+        raise ConfigurationError(f"{name} must contain {size} values")
+    result = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) for item in result):
+        raise ConfigurationError(f"{name} must contain only finite values")
+    return result
+
+
+def _load_capture_frames(
+    source: Path, root: dict[str, Any]
+) -> tuple[Path, str, dict[str, CaptureBaseTransform]]:
+    """Read the same measured base transforms used by the ROS bridge.
+
+    The path is deliberately relative to ``robots.yaml`` so a site deployment
+    remains self-contained and the hardware daemon never accepts frame data
+    from a client request.
+    """
+
+    frame_value = str(root.get("capture_frame_config", "")).strip()
+    if not frame_value:
+        raise ConfigurationError("capture_frame_config is required")
+    frame_path = Path(frame_value)
+    if frame_path.is_absolute():
+        raise ConfigurationError("capture_frame_config must be relative")
+    resolved = (source.parent / frame_path).resolve(strict=True)
+    raw = yaml.safe_load(resolved.read_text(encoding="utf-8"))
+    document = _mapping(raw, "capture frame configuration")
+    if int(document.get("schema_version", 0)) != 1:
+        raise ConfigurationError("capture frame config must be schema_version: 1")
+    world_frame = str(document.get("world_frame", "")).strip()
+    bases = _mapping(document.get("bases"), "capture frame bases")
+    if not world_frame or set(bases) != {"left", "right"}:
+        raise ConfigurationError(
+            "capture frame config requires world_frame and left/right bases"
+        )
+    transforms: dict[str, CaptureBaseTransform] = {}
+    for side in ("left", "right"):
+        entry = _mapping(bases.get(side), f"capture frame bases.{side}")
+        translation = _finite_vector(
+            entry.get("translation_m"), 3, f"capture frame bases.{side}.translation_m"
+        )
+        quaternion = _finite_vector(
+            entry.get("rotation_xyzw"), 4, f"capture frame bases.{side}.rotation_xyzw"
+        )
+        norm = math.sqrt(sum(component * component for component in quaternion))
+        if norm <= 1e-12:
+            raise ConfigurationError(
+                f"capture frame bases.{side}.rotation_xyzw must be non-zero"
+            )
+        transforms[side] = CaptureBaseTransform(
+            translation_m=(translation[0], translation[1], translation[2]),
+            rotation_xyzw=tuple(component / norm for component in quaternion),
+        )
+    return resolved, world_frame, transforms
+
+
 def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
     source = Path(path).expanduser().resolve(strict=True)
     raw = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -84,6 +157,7 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
     schema = int(root.get("schema_version", 0))
     if schema != 1:
         raise ConfigurationError(f"unsupported daemon schema_version {schema}")
+    capture_frame_path, world_frame, world_from_base = _load_capture_frames(source, root)
 
     robots: list[ConfiguredRobot] = []
     serials: set[str] = set()
@@ -212,6 +286,9 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
         max_packet_bytes=max_packet_bytes,
         tool_payload_path=tool_payload_path,
         ft_zero=ft_zero,
+        capture_frame_path=capture_frame_path,
+        world_frame=world_frame,
+        world_from_base=world_from_base,
     )
 
 

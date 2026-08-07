@@ -235,6 +235,14 @@ def load_system_config(path: str | Path) -> SystemConfig:
         daemon_config = load_daemon_configuration(daemon_path)
     except (OSError, DaemonConfigurationError, yaml.YAMLError) as exc:
         raise SystemConfigError(f"flexiv.rdk_config is invalid: {exc}") from exc
+    site_frame_path = Path(str(flexiv["frame_config"])).expanduser()
+    if not site_frame_path.is_absolute():
+        site_frame_path = (config_root / site_frame_path).resolve()
+    if site_frame_path != daemon_config.capture_frame_path:
+        raise SystemConfigError(
+            "flexiv.frame_config must be the same file as the RDK daemon "
+            "capture_frame_config; control and raw capture must share a frame"
+        )
     site_cartesian_limits = tuple(float(safety[name]) for name in CARTESIAN_LIMIT_KEYS)
     for name, requested, ceiling in zip(
         CARTESIAN_LIMIT_KEYS,

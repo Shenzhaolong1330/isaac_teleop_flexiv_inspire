@@ -56,6 +56,10 @@ def test_site_daemon_configuration_exposes_cartesian_command_ceiling():
     assert config.ft_zero["enable_settle_timeout_s"] == 3.0
     assert config.ft_zero["enable_settle_window_s"] == 0.15
     assert config.ft_zero["external_contact_check_enabled"] is False
+    assert config.world_frame == "world"
+    assert config.capture_frame_path.name == "dual_arm_frames.yaml"
+    assert config.world_from_base["left"].translation_m == (-0.25, 0.0, 0.0)
+    assert config.world_from_base["right"].translation_m == (0.25, 0.0, 0.0)
 
 
 def test_tool_payload_sha_is_canonical_but_touch_changes_fingerprint(tmp_path):

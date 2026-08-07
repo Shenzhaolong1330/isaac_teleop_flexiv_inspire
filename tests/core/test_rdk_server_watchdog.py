@@ -750,6 +750,16 @@ def test_observe_emits_pre_dds_arm_deviceio_records() -> None:
         hands,
         interlock,
         deviceio_emitter=capture,
+        world_from_base={
+            "left": {
+                "translation_m": (-0.25, 0.0, 0.0),
+                "rotation_xyzw": (0.0, 0.0, 0.0, 1.0),
+            },
+            "right": {
+                "translation_m": (0.25, 0.0, 0.0),
+                "rotation_xyzw": (0.0, 0.0, 0.0, 1.0),
+            },
+        },
     )
     kind, payload = value("observe", 1, {}, (123, 0, 0))
     value.close()
@@ -759,4 +769,39 @@ def test_observe_emits_pre_dds_arm_deviceio_records() -> None:
     assert len(by_topic) == 10
     assert by_topic["/robot/left_arm/state"]["producer"] == "rdk"
     assert by_topic["/robot/right_arm/tcp_pose"]["payload"]["quaternion_xyzw"] == [0.0, 0.0, 0.0, 1.0]
+    assert by_topic["/robot/left_arm/state"]["payload"]["tcp_pose_world_xyz_wxyz"][:3] == [-0.25, 0.0, 0.0]
+    assert by_topic["/robot/right_arm/tcp_pose"]["payload"]["frame_id"] == "world"
     assert by_topic["/robot/left_arm/raw_ft"]["timing_valid"] is True
+
+
+def test_native_capture_rotates_tcp_pose_and_twist_into_world() -> None:
+    backend = MockBackend()
+    hands = HandObservationCache()
+    hands.update(np.zeros(6), np.zeros(6))
+    half_sqrt = 2.0 ** -0.5
+    value = RDKRequestDispatcher(
+        backend,
+        FakeFT(),
+        hands,
+        DaemonInterlock(),
+        world_from_base={
+            "left": {
+                "translation_m": (1.0, 2.0, 3.0),
+                "rotation_xyzw": (0.0, 0.0, half_sqrt, half_sqrt),
+            },
+            "right": {
+                "translation_m": (0.0, 0.0, 0.0),
+                "rotation_xyzw": (0.0, 0.0, 0.0, 1.0),
+            },
+        },
+    )
+
+    pose, twist = value._tcp_base_to_world(
+        "left",
+        np.array([2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        np.array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+    )
+    value.close()
+
+    np.testing.assert_allclose(pose[:3], [1.0, 4.0, 3.0], atol=1e-8)
+    np.testing.assert_allclose(twist, [0.0, 1.0, 0.0, -1.0, 0.0, 0.0], atol=1e-8)

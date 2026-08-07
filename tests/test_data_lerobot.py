@@ -1,7 +1,10 @@
 from flexiv_inspire_isaac.data_pipeline.alignment import Pose, TimedSample
 from flexiv_inspire_isaac.data_pipeline.export_spec import ActionView
 from flexiv_inspire_isaac.data_pipeline.lerobot_export import EpisodeAligner
-from flexiv_inspire_isaac.data_pipeline.lerobot_v3 import _arm_high_rate_frame
+from flexiv_inspire_isaac.data_pipeline.lerobot_v3 import (
+    _arm_high_rate_frame,
+    _native_arm_state_vector,
+)
 from flexiv_inspire_isaac.data_pipeline.mcap_input import _derive_compact_arm_streams
 
 
@@ -213,3 +216,26 @@ def test_compact_arm_state_recreates_pose_force_and_twist_views():
     assert streams["robot/left_arm/tcp_twist"][0].value["values"] == [3.0] * 6
     assert streams["robot/left_arm/raw_ft"][0].value["values"] == [3.0] * 6
     assert streams["robot/left_arm/tcp_wrench"][0].value["values"] == [3.0] * 6
+
+
+def test_compact_arm_state_prefers_shared_world_pose_and_twist():
+    state = _native_arm_state(3.0)
+    state["tcp_pose_world_xyz_wxyz"] = [7.0] * 7
+    state["tcp_velocity_world"] = [8.0] * 6
+    streams = {"robot/left_arm/state": [s(state, 10, 1)]}
+
+    _derive_compact_arm_streams(streams)
+
+    assert streams["robot/left_arm/tcp_pose"][0].value.xyz == (7.0, 7.0, 7.0)
+    assert streams["robot/left_arm/tcp_twist"][0].value["values"] == [8.0] * 6
+
+
+def test_high_rate_arm_state_prefers_shared_world_pose_and_twist():
+    state = _native_arm_state(3.0)
+    state["tcp_pose_world_xyz_wxyz"] = [7.0] * 7
+    state["tcp_velocity_world"] = [8.0] * 6
+
+    packed = _native_arm_state_vector(state)
+
+    assert packed[49:56].tolist() == [7.0] * 7
+    assert packed[56:62].tolist() == [8.0] * 6

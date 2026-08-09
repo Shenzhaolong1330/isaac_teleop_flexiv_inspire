@@ -120,17 +120,46 @@ class _Channel:
 
 @dataclass(frozen=True)
 class _ErgonomicsChannel:
-    source: str
+    sources: tuple[str, ...]
+    weights: np.ndarray
+    source_open: np.ndarray | None
+    source_closed: np.ndarray | None
+    fusion: str
     source_points: np.ndarray
     output_points: np.ndarray
 
     def evaluate(self, values: dict[str, float]) -> float:
         try:
-            value = float(values[self.source])
+            source_values = np.asarray(
+                [float(values[source]) for source in self.sources],
+                dtype=np.float64,
+            )
         except KeyError as exc:
             raise ValueError(f"MANUS Ergonomics field absent: {exc}") from exc
-        if not np.isfinite(value):
-            raise ValueError(f"MANUS Ergonomics {self.source} is not finite")
+        if not np.all(np.isfinite(source_values)):
+            raise ValueError(
+                f"MANUS Ergonomics fields are not finite: {self.sources}"
+            )
+        if self.source_open is not None and self.source_closed is not None:
+            # Normalize every anatomical joint independently before fusing it.
+            # This is important for the thumb: MANUS MCP flexion moves in the
+            # opposite numeric direction to PIP/DIP flexion on this setup.
+            source_values = np.clip(
+                (source_values - self.source_open)
+                / (self.source_closed - self.source_open),
+                0.0,
+                1.0,
+            )
+        weighted_value = float(
+            np.dot(self.weights, source_values) / np.sum(self.weights)
+        )
+        if self.fusion == "max_primary_weighted":
+            # Preserve the proven MCP-only response as the minimum closure.
+            # PIP/DIP may request more closure, but can never dilute a fully
+            # flexed MCP and leave the coupled RH56E2 actuator half open.
+            value = max(float(source_values[0]), weighted_value)
+        else:
+            value = weighted_value
         return float(np.interp(value, self.source_points, self.output_points))
 
 
@@ -269,13 +298,58 @@ class _Retarget:
                 raw = raw_side.get(actuator)
                 if not isinstance(raw, dict):
                     raise TypeError(f"invalid {side}.{actuator} calibration")
-                source = str(raw.get("source", "")).strip()
+                legacy_source = str(raw.get("source", "")).strip()
+                raw_sources = raw.get("sources")
+                if legacy_source and raw_sources is not None:
+                    raise ValueError(
+                        f"{side}.{actuator} cannot define source and sources"
+                    )
+                if legacy_source:
+                    sources = (legacy_source,)
+                    weights = np.ones(1, dtype=np.float64)
+                    source_open = None
+                    source_closed = None
+                    fusion = "weighted"
+                else:
+                    if not isinstance(raw_sources, list) or not raw_sources:
+                        raise ValueError(f"invalid {side}.{actuator} sources")
+                    sources = tuple(str(value).strip() for value in raw_sources)
+                    if any(not source for source in sources) or len(set(sources)) != len(
+                        sources
+                    ):
+                        raise ValueError(f"invalid {side}.{actuator} sources")
+                    try:
+                        weights = np.asarray(raw.get("weights"), dtype=np.float64)
+                        source_open = np.asarray(
+                            raw.get("source_open"), dtype=np.float64
+                        )
+                        source_closed = np.asarray(
+                            raw.get("source_closed"), dtype=np.float64
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"invalid {side}.{actuator} source normalization"
+                        ) from exc
+                    expected_shape = (len(sources),)
+                    if (
+                        weights.shape != expected_shape
+                        or source_open.shape != expected_shape
+                        or source_closed.shape != expected_shape
+                        or not np.all(np.isfinite(weights))
+                        or not np.all(np.isfinite(source_open))
+                        or not np.all(np.isfinite(source_closed))
+                        or np.any(weights < 0.0)
+                        or float(np.sum(weights)) <= 0.0
+                        or np.any(np.abs(source_closed - source_open) < 1.0e-6)
+                    ):
+                        raise ValueError(
+                            f"invalid {side}.{actuator} source normalization"
+                        )
+                    fusion = str(raw.get("fusion", "weighted")).strip().lower()
+                    if fusion not in {"weighted", "max_primary_weighted"}:
+                        raise ValueError(f"invalid {side}.{actuator} fusion")
                 raw_points = raw.get("points")
-                if (
-                    not source
-                    or not isinstance(raw_points, list)
-                    or len(raw_points) < 2
-                ):
+                if not isinstance(raw_points, list) or len(raw_points) < 2:
                     raise ValueError(f"invalid {side}.{actuator} calibration")
                 try:
                     points = np.asarray(raw_points, dtype=np.float64)
@@ -302,7 +376,11 @@ class _Retarget:
                 if not (np.all(output_deltas >= 0.0) or np.all(output_deltas <= 0.0)):
                     raise ValueError(f"{side}.{actuator} mapping must be monotonic")
                 self.channels[side][actuator] = _ErgonomicsChannel(
-                    source=source,
+                    sources=sources,
+                    weights=weights,
+                    source_open=source_open,
+                    source_closed=source_closed,
+                    fusion=fusion,
                     source_points=source_points,
                     output_points=output_points,
                 )

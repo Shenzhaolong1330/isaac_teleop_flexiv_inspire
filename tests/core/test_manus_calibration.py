@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import yaml
 from flexiv_inspire_control.manus_calibration import (
     build_calibration,
@@ -67,14 +68,14 @@ def test_endpoint_captures_finalize_a_calibrated_file():
 
 
 def test_ergonomics_captures_finalize_a_schema_v2_mapping():
-    fields = {
-        "PinkyMCPStretch": 0.1,
-        "RingMCPStretch": 0.2,
-        "MiddleMCPStretch": 0.3,
-        "IndexMCPStretch": 0.4,
-        "ThumbMCPStretch": 0.5,
-        "ThumbMCPSpread": 0.6,
-    }
+    fields = {"ThumbMCPSpread": 0.6}
+    for finger_index, finger in enumerate(
+        ("Pinky", "Ring", "Middle", "Index", "Thumb"), start=1
+    ):
+        for joint_index, joint in enumerate(("MCP", "PIP", "DIP"), start=1):
+            fields[f"{finger}{joint}Stretch"] = (
+                0.1 * finger_index + 0.01 * joint_index
+            )
     open_samples = {
         side: [fields.copy() for _ in range(10)] for side in ("left", "right")
     }
@@ -102,7 +103,19 @@ def test_ergonomics_captures_finalize_a_schema_v2_mapping():
         "right": 10,
     }
     assert "side_channels" not in result
-    assert result["sides"]["left"]["index"]["points"] == [
-        [0.4, 1000.0],
-        [0.9, 0.0],
+    index = result["sides"]["left"]["index"]
+    assert index["sources"] == [
+        "IndexMCPStretch",
+        "IndexPIPStretch",
+        "IndexDIPStretch",
+    ]
+    assert index["weights"] == [0.5, 0.3, 0.2]
+    assert index["fusion"] == "max_primary_weighted"
+    assert np.allclose(index["source_open"], [0.41, 0.42, 0.43])
+    assert np.allclose(index["source_closed"], [0.91, 0.92, 0.93])
+    assert index["points"] == [[0.0, 1000.0], [0.9, 0.0], [1.0, 0.0]]
+    assert result["sides"]["left"]["thumb_bend"]["points"] == [
+        [0.0, 1000.0],
+        [0.6, 0.0],
+        [1.0, 0.0],
     ]

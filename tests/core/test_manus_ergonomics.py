@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import yaml
 from flexiv_inspire_control.manus_ergonomics_source import (
     FIELD_NAMES,
     PROTOCOL,
@@ -76,3 +77,108 @@ def test_hand_filter_applies_deadband_and_time_based_rate_limit() -> None:
     assert np.allclose(initial, 500.0)
     assert np.allclose(within_deadband, 500.0)
     assert np.allclose(rate_limited, 510.0)
+
+
+def test_multi_joint_ergonomics_normalizes_then_fuses_sources(tmp_path) -> None:
+    channel = {
+        "sources": ["IndexMCPStretch", "IndexPIPStretch", "IndexDIPStretch"],
+        "weights": [0.5, 0.3, 0.2],
+        # Include one reversed source to prove that signs/ranges cannot cancel.
+        "source_open": [0.0, 2.0, -1.0],
+        "source_closed": [1.0, 0.0, 3.0],
+        "fusion": "weighted",
+        "points": [[0.0, 1000.0], [1.0, 0.0]],
+    }
+    document = {
+        "schema_version": 2,
+        "calibrated": True,
+        "source_format": "MANUS_SDK_ERGONOMICS_RADIANS",
+        "filter": {
+            "low_pass_alpha": 1.0,
+            "output_deadband": 0.0,
+            "max_output_rate_per_s": 1.0e9,
+        },
+        "sides": {
+            side: {
+                actuator: (
+                    channel
+                    if actuator != "thumb_rotate"
+                    else {
+                        "source": "ThumbMCPSpread",
+                        "points": [[0.0, 1000.0], [1.0, 0.0]],
+                    }
+                )
+                for actuator in (
+                    "little",
+                    "ring",
+                    "middle",
+                    "index",
+                    "thumb_bend",
+                    "thumb_rotate",
+                )
+            }
+            for side in ("left", "right")
+        },
+    }
+    calibration = tmp_path / "multi_joint.yaml"
+    calibration.write_text(yaml.safe_dump(document), encoding="utf-8")
+    values = {
+        "IndexMCPStretch": 0.5,
+        "IndexPIPStretch": 1.0,
+        "IndexDIPStretch": 1.0,
+        "ThumbMCPSpread": 0.5,
+    }
+
+    target = _Retarget(str(calibration)).apply_ergonomics(
+        "left", values, now_ns=1
+    )
+
+    assert np.allclose(target, np.full(6, 500.0))
+
+
+def test_primary_mcp_closure_cannot_be_diluted_by_distal_joints(tmp_path) -> None:
+    channel = {
+        "sources": ["IndexMCPStretch", "IndexPIPStretch", "IndexDIPStretch"],
+        "weights": [0.5, 0.3, 0.2],
+        "source_open": [0.0, 0.0, 0.0],
+        "source_closed": [1.0, 1.0, 1.0],
+        "fusion": "max_primary_weighted",
+        "points": [[0.0, 1000.0], [0.9, 0.0], [1.0, 0.0]],
+    }
+    document = {
+        "schema_version": 2,
+        "calibrated": True,
+        "source_format": "MANUS_SDK_ERGONOMICS_RADIANS",
+        "filter": {
+            "low_pass_alpha": 1.0,
+            "output_deadband": 0.0,
+            "max_output_rate_per_s": 1.0e9,
+        },
+        "sides": {
+            side: {
+                actuator: channel
+                for actuator in (
+                    "little",
+                    "ring",
+                    "middle",
+                    "index",
+                    "thumb_bend",
+                    "thumb_rotate",
+                )
+            }
+            for side in ("left", "right")
+        },
+    }
+    calibration = tmp_path / "mcp_primary.yaml"
+    calibration.write_text(yaml.safe_dump(document), encoding="utf-8")
+    values = {
+        "IndexMCPStretch": 1.0,
+        "IndexPIPStretch": 0.0,
+        "IndexDIPStretch": 0.0,
+    }
+
+    target = _Retarget(str(calibration)).apply_ergonomics(
+        "left", values, now_ns=1
+    )
+
+    assert np.allclose(target, np.zeros(6))

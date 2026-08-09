@@ -100,7 +100,7 @@ teleop:
       auto_install_apk: true
   # Operator-specific left/right MANUS Ergonomics calibration. The tracked
   # bootstrap remains available for comparison or rollback.
-  manus_calibration: artifacts/calibration/manus_ergonomics_site_20260803.yaml
+  manus_calibration: artifacts/calibration/manus_ergonomics_rh56e2_20260809_v4.yaml
   manus_ergonomics:
     enabled: true
     udp_host: 127.0.0.1

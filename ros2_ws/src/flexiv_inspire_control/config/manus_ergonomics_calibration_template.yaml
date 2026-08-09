@@ -10,12 +10,55 @@ filter:
   max_output_rate_per_s: 3000.0
 
 side_channels: &side_channels
-  little: {source: PinkyMCPStretch, output_open: 1000, output_closed: 0}
-  ring: {source: RingMCPStretch, output_open: 1000, output_closed: 0}
-  middle: {source: MiddleMCPStretch, output_open: 1000, output_closed: 0}
-  index: {source: IndexMCPStretch, output_open: 1000, output_closed: 0}
-  thumb_bend: {source: ThumbMCPStretch, output_open: 1000, output_closed: 0}
-  thumb_rotate: {source: ThumbMCPSpread, output_open: 1000, output_closed: 0}
+  # RH56E2 exposes one flexion actuator for each finger. Fuse the MANUS
+  # proximal/middle/distal joints into that actuator instead of discarding
+  # PIP/DIP motion. Each source is independently normalized by the captured
+  # open/closed poses before these semantic weights are applied.
+  little:
+    sources: [PinkyMCPStretch, PinkyPIPStretch, PinkyDIPStretch]
+    weights: [0.5, 0.3, 0.2]
+    fusion: max_primary_weighted
+    full_close_progress: 0.9
+    output_open: 1000
+    output_closed: 0
+  ring:
+    sources: [RingMCPStretch, RingPIPStretch, RingDIPStretch]
+    weights: [0.5, 0.3, 0.2]
+    fusion: max_primary_weighted
+    full_close_progress: 0.9
+    output_open: 1000
+    output_closed: 0
+  middle:
+    sources: [MiddleMCPStretch, MiddlePIPStretch, MiddleDIPStretch]
+    weights: [0.5, 0.3, 0.2]
+    fusion: max_primary_weighted
+    full_close_progress: 0.9
+    output_open: 1000
+    output_closed: 0
+  index:
+    sources: [IndexMCPStretch, IndexPIPStretch, IndexDIPStretch]
+    weights: [0.5, 0.3, 0.2]
+    fusion: max_primary_weighted
+    full_close_progress: 0.9
+    output_open: 1000
+    output_closed: 0
+  thumb_bend:
+    sources: [ThumbMCPStretch, ThumbPIPStretch, ThumbDIPStretch]
+    weights: [0.5, 0.3, 0.2]
+    fusion: max_primary_weighted
+    # The RH56E2 thumb has a shorter useful closing stroke than the four
+    # fingers. Saturate it slightly earlier so a natural human thumb curl
+    # reaches the physical opposition pose without changing the open endpoint.
+    full_close_progress: 0.6
+    output_open: 1000
+    output_closed: 0
+  thumb_rotate:
+    sources: [ThumbMCPSpread]
+    weights: [1.0]
+    fusion: weighted
+    full_close_progress: 0.9
+    output_open: 1000
+    output_closed: 0
 
 sides:
   left:

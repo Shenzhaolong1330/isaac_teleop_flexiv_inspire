@@ -183,6 +183,34 @@ def _ergonomics_capture_value(document: dict, side: str, source: str) -> float:
         raise ValueError(f"capture is missing {side}.{source}") from exc
 
 
+def _ergonomics_channel_sources(
+    channel: dict, side: str, actuator: str
+) -> tuple[list[str], list[float], bool]:
+    """Return sources, semantic weights, and whether per-source normalization is used."""
+    legacy_source = str(channel.get("source", "")).strip()
+    raw_sources = channel.get("sources")
+    if legacy_source and raw_sources is not None:
+        raise ValueError(f"{side}.{actuator} cannot define source and sources")
+    if legacy_source:
+        return [legacy_source], [1.0], False
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ValueError(f"invalid {side}.{actuator} Ergonomics sources")
+    sources = [str(value).strip() for value in raw_sources]
+    if any(not source for source in sources) or len(set(sources)) != len(sources):
+        raise ValueError(f"invalid {side}.{actuator} Ergonomics sources")
+    try:
+        weights = [float(value) for value in channel.get("weights", [])]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid {side}.{actuator} Ergonomics weights") from exc
+    if (
+        len(weights) != len(sources)
+        or not all(np.isfinite(weight) and weight >= 0.0 for weight in weights)
+        or sum(weights) <= 0.0
+    ):
+        raise ValueError(f"invalid {side}.{actuator} Ergonomics weights")
+    return sources, weights, True
+
+
 def build_ergonomics_calibration(template: dict, opened: dict, closed: dict) -> dict:
     for name, document, expected_pose in (
         ("open", opened, "open"),
@@ -223,19 +251,50 @@ def build_ergonomics_calibration(template: dict, opened: dict, closed: dict) -> 
     }
     for side in ("left", "right"):
         for actuator, channel in result["sides"][side].items():
-            source = str(channel["source"])
-            open_value = _ergonomics_capture_value(opened, side, source)
-            closed_value = _ergonomics_capture_value(closed, side, source)
-            if abs(closed_value - open_value) < 0.03:
-                raise ValueError(
-                    f"{side}.{actuator} open/closed separation is too small"
-                )
+            sources, _weights, normalized = _ergonomics_channel_sources(
+                channel, side, actuator
+            )
+            open_values = [
+                _ergonomics_capture_value(opened, side, source)
+                for source in sources
+            ]
+            closed_values = [
+                _ergonomics_capture_value(closed, side, source)
+                for source in sources
+            ]
+            for source, open_value, closed_value in zip(
+                sources, open_values, closed_values, strict=True
+            ):
+                if abs(closed_value - open_value) < 0.03:
+                    raise ValueError(
+                        f"{side}.{actuator}.{source} open/closed separation "
+                        "is too small"
+                    )
             output_open = float(channel.pop("output_open", 1000.0))
             output_closed = float(channel.pop("output_closed", 0.0))
-            channel["points"] = [
-                [float(open_value), output_open],
-                [float(closed_value), output_closed],
-            ]
+            if normalized:
+                full_close_progress = float(
+                    channel.pop("full_close_progress", 1.0)
+                )
+                if not 0.0 < full_close_progress <= 1.0:
+                    raise ValueError(
+                        f"invalid {side}.{actuator} full_close_progress"
+                    )
+                channel["source_open"] = [float(value) for value in open_values]
+                channel["source_closed"] = [
+                    float(value) for value in closed_values
+                ]
+                channel["points"] = [
+                    [0.0, output_open],
+                    [full_close_progress, output_closed],
+                ]
+                if full_close_progress < 1.0:
+                    channel["points"].append([1.0, output_closed])
+            else:
+                channel["points"] = [
+                    [float(open_values[0]), output_open],
+                    [float(closed_values[0]), output_closed],
+                ]
     return result
 
 

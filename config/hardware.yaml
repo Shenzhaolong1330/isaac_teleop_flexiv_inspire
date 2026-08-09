@@ -100,6 +100,12 @@ flexiv:
 
 inspire:
   config: ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml
+  # Each side selects its own register-compatible hand profile. The ROS state,
+  # tactile and action topics stay unchanged, so old datasets/policies remain
+  # compatible. The two new RH56E2-T1 hands retain the previous installation's
+  # addresses: left=.11 and right=.12.
+  left_model: rh56e2_2l_t1
+  right_model: rh56e2_2r_t1
   left_host: 192.168.5.11
   right_host: 192.168.5.12
   port: 6000

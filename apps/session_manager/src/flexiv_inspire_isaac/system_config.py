@@ -370,6 +370,29 @@ def load_system_config(path: str | Path) -> SystemConfig:
     for key in ("left_host", "right_host"):
         if not str(inspire.get(key, "")).strip():
             raise SystemConfigError(f"inspire.{key} is required")
+    supported_hand_models = {
+        "rh56dftp_2",
+        "rh56e2_2l_t1",
+        "rh56e2_2r_t1",
+    }
+    for side in ("left", "right"):
+        key = f"{side}_model"
+        # Missing model keys belong to pre-profile configs and retain the old
+        # RH56DFTP-2 behavior. Exact product-label spelling is also accepted.
+        model = (
+            str(inspire.get(key, "rh56dftp_2"))
+            .strip()
+            .lower()
+            .replace("-", "_")
+        )
+        if model not in supported_hand_models:
+            choices = ", ".join(sorted(supported_hand_models))
+            raise SystemConfigError(f"inspire.{key} must be one of: {choices}")
+        if model.startswith("rh56e2_2l") and side != "left":
+            raise SystemConfigError(f"inspire.{key} selects a left-hand model")
+        if model.startswith("rh56e2_2r") and side != "right":
+            raise SystemConfigError(f"inspire.{key} selects a right-hand model")
+        inspire[key] = model
     port = int(inspire.get("port", 0))
     if not 1 <= port <= 65535:
         raise SystemConfigError("inspire.port is invalid")
@@ -882,6 +905,8 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                 "ros__parameters": {
                     "left_host": inspire["left_host"],
                     "right_host": inspire["right_host"],
+                    "left_model": inspire["left_model"],
+                    "right_model": inspire["right_model"],
                     "port": inspire["port"],
                     "state_hz": sampling["hand_state_hz"],
                     "tactile_hz": sampling["tactile_hz"],

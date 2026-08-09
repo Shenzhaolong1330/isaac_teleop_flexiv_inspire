@@ -1,4 +1,4 @@
-"""ROS 2 adapter for two independent Inspire RH56DFTP-2 workers.
+"""ROS 2 adapter for two independent, model-selectable Inspire RH56 hands.
 
 The driver is read-only unless all three local launch parameters are supplied:
 ``hardware_write_enabled=true``, a non-empty ``local_session_id``, and the
@@ -25,6 +25,7 @@ from .modbus import (
     ReadOnlyModbusTcpClient,
 )
 from .protocol import ACTUATOR_NAMES, TACTILE_LAYOUT
+from .profiles import hand_profile
 from .worker import DftpCommandSink, DftpHandWorker, DftpProtocolReader
 from isaac_teleop_core.deviceio import AsyncDeviceIOEmitter, record_envelope
 
@@ -192,6 +193,8 @@ def main(args=None) -> int:
             )
             self.declare_parameter("left_host", "192.168.5.11")
             self.declare_parameter("right_host", "192.168.5.12")
+            self.declare_parameter("left_model", "rh56dftp_2")
+            self.declare_parameter("right_model", "rh56dftp_2")
             self.declare_parameter("port", 6000)
             self.declare_parameter("state_hz", 50.0)
             self.declare_parameter("tactile_hz", 30.0)
@@ -226,6 +229,14 @@ def main(args=None) -> int:
             )
             if len(force_limits) != 6:
                 raise ValueError("safe_force_limits must contain six values")
+            self._hand_profiles = {
+                side: hand_profile(
+                    str(self.get_parameter(f"{side}_model").value), side=side
+                )
+                for side in ("left", "right")
+            }
+            for profile in self._hand_profiles.values():
+                profile.validate_force_limits(force_limits)
             permit = None
             if self._write_enabled:
                 permit = LocalWritePermit.issue_after_local_authorization(
@@ -292,8 +303,11 @@ def main(args=None) -> int:
                 "right": deque(maxlen=1),
             }
             self._state_queue = {
-                "left": deque(maxlen=1),
-                "right": deque(maxlen=1),
+                # Preserve short executor stalls instead of silently reducing
+                # the configured 200 Hz hand-state stream. Tactile remains
+                # latest-only because a full frame is much larger and 15 Hz.
+                "left": deque(maxlen=16),
+                "right": deque(maxlen=16),
             }
             self._tactile_queue = {
                 "left": deque(maxlen=1),
@@ -336,7 +350,10 @@ def main(args=None) -> int:
                     transport = ReadOnlyModbusTcpClient(host, **transport_kwargs)
                     command_sink = None
                 reader = DftpProtocolReader(
-                    transport, side, clock_ns=time.monotonic_ns
+                    transport,
+                    side,
+                    clock_ns=time.monotonic_ns,
+                    profile=self._hand_profiles[side],
                 )
                 # Tactile acquisition is 17 Modbus transactions per frame.
                 # Keep it on a second read-only connection so it cannot block
@@ -345,7 +362,10 @@ def main(args=None) -> int:
                     host, **transport_kwargs
                 )
                 tactile_reader = DftpProtocolReader(
-                    tactile_transport, side, clock_ns=time.monotonic_ns
+                    tactile_transport,
+                    side,
+                    clock_ns=time.monotonic_ns,
+                    profile=self._hand_profiles[side],
                 )
                 self._workers[side] = DftpHandWorker(
                     side,
@@ -380,8 +400,10 @@ def main(args=None) -> int:
                 worker.start()
             mode = "command-capable" if self._write_enabled else "read-only"
             self.get_logger().info(
-                f"DFTP project Modbus driver started {mode}; it is not vendor "
-                "ROS 2 source and has no legacy-workspace dependency"
+                f"Inspire Modbus driver started {mode}; "
+                f"left={self._hand_profiles['left'].product_name}, "
+                f"right={self._hand_profiles['right'].product_name}; "
+                "ROS topics and command format are model-independent"
             )
 
         def destroy_node(self):
@@ -747,9 +769,8 @@ def main(args=None) -> int:
                     self._offline_queue[side].clear()
                     self._publish_offline_state(side, timestamp, reason)
 
-                if self._state_queue[side]:
-                    self._publish_state(self._state_queue[side].pop())
-                    self._state_queue[side].clear()
+                while self._state_queue[side]:
+                    self._publish_state(self._state_queue[side].popleft())
                 if self._tactile_queue[side]:
                     self._publish_tactile(self._tactile_queue[side].pop())
                     self._tactile_queue[side].clear()

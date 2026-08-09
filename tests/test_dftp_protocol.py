@@ -3,6 +3,11 @@ import struct
 import pytest
 
 from flexiv_inspire_isaac.dftp.force_calibration import _assert_safe_to_calibrate
+from flexiv_inspire_isaac.dftp.network_config import (
+    decode_ipv4_registers,
+    encode_ipv4_registers,
+)
+from flexiv_inspire_isaac.dftp.read_only_check import _decode_byte_registers
 from flexiv_inspire_isaac.dftp.modbus import (
     CommandCapableModbusTcpClient,
     LocalWritePermit,
@@ -20,6 +25,7 @@ from flexiv_inspire_isaac.dftp.protocol import (
     decode_packed_u8,
     decode_tactile,
 )
+from flexiv_inspire_isaac.dftp.profiles import hand_profile
 from flexiv_inspire_isaac.dftp.worker import DftpProtocolReader
 
 
@@ -32,6 +38,19 @@ def test_official_tactile_layout_is_complete_and_contiguous():
         assert left.end_address + 1 == right.start_address
 
 
+def test_hand_profiles_share_protocol_but_keep_model_limits_and_handedness():
+    old = hand_profile("rh56dftp_2", side="left")
+    new = hand_profile("RH56E2-2R-T1", side="right")
+
+    assert old.tactile_taxel_count == new.tactile_taxel_count == TOTAL_TAXELS
+    old.validate_force_limits((600, 600, 600, 600, 500, 500))
+    new.validate_force_limits((3000,) * 6)
+    with pytest.raises(ValueError, match="right-handed"):
+        hand_profile("rh56e2_2r_t1", side="left")
+    with pytest.raises(ValueError, match="outside"):
+        old.validate_force_limits((1001,) * 6)
+
+
 def test_tactile_modbus_response_is_big_endian_raw_uint16():
     spec = TACTILE_LAYOUT[0]
     payload = bytes.fromhex("001b") + struct.pack(">8H", *range(1, 9))
@@ -42,6 +61,17 @@ def test_actuator_words_are_standard_modbus_big_endian():
     payload = struct.pack(">6h", -1, 0, 1, 1000, -4000, 4000)
     assert decode_modbus_i16(payload) == (-1, 0, 1, 1000, -4000, 4000)
     assert decode_packed_u8(bytes((0, 1, 2, 3, 4, 5))) == (0, 1, 2, 3, 4, 5)
+
+
+def test_packed_ip_byte_registers_restore_address_order():
+    assert _decode_byte_registers(bytes((168, 192, 210, 11))) == [192, 168, 11, 210]
+
+
+def test_ip_register_codec_matches_vendor_byte_address_order():
+    assert decode_ipv4_registers(bytes((168, 192, 210, 11))).compressed == (
+        "192.168.11.210"
+    )
+    assert encode_ipv4_registers("192.168.5.11") == (0xA8C0, 0x0B05)
 
 
 def _state_block() -> bytes:

@@ -2,6 +2,8 @@ flexiv_inspire_dftp_driver:
   ros__parameters:
     left_host: 192.168.5.11
     right_host: 192.168.5.12
+    left_model: rh56dftp_2
+    right_model: rh56dftp_2
     port: 6000
     socket_timeout_s: 0.25
     state_hz: 200.0

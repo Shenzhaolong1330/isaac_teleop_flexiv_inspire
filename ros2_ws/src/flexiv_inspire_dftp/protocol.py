@@ -1,7 +1,8 @@
-"""Vendor protocol constants and binary decoding for RH56DFTP-2.
+"""Vendor protocol constants for RH56DFTP-2 and RH56E2.
 
 Register addresses and tactile layout are transcribed from the public
-RH56DFTP V1.0.0 manual (PRJ-02-TS-U-010, December 2024).  Numeric actuator
+RH56DFTP V1.0.0 manual (PRJ-02-TS-U-010) and verified by read-only captures
+from the installed RH56E2-2R-T1. Numeric actuator
 state is transported as Modbus words. Although the manual describes tactile
 memory byte order as little-endian, a Modbus/TCP response has already encoded
 each register in network order. Read-only captures from both installed hands
@@ -27,6 +28,8 @@ ACTUATOR_NAMES = (
 
 
 class Register:
+    SAVE_PARAMETERS = 1005
+
     # Writing 1 with Modbus function 0x06 starts the vendor force-sensor
     # calibration routine. The hand must be open and unloaded.
     FORCE_CALIBRATION = 1009
@@ -43,6 +46,11 @@ class Register:
     # read-only validation utility never imports or invokes that transport.
     ANGLE_TARGET = 1486
     FORCE_LIMIT = 1498
+    SPEED_TARGET = 1522
+
+    # Packed byte fields, read-only in normal operation. Network changes take
+    # effect only after power cycling and are intentionally outside the driver.
+    IP_ADDRESS = 1700
 
 
 # All non-tactile observations live in one contiguous Modbus address window.

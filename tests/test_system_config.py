@@ -611,6 +611,8 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "flexiv_inspire_dftp_driver"
     ]["ros__parameters"]
     assert dftp["hardware_write_enabled"] is True
+    assert dftp["left_model"] == "rh56e2_2l_t1"
+    assert dftp["right_model"] == "rh56e2_2r_t1"
     assert dftp["local_write_confirmation"] == ("DFTP-LOCAL-CONTROL-AUTHORIZED")
     assert dftp["hand_reset_enabled"] is True
     assert dftp["hand_reset_pause_s"] == 0.35

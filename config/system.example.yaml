@@ -92,6 +92,8 @@ flexiv:
 
 inspire:
   config: ros2_ws/src/flexiv_inspire_dftp/dual_hands.yaml
+  left_model: rh56dftp_2
+  right_model: rh56dftp_2
   left_host: 192.168.5.11
   right_host: 192.168.5.12
   port: 6000

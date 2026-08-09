@@ -7,6 +7,7 @@ import time
 from typing import Callable, Protocol
 
 from .models import Acquisition, HandCommand, HandState, TactileFrame, TactileSurface
+from .profiles import HandProfile, hand_profile
 from .protocol import (
     HAND_STATE_BLOCK_START,
     HAND_STATE_BLOCK_WORDS,
@@ -70,10 +71,20 @@ class LatestOnlyMailbox:
 class DftpProtocolReader:
     """Read-only protocol decoder.  It does not expose a write method."""
 
-    def __init__(self, transport: Reader, side: str, clock_ns: Callable[[], int]) -> None:
+    def __init__(
+        self,
+        transport: Reader,
+        side: str,
+        clock_ns: Callable[[], int],
+        *,
+        profile: HandProfile | None = None,
+    ) -> None:
         self.transport = transport
         self.side = side
         self.clock_ns = clock_ns
+        self.profile = profile or hand_profile("rh56dftp_2", side=side)
+        self.tactile_layout = self.profile.tactile_layout
+        self.tactile_taxels = self.profile.tactile_taxel_count
         self.state_sequence = 0
         self.tactile_sequence = 0
 
@@ -212,6 +223,13 @@ class DftpHandWorker:
         self._last_applied: HandCommand | None = None
         self._timeout_hold_sent = False
         self._tactile_sequence = 0
+        tactile_source = tactile_reader or reader
+        self.tactile_layout = tuple(
+            getattr(tactile_source, "tactile_layout", TACTILE_LAYOUT)
+        )
+        self.tactile_taxels = int(
+            getattr(tactile_source, "tactile_taxels", TOTAL_TAXELS)
+        )
 
     @property
     def read_only(self) -> bool:
@@ -356,7 +374,7 @@ class DftpHandWorker:
         surfaces: list[TactileSurface] = []
         reader = self.tactile_reader or self.reader
         try:
-            for spec in TACTILE_LAYOUT:
+            for spec in self.tactile_layout:
                 # In compatibility mode state, tactile and commands share one
                 # connection, so retain command preemption between surfaces.
                 if self.tactile_reader is None:
@@ -373,8 +391,11 @@ class DftpHandWorker:
                 acquisition_end_ns=end,
                 surfaces=tuple(surfaces),
             )
-            if frame.taxel_count != TOTAL_TAXELS:
-                raise RuntimeError("tactile frame taxel count is not 1062")
+            if frame.taxel_count != self.tactile_taxels:
+                raise RuntimeError(
+                    "tactile frame taxel count is not "
+                    f"{self.tactile_taxels}"
+                )
             self.on_tactile(frame)
         except Exception as exc:
             self.on_fault(f"{self.side}: tactile read failed: {exc}")

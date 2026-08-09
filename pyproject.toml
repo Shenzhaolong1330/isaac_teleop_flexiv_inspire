@@ -29,6 +29,7 @@ flexiv-inspire-camera-calibrate = "flexiv_inspire_isaac.cameras.calibration:main
 flexiv-inspire-xr-bridge = "flexiv_inspire_xr_bridge.ros_node:main"
 flexiv-inspire-dftp-node = "flexiv_inspire_isaac.dftp.ros_node:main"
 flexiv-inspire-dftp-read-only = "flexiv_inspire_isaac.dftp.read_only_check:main"
+flexiv-inspire-hand-set-ip = "flexiv_inspire_isaac.dftp.network_config:main"
 flexiv-inspire-dftp-calibrate-force = "flexiv_inspire_isaac.dftp.force_calibration:main"
 flexiv-inspire-control-bridge = "flexiv_inspire_control.node:main"
 flexiv-inspire-authorize-control = "flexiv_inspire_control.authorize_control:main"

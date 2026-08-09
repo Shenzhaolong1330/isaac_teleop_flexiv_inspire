@@ -43,7 +43,7 @@ robot xr-doctor      # 检查当前选择的 Quest 控制器输入
 现场确认：
 
 - 两台 Flexiv 控制器、两只 Inspire 手和三台相机已上电；
-- PC 网口仍为手部网络，能访问 `192.168.5.11`、`192.168.5.12`；
+- PC 网口仍为手部网络，能访问 `config/hardware.yaml` 中两只手的地址；
 - Quest 已解锁并允许 USB 调试；OculusReader 默认经 USB 读取双腕与按键；
 - MANUS 服务及其标定文件正常；
 - 中踏板没有被压住。中踏板是机械臂运动离合，不是“录制开关”。
@@ -60,6 +60,30 @@ robot xr-doctor      # 检查当前选择的 Quest 控制器输入
 
 `config/site.yaml` 是上述配置的组合入口。运行时生成的文件在
 `/run/user/1000/isaac_teleop/launcher/`，不要手工编辑。
+
+### 选择 Inspire 手型号
+
+左右手可独立选择型号，ROS topic、六轴动作格式和数据格式不变：
+
+```yaml
+inspire:
+  left_model: rh56e2_2l_t1
+  left_host: 192.168.5.11
+  right_model: rh56e2_2r_t1
+  right_host: 192.168.5.12
+```
+
+当前支持 `rh56dftp_2`、`rh56e2_2l_t1`、`rh56e2_2r_t1`。老配置没有
+`left_model/right_model` 时自动按 `rh56dftp_2` 运行。两只 RH56E2 的出厂地址
+通常都为 `192.168.11.210`，不可直接同时使用；首次安装时需逐只连接并改成唯一
+地址。访问出厂地址时，PC 有线网卡也必须有该网段地址，例如：
+
+```bash
+sudo ip address add 192.168.11.22/24 dev eno1
+```
+
+这条命令只在本次开机有效；本站两只手已分别设置为 `.5.11/.5.12`，日常运行
+不需要添加出厂网段地址。
 
 ### 新建一批任务
 

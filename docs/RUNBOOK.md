@@ -1,4 +1,4 @@
-# 现场运行手册：双臂 + DFTP-2 + Quest/MANUS
+# 现场运行手册：双臂 + Inspire RH56 + Quest/MANUS
 
 日常使用只执行下面三个顶层命令；daemon、内部许可及各 ROS 服务由启动器
 自动管理。后面的分阶段流程保留给首次验收和故障排查。
@@ -23,7 +23,7 @@ robot record
   才能执行任何写操作。
 - 控制桥从 `MAINTENANCE` 启动；当前硬件会话完成双臂 F/T 清零前不能
   进入 `READY`。
-- DFTP 可执行程序默认只读；本站 `config/hardware.yaml` 已显式开启同一驱动的
+- Inspire 手部驱动默认只读；本站 `config/hardware.yaml` 已显式开启同一驱动的
   写通道供 MANUS 和 Reset 使用。超时、掉线和松脚踏不会自动回零或回家。
 - 遥操作输入默认以 `command_enabled:=false` 启动。
 - gRPC 不能执行 `Enable`、F/T 清零或本地控制授权。
@@ -114,7 +114,9 @@ flexiv-inspire --config "$ROOT/config/site.yaml" render
   `[0.3,0.8]`，刚度还会与每台真机的 `RobotInfo.K_x_nom` 比较。
 - `config/sensors.yaml` 的 `teleop.manus_calibration`：未完成标定时保持空值，只允许手臂
   shadow/录制；手指命令保持 invalid。
-- 相机序列号、DFTP IP 和脚踏 by-id。不要把凭据或私钥放入仓库。
+- 相机序列号、左右 Inspire 型号/IP 和脚踏 by-id。RH56DFTP-2 与 RH56E2
+  可按侧混用，配置键为 `inspire.left_model/right_model`；两只手的 IP 必须唯一。
+  不要把凭据或私钥放入仓库。
 
 只读验证工具/payload 记录：
 
@@ -218,14 +220,19 @@ flexiv-inspire-camera-node --ros-args \
 并确认报告中的模态与配置一致：头部 RGB + 深度 + 点云，两个腕部仅 RGB。
 不要混入 2.58，也不要在腕部相机上误开不需要的深度/点云。
 
-### 4.3 DFTP-2 只读
+### 4.3 Inspire RH56 手只读
 
 终端 C 先做一次只读协议检查：
 
 ```bash
 source "$ROOT/scripts/env/activate_ros.sh"
 source "$ROOT/ros2_ws/install/setup.bash"
-flexiv-inspire-dftp-read-only --include-tactile
+flexiv-inspire-dftp-read-only \
+  --left-model rh56e2_2l_t1 \
+  --right-model rh56e2_2r_t1 \
+  --left 192.168.5.11 \
+  --right 192.168.5.12 \
+  --include-tactile
 ```
 
 再启动只读 ROS 驱动：
@@ -236,7 +243,23 @@ flexiv-inspire-dftp-node --ros-args \
 ```
 
 确认配置仍是 `hardware_write_enabled: false`。此阶段只能读角度、位置、力、
-电流、温度、错误、状态和 1062 taxels。
+电流、温度、错误、状态和 1062 taxels。RH56DFTP-2 与已验收的 RH56E2-T1
+复用六轴寄存器和 17 面触觉布局，但型号、左右手和力上限由独立 profile 校验；
+不要把尚未验收的 T2 电容触觉手伪装成 T1。
+
+两只出厂地址相同的新手必须逐只接入并改成唯一地址。IP 修改只写网络寄存器，
+保存后需要重新上电；例如把当前单独连接的左手改为 `.5.11`：
+
+```bash
+python -m flexiv_inspire_isaac.dftp.network_config \
+  --host 192.168.11.210 \
+  --expected-current-ip 192.168.11.210 \
+  --new-ip 192.168.5.11 \
+  --side left --model rh56e2_2l_t1 \
+  --confirm INSPIRE-NETWORK-CONFIG
+```
+
+右手同理使用 `.5.12`。不要在两只仍使用相同出厂 IP 时同时连接并执行修改。
 
 力传感器零点明显异常时，保持指定手完全张开、无接触、线缆无拉扯，
 再单独执行官方寄存器 1009 校准。命令会先检查张开角度、静止电流和

@@ -18,10 +18,11 @@ rl100_zarr_export:
     source: control/sent_command
     fps: 30.0
     resample: false
+    max_period_error_fraction: 0.25
   action:
     view: sent_command
   camera_alignment: causal
   channels: {}
   segments:
-    gap_threshold_s: 0.10
+    gap_threshold_s: 0.05
     min_frames: 9

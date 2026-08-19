@@ -136,7 +136,7 @@ robot --config config/site_rl100_dp30.yaml record
 | `Ctrl-C` | 完成本条写入并退出，等待 MCAP 落盘 |
 
 `record_only_while_pedal_pressed: true` 会在松开中踏板时留下真实时间空档。转换器把
-超过 0.10 s 的空档或 capture segment 变化作为 episode 边界；不足 9 帧的短片段被
+超过 0.05 s 的空档或 capture segment 变化作为 episode 边界；不足 9 帧的短片段被
 丢弃并计入验证报告。这样不会让模型跨过 Home、暂停或重新接管学习虚假连续动作。
 
 ## 6. 转为 RL-100 Zarr
@@ -153,6 +153,7 @@ robot --config config/site_rl100_dp30.yaml convert \
 - 未完成的 manifest；
 - 缺失任一路 RGB、状态或 sent_command；
 - 未来图像匹配、30 Hz 人工插值、非法动作或图像尺寸中途变化；
+- sent_command 原生中位周期偏离 30 Hz 超过 25%；
 - 覆盖已有非空 Zarr；
 - 低于最小长度的连续片段。
 

@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 
 import numpy as np
+import pytest
 import zarr
 
 from flexiv_inspire_isaac.data_pipeline.rl100_zarr import (
     RL100SourceEpisode,
     RL100ZarrSpec,
+    RL100ZarrSpecError,
     aligned_row_to_rl100_frame,
     export_rl100_zarr,
 )
@@ -102,6 +104,20 @@ def test_invalid_frame_breaks_sequence_and_short_runs_are_dropped(tmp_path):
     assert result.frames_written == 9
     assert result.frames_dropped_invalid_image == 1
     assert result.frames_dropped_short_segment == 7
+
+
+def test_export_rejects_a_native_timeline_that_is_not_30_hz(tmp_path):
+    output = tmp_path / "wrong-rate.zarr"
+    rows = [_row(index * 16_666_667) for index in range(9)]
+
+    with pytest.raises(RL100ZarrSpecError, match="cadence"):
+        export_rl100_zarr(
+            [RL100SourceEpisode(rows, "episode/manifest.json")],
+            output_root=output,
+            spec=RL100ZarrSpec(),
+        )
+
+    assert not output.exists()
 
 
 def test_explicit_complete_success_labels_make_zarr_offline_rl_ready(tmp_path):

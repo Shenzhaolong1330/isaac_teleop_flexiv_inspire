@@ -43,8 +43,9 @@ class RL100ZarrSpec:
     action: ActionView = ActionView()
     camera_alignment: str = "causal"
     channels: Mapping[str, str] | None = None
-    gap_threshold_s: float = 0.10
+    gap_threshold_s: float = 0.05
     min_frames: int = 9
+    max_period_error_fraction: float = 0.25
 
     def __post_init__(self) -> None:
         if self.channels is None:
@@ -101,6 +102,9 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
     camera_alignment = str(raw.get("camera_alignment", ""))
     gap_threshold_s = float(segments.get("gap_threshold_s", 0.0))
     min_frames = int(segments.get("min_frames", 0))
+    max_period_error_fraction = float(
+        timeline.get("max_period_error_fraction", 0.25)
+    )
 
     if profile != PROFILE_ID:
         raise RL100ZarrSpecError(
@@ -123,6 +127,10 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
         raise RL100ZarrSpecError("segments.gap_threshold_s must be in [0.05,60]")
     if min_frames < 2:
         raise RL100ZarrSpecError("segments.min_frames must be at least 2")
+    if not 0.0 < max_period_error_fraction <= 0.5:
+        raise RL100ZarrSpecError(
+            "timeline.max_period_error_fraction must be in (0,0.5]"
+        )
     if not all(isinstance(key, str) and isinstance(value, str) for key, value in channels.items()):
         raise RL100ZarrSpecError("channels must map strings to strings")
 
@@ -136,6 +144,7 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
         channels={key.lstrip("/"): value.lstrip("/") for key, value in channels.items()},
         gap_threshold_s=gap_threshold_s,
         min_frames=min_frames,
+        max_period_error_fraction=max_period_error_fraction,
     )
 
 
@@ -351,6 +360,7 @@ def export_rl100_zarr(
     dropped = {"action": 0, "image": 0, "observation": 0, "short": 0}
     writer: _StreamingZarrWriter | None = None
     gap_ns = int(spec.gap_threshold_s * 1e9)
+    expected_period_ns = 1e9 / spec.fps
     try:
         root = zarr.group(store=zarr.DirectoryStore(str(staging)), overwrite=True)
         writer = _StreamingZarrWriter(
@@ -363,10 +373,20 @@ def export_rl100_zarr(
         active_source = -1
         previous_timestamp: int | None = None
         previous_segment: tuple[int, int] | None = None
+        run_periods_ns: list[int] = []
 
         def finish_run() -> None:
-            nonlocal pending, active, active_source, previous_timestamp, previous_segment
+            nonlocal pending, active, active_source, previous_timestamp
+            nonlocal previous_segment, run_periods_ns
             if active:
+                median_period_ns = float(np.median(run_periods_ns))
+                relative_error = abs(median_period_ns - expected_period_ns) / expected_period_ns
+                if relative_error > spec.max_period_error_fraction:
+                    actual_hz = 1e9 / median_period_ns
+                    raise RL100ZarrSpecError(
+                        "native sent_command cadence is incompatible with the "
+                        f"30 Hz dataset contract: median={actual_hz:.3f} Hz"
+                    )
                 writer.append(pending)
                 writer.finish_episode(active_source)
             else:
@@ -376,6 +396,7 @@ def export_rl100_zarr(
             active_source = -1
             previous_timestamp = None
             previous_segment = None
+            run_periods_ns = []
 
         for source_index, episode in enumerate(episodes):
             finish_run()
@@ -401,6 +422,13 @@ def export_rl100_zarr(
                     finish_run()
                     continue
 
+                if previous_timestamp is not None:
+                    period_ns = timestamp - previous_timestamp
+                    if period_ns <= 0:
+                        raise RL100ZarrSpecError(
+                            "sent_command timestamps must be strictly increasing"
+                        )
+                    run_periods_ns.append(period_ns)
                 pending.append((frame, timestamp, source_index, segment))
                 active_source = source_index
                 previous_timestamp = timestamp
@@ -437,6 +465,7 @@ def export_rl100_zarr(
                     "camera_alignment": spec.camera_alignment,
                     "segment_gap_threshold_s": spec.gap_threshold_s,
                     "minimum_segment_frames": spec.min_frames,
+                    "maximum_period_error_fraction": spec.max_period_error_fraction,
                     "reward_available": False,
                     "offline_rl_ready": False,
                     "offline_rl_blocker": "reward/success labels are not present in teleoperation MCAP",

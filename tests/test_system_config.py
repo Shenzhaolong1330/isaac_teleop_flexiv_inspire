@@ -30,6 +30,10 @@ def _site() -> Path:
     return Path(__file__).parents[1] / "config" / "site.yaml"
 
 
+def _rl100_site() -> Path:
+    return Path(__file__).parents[1] / "config" / "site_rl100_dp30.yaml"
+
+
 def _policy_server() -> Path:
     return Path(__file__).parents[1] / "config" / "policy_server.yaml"
 
@@ -624,6 +628,26 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "flexiv_inspire_isaac.rerun_viz.cli" in command
         for command in _commands(config, rendered, include_xr_receiver=False)
     )
+
+
+def test_rl100_site_overlay_changes_only_policy_timeline_and_camera_rates():
+    default = load_system_config(_site())
+    config = load_system_config(_rl100_site())
+
+    assert config.document["sampling"]["teleop_command_hz"] == 30.0
+    assert config.document["sampling"]["camera_hz"] == 30.0
+    assert config.document["sampling"]["policy_observation_hz"] == 30.0
+    assert config.document["sampling"]["training_timeline_hz"] == 30.0
+    assert config.document["sampling"]["arm_observation_hz"] == 300.0
+    assert config.document["sampling"]["hand_state_hz"] == 200.0
+    assert config.document["teleop"]["quest_input"]["publish_rate_hz"] == 60.0
+    assert config.document["flexiv"]["policy_control"]["require_pedal"] is True
+    assert config.document["cameras"]["depth_fps"] == 30
+    assert {
+        name: stream["fps"]
+        for name, stream in config.document["cameras"]["streams"].items()
+    } == {"head": 30, "left_wrist": 30, "right_wrist": 30}
+    assert config.document["recording"] == default.document["recording"]
 
 
 def test_system_config_rejects_non_executed_action_label(tmp_path):

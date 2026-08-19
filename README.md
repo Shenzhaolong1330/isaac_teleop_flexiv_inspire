@@ -4,6 +4,9 @@
 遥操作、数采、可视化、回放和数据转换系统。日常操作只使用 `robot`；不要再
 手工启动 RDK daemon、ROS 控制桥、手部驱动、socket 或脚踏服务。
 
+面向 RL-100 的 30 Hz 三视角 RGB MVP、26D/24D 数据契约、MCAP 到 Zarr
+转换和安全部署流程见 [docs/RL100_DP30_PIPELINE.zh-CN.md](docs/RL100_DP30_PIPELINE.zh-CN.md)。
+
 > 真机操作只能在机器人主机本地终端执行。运行前确认工作区无人、双臂和双手
 > 无接触/无外载、线缆不受拉扯，且中踏板处于松开状态。
 

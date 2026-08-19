@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = ["mcap>=1.2,<2", "mcap-ros2-support>=0.5,<1", "rerun-sdk>=0.24,<0.34"]
+data = ["mcap>=1.2,<2", "mcap-ros2-support>=0.5,<1", "rerun-sdk>=0.24,<0.34", "zarr>=2.18.3,<3"]
 test = ["pytest>=8.4,<9"]
 
 [project.scripts]
@@ -44,6 +44,8 @@ flexiv-inspire-policy-server = "flexiv_inspire_isaac.policy_api.ros_adapter:main
 flexiv-inspire-policy-data-smoke = "flexiv_inspire_isaac.policy_api.data_client:main"
 flexiv-inspire-lerobot-export = "flexiv_inspire_isaac.data_pipeline.lerobot_cli:main"
 flexiv-inspire-policy-profile-export = "flexiv_inspire_isaac.data_pipeline.profile_cli:main"
+flexiv-inspire-rl100-zarr-export = "flexiv_inspire_isaac.data_pipeline.rl100_zarr_cli:main"
+flexiv-inspire-rl100-reward-label = "flexiv_inspire_isaac.data_pipeline.rl100_reward_cli:main"
 flexiv-inspire-data-smoke = "flexiv_inspire_isaac.data_pipeline.synthetic_smoke:main"
 isaac-flexiv-episode = "flexiv_inspire_isaac.data_pipeline.episode_manager:main"
 flexiv-inspire-rerun = "flexiv_inspire_isaac.rerun_viz.cli:main"

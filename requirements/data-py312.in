@@ -8,6 +8,7 @@ numpy==2.2.6
 mcap>=1.2,<2
 mcap-ros2-support>=0.5,<1
 zstandard>=0.23,<1
+zarr>=2.18.3,<3
 pytest==8.4.2
 grpcio==1.71.0
 protobuf==5.29.5

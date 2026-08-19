@@ -51,6 +51,24 @@ def test_wrist_images_accept_nearly_simultaneous_later_camera_frames():
     assert row["observation.images.right_wrist.age_ns"] == -10
 
 
+def test_command_timeline_aligns_head_image_instead_of_treating_action_as_image():
+    row = EpisodeAligner(
+        {
+            "control/sent_command": [s(tuple(range(30)), 100)],
+            "camera/head/jpeg": [s(b"head", 90)],
+            "camera/left_wrist/jpeg": [s(b"left", 95)],
+            "camera/right_wrist/jpeg": [s(b"right", 96)],
+        },
+        timeline_source="control/sent_command",
+        allow_future_camera_matches=False,
+    ).rows()[0]
+
+    assert row["timestamp_ns"] == 100
+    assert row["observation.images.head"] == b"head"
+    assert row["observation.images.left_wrist"] == b"left"
+    assert row["action"] == tuple(range(30))
+
+
 def test_low_rate_hand_state_uses_its_own_bounded_causal_tolerance():
     row = EpisodeAligner(
         {

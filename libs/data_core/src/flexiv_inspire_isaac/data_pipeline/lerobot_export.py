@@ -65,6 +65,7 @@ class EpisodeAligner:
         action: ActionView = ActionView(),
         depth_cameras: Sequence[str] = (),
         segment_gap_threshold_s: float = 0.25,
+        allow_future_camera_matches: bool = True,
     ) -> None:
         self.streams = streams
         self.tolerance = tolerance
@@ -77,6 +78,7 @@ class EpisodeAligner:
         self.high_rate_arm_samples_per_frame = high_rate_arm_samples_per_frame
         self.action = action
         self.depth_cameras = tuple(depth_cameras)
+        self.allow_future_camera_matches = bool(allow_future_camera_matches)
         if any(
             camera not in {"head", "left_wrist", "right_wrist"}
             for camera in self.depth_cameras
@@ -137,7 +139,11 @@ class EpisodeAligner:
             if segment_start and previous_timestamp is not None:
                 capture_segment += 1
                 frame_in_segment = 0
-            if isinstance(head, TimedSample):
+            if self.timeline_source != "camera/head/jpeg":
+                head_value = self._causal(
+                    "camera/head/jpeg", timestamp, self.tolerance.image_ns
+                )
+            elif isinstance(head, TimedSample):
                 head_value = AlignedValue(
                     head.value if head.valid else None,
                     timestamp,
@@ -163,7 +169,7 @@ class EpisodeAligner:
                     f"camera/{camera}/jpeg",
                     timestamp,
                     self.tolerance.image_ns,
-                    allow_future=True,
+                    allow_future=self.allow_future_camera_matches,
                 )
             for camera in self.depth_cameras:
                 self._put_nearest(
@@ -172,7 +178,7 @@ class EpisodeAligner:
                     f"camera/{camera}/depth_z16",
                     timestamp,
                     self.tolerance.image_ns,
-                    allow_future=True,
+                    allow_future=self.allow_future_camera_matches,
                 )
             for side in ("left", "right"):
                 pose_stream = f"robot/{side}_arm/tcp_pose"

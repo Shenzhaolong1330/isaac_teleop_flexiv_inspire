@@ -144,12 +144,6 @@ def aligned_row_to_policy_frame(
             )
             for side in ("left", "right")
         ]
-        arm_poses = [
-            _required_row_value(
-                row, f"observation.{side}_arm.pose", category="observation"
-            )
-            for side in ("left", "right")
-        ]
         hand_states = [
             _required_row_value(
                 row, f"observation.{side}_hand.state", category="observation"
@@ -159,21 +153,33 @@ def aligned_row_to_policy_frame(
         arm_q = np.concatenate(
             [_field_vector(state, "q", 7) for state in arm_states]
         )
-        arm_pose = np.concatenate([_pose_vector(pose) for pose in arm_poses])
         hand_angle = np.concatenate(
             [_field_vector(state, "angle", 6) for state in hand_states]
         )
         if not (
             np.all(np.isfinite(arm_q))
-            and np.all(np.isfinite(arm_pose))
             and np.all(np.isfinite(hand_angle))
         ):
             raise ValueError("required state contains NaN/Inf")
         if profile_id == "dual_arm_lerobot_v1":
+            arm_poses = [
+                _required_row_value(
+                    row, f"observation.{side}_arm.pose", category="observation"
+                )
+                for side in ("left", "right")
+            ]
+            arm_pose = np.concatenate([_pose_vector(pose) for pose in arm_poses])
             state = legacy_state38(arm_q, arm_pose, hand_angle)
         elif profile_id == "joint_proprio_cartesian_v1":
             state = joint_minimal_state(arm_q, hand_angle)
         elif profile_id == "cartesian_proprio_v1":
+            arm_poses = [
+                _required_row_value(
+                    row, f"observation.{side}_arm.pose", category="observation"
+                )
+                for side in ("left", "right")
+            ]
+            arm_pose = np.concatenate([_pose_vector(pose) for pose in arm_poses])
             state = cartesian_minimal_state(arm_pose, hand_angle)
         else:  # get_profile() above should make this unreachable.
             raise ValueError(f"unsupported policy profile: {profile_id}")

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "gamma": 0.99,
+  "terminal_success_reward": 1.0,
+  "terminal_failure_reward": 0.0,
+  "episodes": [
+    {"episode_index": 0, "success": true},
+    {"episode_index": 1, "success": false}
+  ]
+}

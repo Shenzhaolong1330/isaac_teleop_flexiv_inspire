@@ -65,11 +65,30 @@ def _merge_document(target: dict[str, Any], incoming: Mapping[str, Any]) -> None
             raise SystemConfigError(f"duplicate composed config key: {key}")
 
 
+def _override_document(
+    target: dict[str, Any], incoming: Mapping[str, Any], *, prefix: str = ""
+) -> None:
+    """Apply an explicit site overlay without permitting misspelled keys."""
+
+    for key, value in incoming.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if key not in target:
+            raise SystemConfigError(f"override config key does not exist: {path}")
+        current = target[key]
+        if isinstance(current, dict) and isinstance(value, Mapping):
+            _override_document(current, value, prefix=path)
+        elif isinstance(current, dict) != isinstance(value, Mapping):
+            raise SystemConfigError(f"override config type mismatch: {path}")
+        else:
+            target[key] = value
+
+
 def _load_composed_document(source: Path) -> dict[str, Any]:
     entry = _mapping(
         yaml.safe_load(source.read_text(encoding="utf-8")), "system config"
     )
     includes = entry.pop("includes", [])
+    overrides = entry.pop("overrides", {})
     if not isinstance(includes, list) or not all(
         isinstance(item, str) and item.strip() for item in includes
     ):
@@ -87,6 +106,9 @@ def _load_composed_document(source: Path) -> dict[str, Any]:
             )
         _merge_document(result, fragment)
     _merge_document(result, entry)
+    if not isinstance(overrides, Mapping):
+        raise SystemConfigError("overrides must be a mapping")
+    _override_document(result, overrides)
     return result
 
 

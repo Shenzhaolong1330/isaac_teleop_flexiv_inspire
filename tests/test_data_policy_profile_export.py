@@ -143,6 +143,22 @@ def test_legacy_profile_matches_old_38d_state_and_24d_action_order():
     assert np.allclose(action[12:], np.linspace(0, 1, 12))
 
 
+def test_joint_minimal_profile_does_not_require_unused_tcp_pose():
+    row = _row()
+    for side in ("left", "right"):
+        row.pop(f"observation.{side}_arm.pose")
+        row.pop(f"observation.{side}_arm.pose.valid")
+
+    frame = aligned_row_to_policy_frame(
+        row,
+        task="pick object",
+        profile_id="joint_proprio_cartesian_v1",
+        image_shapes=IMAGE_SHAPES,
+    )
+
+    assert frame["observation.state"].shape == (26,)
+
+
 def test_minimal_joint_profile_has_no_duplicate_tcp_state():
     frame = aligned_row_to_policy_frame(
         _row(),

@@ -1798,7 +1798,7 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("replay", help="replay the dataset selected by config/playback.yaml")
     convert = sub.add_parser(
         "convert",
-        help="export the episode(s) selected by config/conversion.yaml to LeRobot",
+        help="export episodes selected by a conversion config to a training dataset",
     )
     convert.add_argument(
         "--action-view",
@@ -1819,7 +1819,7 @@ def _parser() -> argparse.ArgumentParser:
     convert.add_argument(
         "--conversion-config",
         default="config/conversion.yaml",
-        help="source selection and LeRobot output settings",
+        help="source selection and output settings (LeRobot or RL-100 Zarr)",
     )
     camera_calibrate = sub.add_parser(
         "camera-calibrate",
@@ -2553,7 +2553,13 @@ def _run_convert(config, args) -> int:
     for manifest in manifests:
         if not manifest.is_file():
             raise SystemExit(f"manifest 不存在: {manifest}")
-    export = conversion.get("lerobot_export", {})
+    output_format = str(output.get("format", "lerobot")).strip() or "lerobot"
+    if output_format not in {"lerobot", "rl100_zarr"}:
+        raise SystemExit("conversion output.format 必须是 lerobot 或 rl100_zarr")
+    export = conversion.get(
+        "rl100_zarr_export" if output_format == "rl100_zarr" else "lerobot_export",
+        {},
+    )
     profile = (
         str(export.get("profile", "")).strip()
         if isinstance(export, dict)
@@ -2575,7 +2581,10 @@ def _run_convert(config, args) -> int:
         else (
             config.resolve(configured_root)
             if configured_root
-            else root / "sessions" / dataset_name / "lerobot"
+            else root
+            / "sessions"
+            / dataset_name
+            / ("rl100" if output_format == "rl100_zarr" else "lerobot")
         )
     )
     if len(manifests) > 1 and not episode_subdirectory and not profile:
@@ -2587,9 +2596,13 @@ def _run_convert(config, args) -> int:
         or f"local/{slug}-{profile or action_view}"
     )
     executable_name = (
-        "flexiv-inspire-policy-profile-export"
-        if profile
-        else "flexiv-inspire-lerobot-export"
+        "flexiv-inspire-rl100-zarr-export"
+        if output_format == "rl100_zarr"
+        else (
+            "flexiv-inspire-policy-profile-export"
+            if profile
+            else "flexiv-inspire-lerobot-export"
+        )
     )
     executable = root / "envs/data-py312/bin" / executable_name
     if not executable.is_file():
@@ -2601,6 +2614,45 @@ def _run_convert(config, args) -> int:
     for mcap in mcaps:
         if not mcap.is_file():
             raise SystemExit(f"MCAP 不存在: {mcap}")
+
+    if output_format == "rl100_zarr":
+        if profile != "joint_proprio_cartesian_v1":
+            raise SystemExit(
+                "RL-100 Zarr 仅支持 profile: joint_proprio_cartesian_v1"
+            )
+        if action_view != "sent_command":
+            raise SystemExit("RL-100 Zarr 仅支持 action.view: sent_command")
+        if episode_subdirectory:
+            raise SystemExit(
+                "RL-100 Zarr 合并导出要求 output.episode_subdirectory: false"
+            )
+        if mcaps:
+            raise SystemExit(
+                "RL-100 Zarr 从每个 manifest 解析 MCAP；请删除 source.mcap_files"
+            )
+        if base.exists() and (not base.is_dir() or any(base.iterdir())):
+            raise SystemExit(f"输出目录已存在且非空: {base}；请指定 --output-root")
+        command = [str(executable)]
+        for manifest in manifests:
+            command.extend(("--manifest", str(manifest)))
+        command.extend(
+            (
+                "--output-root",
+                str(base),
+                "--export-config",
+                str(conversion_path),
+            )
+        )
+        print(
+            f"合并转换 {len(manifests)} 条 episode -> RL-100 26D/24D Zarr -> {base}",
+            flush=True,
+        )
+        status = subprocess.call(command)
+        if status:
+            print(f"RL-100 Zarr 转换失败（退出码 {status}）", flush=True)
+            return 1
+        print(f"转换完成：成功合并 {len(manifests)} 条 episode", flush=True)
+        return 0
 
     if profile:
         if action_view != "sent_command":

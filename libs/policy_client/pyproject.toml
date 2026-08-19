@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
   "flexiv-inspire-policy-contracts==0.1.0",
   "grpcio>=1.71,<2",
-  "numpy>=1.24",
+  "numpy>=1.23.5",
   "Pillow>=10",
   "protobuf>=5.29,<7",
 ]

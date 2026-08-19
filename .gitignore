@@ -25,7 +25,7 @@ CMakeFiles/
 CMakeCache.txt
 
 # Runtime state and datasets
-sessions/
+sessions
 recordings/
 datasets/
 artifacts/
@@ -38,7 +38,7 @@ build/generated/
 install/generated/
 
 # Credentials must never be committed
-certs/
+certs
 certs/private/
 *.key
 *.pem

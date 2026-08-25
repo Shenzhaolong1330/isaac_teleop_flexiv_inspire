@@ -10,7 +10,7 @@ htmlcov/
 
 # Virtual environments and downloaded upstream sources
 .venv/
-envs/
+envs
 upstream/
 third_party/IsaacTeleop/
 third_party/oculus_reader/

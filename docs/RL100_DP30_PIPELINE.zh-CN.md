@@ -118,6 +118,28 @@ robot --config config/site_rl100_dp30.yaml validate
 robot --config config/site_rl100_dp30.yaml record --dry-run
 ```
 
+第一次现场验收建议使用独立的一条轨迹 smoke 配置。它继承相同硬件、标定、
+30 Hz 与安全设置，但固定写入 `sessions/rl100_dp30_smoke`，保存一条 episode 后
+自动退出，不会混入正式任务数据：
+
+```bash
+robot --config config/site_rl100_dp30_smoke.yaml validate
+robot --config config/site_rl100_dp30_smoke.yaml record --dry-run --no-xr
+# 下面这条会执行 F/T 清零和配置的 Home，只能在现场确认安全后运行。
+robot --config config/site_rl100_dp30_smoke.yaml record --no-xr
+```
+
+至少持续踩住中踏板并缓慢操作双臂和双手 5 秒，再松开中踏板并踩右踏板提交。
+对应的 smoke 数据转换命令为：
+
+```bash
+robot --config config/site_rl100_dp30_smoke.yaml convert \
+  --conversion-config config/conversion_rl100_dp30_smoke.yaml
+```
+
+转换通过后再编辑 `config/recording.yaml` 中的正式任务名、描述和 episode 数量，
+使用下面的正式 profile 采集训练示教。
+
 真机现场确认安全后才运行：
 
 ```bash

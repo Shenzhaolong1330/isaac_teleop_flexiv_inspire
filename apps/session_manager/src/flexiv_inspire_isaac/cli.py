@@ -945,7 +945,15 @@ def _stop_managed_services(config, *, require_existing: bool) -> int:
             continue
 
     discovered_pids = set(_matching_managed_process_ids(config))
-    confirmed_owned_pids = set(owned_pids).intersection(discovered_pids)
+    owned_pid_set = set(owned_pids)
+    missing_owned_pids = owned_pid_set.difference(discovered_pids)
+    if missing_owned_pids:
+        # Deployment worktrees may intentionally share an environment whose
+        # executable path points at another checkout. State-owned PIDs are
+        # still safe to accept when their live command matches this stack.
+        marked_pids = set(_matching_process_ids(*_MANAGED_PROCESS_MARKERS))
+        discovered_pids.update(missing_owned_pids.intersection(marked_pids))
+    confirmed_owned_pids = owned_pid_set.intersection(discovered_pids)
     if not discovered_pids:
         if require_existing:
             raise SystemExit("no launcher process state exists")

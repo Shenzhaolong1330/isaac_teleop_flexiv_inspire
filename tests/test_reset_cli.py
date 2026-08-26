@@ -461,6 +461,37 @@ def test_managed_service_cleanup_escalates_after_graceful_timeout(
     ]
 
 
+def test_managed_service_cleanup_accepts_state_owned_shared_env_process(
+    tmp_path, monkeypatch
+):
+    runtime = tmp_path / "runtime"
+    launcher = runtime / "launcher"
+    launcher.mkdir(parents=True)
+    managed_pid = 434343
+    (launcher / "reset-services.json").write_text(
+        json.dumps({"pids": [managed_pid]}),
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(
+        root=tmp_path,
+        document={"session": {"runtime_root": str(runtime)}},
+    )
+    monkeypatch.setattr(cli, "_matching_managed_process_ids", lambda selected: [])
+    monkeypatch.setattr(
+        cli, "_matching_process_ids", lambda *markers: [managed_pid]
+    )
+    signals = []
+    monkeypatch.setattr(
+        cli.os,
+        "killpg",
+        lambda pid, requested_signal: signals.append((pid, requested_signal)),
+    )
+    monkeypatch.setattr(cli, "_pid_is_running", lambda pid: False)
+
+    assert cli._stop_managed_services(config, require_existing=False) == 1
+    assert signals == [(managed_pid, signal.SIGTERM)]
+
+
 def test_reset_reuses_valid_ft_zero_when_session_is_already_ready():
     assert _ft_zero_mode("MAINTENANCE", False) == "execute"
     assert _ft_zero_mode("READY", True) == "reuse"

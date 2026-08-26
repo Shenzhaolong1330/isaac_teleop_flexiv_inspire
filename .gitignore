@@ -12,8 +12,8 @@ htmlcov/
 .venv/
 envs
 upstream/
-third_party/IsaacTeleop/
-third_party/oculus_reader/
+third_party/IsaacTeleop
+third_party/oculus_reader
 vendor/
 
 # ROS/colcon and native builds

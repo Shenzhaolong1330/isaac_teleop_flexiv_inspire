@@ -1045,12 +1045,22 @@ def _restart_reset_ros_processes() -> None:
             pass
     deadline = time.monotonic() + 3.0
     while pids and time.monotonic() < deadline:
-        pids = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
+        pids = [pid for pid in pids if _pid_is_running(pid)]
+        if pids:
+            time.sleep(0.05)
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    kill_deadline = time.monotonic() + 2.0
+    while pids and time.monotonic() < kill_deadline:
+        pids = [pid for pid in pids if _pid_is_running(pid)]
         if pids:
             time.sleep(0.05)
     if pids:
         raise RuntimeError(
-            "旧 ROS Reset 服务无法停止，请先运行 robot stop 后重试: "
+            "旧 ROS Reset 服务在 SIGKILL 后仍未停止: "
             + ", ".join(str(pid) for pid in pids)
         )
 

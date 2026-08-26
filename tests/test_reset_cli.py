@@ -595,6 +595,29 @@ def test_reset_restarts_existing_dftp_process(monkeypatch):
     assert signals == [(101, signal.SIGTERM), (202, signal.SIGTERM)]
 
 
+def test_reset_ros_restart_escalates_after_graceful_timeout(monkeypatch):
+    pid = 303
+    signals: list[tuple[int, signal.Signals]] = []
+    killed = False
+
+    monkeypatch.setattr(cli, "_matching_process_ids", lambda *markers: [pid])
+    times = iter((0.0, 4.0, 4.0, 4.0))
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(times))
+
+    def fake_kill(selected_pid, requested_signal):
+        nonlocal killed
+        signals.append((selected_pid, requested_signal))
+        if requested_signal == signal.SIGKILL:
+            killed = True
+
+    monkeypatch.setattr(cli.os, "kill", fake_kill)
+    monkeypatch.setattr(cli, "_pid_is_running", lambda selected_pid: not killed)
+
+    cli._restart_reset_ros_processes()
+
+    assert signals == [(pid, signal.SIGTERM), (pid, signal.SIGKILL)]
+
+
 def test_changed_rdk_config_restarts_managed_daemon(tmp_path, monkeypatch):
     socket_path = tmp_path / "rdk.sock"
     state_path = tmp_path / "rdk-daemon.json"

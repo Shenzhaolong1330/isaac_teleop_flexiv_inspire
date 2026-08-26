@@ -158,8 +158,8 @@ def test_episode_uses_configured_camera_and_action_rates(tmp_path):
         tmp_path,
         expected_hz={camera_topic.lstrip("/"): 30.0, action_topic.lstrip("/"): 30.0},
     )
-    episode.submit(_envelope(1, camera_topic))
-    episode.submit(_envelope(1, action_topic))
+    episode.submit_native(_envelope(1, camera_topic))
+    episode.submit_native(_envelope(1, action_topic))
 
     assert episode.manifest.streams[camera_topic.lstrip("/")].expected_hz == 30.0
     assert episode.manifest.streams[action_topic.lstrip("/")].expected_hz == 30.0

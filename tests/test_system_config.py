@@ -630,7 +630,7 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     )
 
 
-def test_rl100_site_overlay_changes_only_policy_timeline_and_camera_rates():
+def test_rl100_site_overlay_sets_30hz_rates_and_disables_desktop_viewer():
     default = load_system_config(_site())
     config = load_system_config(_rl100_site())
 
@@ -647,7 +647,19 @@ def test_rl100_site_overlay_changes_only_policy_timeline_and_camera_rates():
         name: stream["fps"]
         for name, stream in config.document["cameras"]["streams"].items()
     } == {"head": 30, "left_wrist": 30, "right_wrist": 30}
-    assert config.document["recording"] == default.document["recording"]
+    assert config.document["recording"]["live_rerun"] == {
+        **default.document["recording"]["live_rerun"],
+        "enabled": False,
+    }
+    assert {
+        key: value
+        for key, value in config.document["recording"].items()
+        if key != "live_rerun"
+    } == {
+        key: value
+        for key, value in default.document["recording"].items()
+        if key != "live_rerun"
+    }
 
 
 def test_system_config_rejects_non_executed_action_label(tmp_path):

@@ -12,6 +12,10 @@ overrides:
     camera_hz: 30.0
     policy_observation_hz: 30.0
     training_timeline_hz: 30.0
+  recording:
+    # The 5070 collection terminal currently has no graphical DISPLAY.
+    live_rerun:
+      enabled: false
   flexiv:
     policy_control:
       require_pedal: true

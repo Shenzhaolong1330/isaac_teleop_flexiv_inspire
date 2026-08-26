@@ -28,10 +28,11 @@ recording:
   # Start the desktop Rerun viewer alongside robot record.  It is read-only
   # and closes its ROS subscriptions when recording stops.
   live_rerun:
-    enabled: true
+    # This station is currently operated from a terminal without DISPLAY.
+    enabled: false
     viewer_port: 9876
     # Only the read-only desktop visualization is additionally downsampled.
-    # MCAP keeps each producer's configured dataset rate (camera is 15 Hz).
+    # MCAP keeps each producer's configured dataset rate (RL-100 uses 30 Hz).
     telemetry_hz: 5.0
     tactile_hz: 10.0
     image_hz: 10.0

@@ -8,6 +8,7 @@ reset motion is never part of a demonstration.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -130,6 +131,8 @@ class EpisodeController(Node):
             "ros_mcap_enabled": True,
             "deviceio_profile": "full",
             "record_only_while_pedal_pressed": False,
+            "camera_hz": 15.0,
+            "action_hz": 30.0,
             "home_result_timeout_s": 30.0,
             "recorder_state_timeout_s": 10.0,
             "control_authorization_refresh_s": 10.0,
@@ -245,6 +248,10 @@ class EpisodeController(Node):
             raise RuntimeError(
                 "control_authorization_refresh_s must be in [2,25]"
             )
+        for key in ("camera_hz", "action_hz"):
+            value = float(self.get_parameter(key).value)
+            if not math.isfinite(value) or value <= 0.0:
+                raise RuntimeError(f"{key} must be positive and finite")
 
     def _state_file(self) -> Path:
         return Path(self._required("runtime_dir")) / "episode-recorder-state.json"
@@ -306,6 +313,10 @@ class EpisodeController(Node):
             str(self.get_parameter("deviceio_mode").value),
             "--deviceio-profile",
             str(self.get_parameter("deviceio_profile").value),
+            "--expected-camera-hz",
+            str(float(self.get_parameter("camera_hz").value)),
+            "--expected-action-hz",
+            str(float(self.get_parameter("action_hz").value)),
             "--deviceio-socket",
             self._required("deviceio_socket"),
             "--control-state-file",

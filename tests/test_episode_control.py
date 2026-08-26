@@ -100,6 +100,8 @@ class _FakeController:
             "deviceio_profile": "training",
             "ros_mcap_enabled": False,
             "record_only_while_pedal_pressed": True,
+            "camera_hz": 30.0,
+            "action_hz": 30.0,
             "deviceio_socket": "/tmp/deviceio.sock",
             "runtime_dir": "/tmp/runtime",
         }
@@ -128,6 +130,8 @@ def test_episode_command_contains_configured_identity_prompt_and_internal_attemp
     assert command[command.index("--attempt") + 1] == "2"
     assert command[command.index("--task-name") + 1] == "red_block_pick"
     assert command[command.index("--deviceio-profile") + 1] == "training"
+    assert command[command.index("--expected-camera-hz") + 1] == "30.0"
+    assert command[command.index("--expected-action-hz") + 1] == "30.0"
     assert "--no-ros-mcap" in command
     assert "--record-only-while-pedal-pressed" in command
     assert command[command.index("--task-description") + 1] == (

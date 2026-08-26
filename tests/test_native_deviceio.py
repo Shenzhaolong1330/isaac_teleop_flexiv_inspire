@@ -128,7 +128,7 @@ def test_large_camera_record_exceeding_unix_datagram_limit_is_delivered(tmp_path
     ingress.close()
 
 
-def _episode(tmp_path: Path) -> EpisodeSession:
+def _episode(tmp_path: Path, **kwargs) -> EpisodeSession:
     tool = tmp_path / "tool.yaml"
     tool.write_text("schema_version: 1\ntool: test\n")
     digest = canonical_yaml_sha256(tool)
@@ -147,7 +147,23 @@ def _episode(tmp_path: Path) -> EpisodeSession:
         tool,
         event,
         deviceio_capture_layer="native-pre-dds",
+        **kwargs,
     )
+
+
+def test_episode_uses_configured_camera_and_action_rates(tmp_path):
+    camera_topic = "/camera/head/color/image_raw/compressed"
+    action_topic = "/control/sent_command"
+    episode = _episode(
+        tmp_path,
+        expected_hz={camera_topic.lstrip("/"): 30.0, action_topic.lstrip("/"): 30.0},
+    )
+    episode.submit(_envelope(1, camera_topic))
+    episode.submit(_envelope(1, action_topic))
+
+    assert episode.manifest.streams[camera_topic.lstrip("/")].expected_hz == 30.0
+    assert episode.manifest.streams[action_topic.lstrip("/")].expected_hz == 30.0
+    episode.abort(reason="test-complete")
 
 
 def test_native_ingress_writes_actual_deviceio_mcap_and_source_stats(tmp_path):

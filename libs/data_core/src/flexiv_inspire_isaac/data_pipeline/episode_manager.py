@@ -458,6 +458,7 @@ class EpisodeSession:
         record_ros_mcap: bool = True,
         deviceio_profile: str = "full",
         record_only_while_pedal_pressed: bool = False,
+        expected_hz: dict[str, float] | None = None,
     ) -> None:
         if camera_recording_mode != "jpeg":
             raise ValueError(
@@ -537,6 +538,7 @@ class EpisodeSession:
         self._deviceio_profile = deviceio_profile
         self._record_ros_mcap = record_ros_mcap
         self._record_only_while_pedal_pressed = bool(record_only_while_pedal_pressed)
+        self._expected_hz = {**EXPECTED_HZ, **(expected_hz or {})}
         # Start closed in motion-only mode. The first physical middle-pedal
         # press opens this gate through /teleop/deadman.
         self._motion_recording_enabled = not self._record_only_while_pedal_pressed
@@ -614,7 +616,7 @@ class EpisodeSession:
         name = envelope.topic.lstrip("/")
         with self._stats_lock:
             stats = self.manifest.streams.setdefault(
-                name, StreamStats(EXPECTED_HZ.get(name, 0.0))
+                name, StreamStats(self._expected_hz.get(name, 0.0))
             )
             stats.samples += 1
             stats.invalid += int(not envelope.valid)
@@ -715,7 +717,7 @@ class EpisodeSession:
         for topic, drops in recorder_stats["dropped_by_topic"].items():
             name = topic.lstrip("/")
             stats = self.manifest.streams.setdefault(
-                name, StreamStats(EXPECTED_HZ.get(name, 0.0))
+                name, StreamStats(self._expected_hz.get(name, 0.0))
             )
             stats.drops += int(drops)
         for stats in self.manifest.streams.values():
@@ -1113,6 +1115,8 @@ def _parse_args(argv=None):
     )
     parser.add_argument("--no-ros-mcap", action="store_true")
     parser.add_argument("--record-only-while-pedal-pressed", action="store_true")
+    parser.add_argument("--expected-camera-hz", type=float, default=15.0)
+    parser.add_argument("--expected-action-hz", type=float, default=0.0)
     parser.add_argument("--extra-topic", action="append", default=[])
     parser.add_argument("--duration-s", type=float, default=0.0)
     parser.add_argument("--dataset-name", default="")
@@ -1218,6 +1222,16 @@ def main(argv=None) -> int:
             record_ros_mcap=not options.no_ros_mcap,
             deviceio_profile=options.deviceio_profile,
             record_only_while_pedal_pressed=(options.record_only_while_pedal_pressed),
+            expected_hz={
+                "camera/head/color/image_raw/compressed": options.expected_camera_hz,
+                "camera/left_wrist/color/image_raw/compressed": (
+                    options.expected_camera_hz
+                ),
+                "camera/right_wrist/color/image_raw/compressed": (
+                    options.expected_camera_hz
+                ),
+                "control/sent_command": options.expected_action_hz,
+            },
         )
         if options.deviceio_mode == "native":
             ingress = NativeDeviceIOIngress(

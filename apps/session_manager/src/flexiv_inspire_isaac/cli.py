@@ -1251,6 +1251,10 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         "record_only_while_pedal_pressed:="
         + str(bool(recording["record_only_while_pedal_pressed"])).lower(),
         "-p",
+        f"camera_hz:={float(root['sampling']['camera_hz'])}",
+        "-p",
+        f"action_hz:={float(root['sampling']['teleop_command_hz'])}",
+        "-p",
         f"auto_start:={str(bool(recording.get('auto_start', True))).lower()}",
         "-p",
         f"auto_authorize_home:={str(bool(recording.get('auto_authorize_home', True))).lower()}",

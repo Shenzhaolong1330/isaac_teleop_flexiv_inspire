@@ -717,16 +717,16 @@ def test_system_config_rejects_unknown_quest_input_provider(tmp_path):
         load_system_config(path)
 
 
-def test_system_config_rejects_non_boolean_xr_record_switch(tmp_path):
+def test_system_config_rejects_non_boolean_xr_switch(tmp_path):
     data = _example_document()
-    data["xr_video"]["auto_start_with_record"] = "false"
+    data["xr_video"]["enabled"] = "false"
     path = tmp_path / "bad-xr-switch.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
     try:
         load_system_config(path)
     except SystemConfigError as exc:
-        assert "xr_video.auto_start_with_record must be boolean" in str(exc)
+        assert "xr_video.enabled must be boolean" in str(exc)
     else:
         raise AssertionError("string XR video switch was accepted")
 

@@ -1782,16 +1782,10 @@ def _parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--dry-run", action="store_true", help="render and print commands only"
     )
-    xr_group = record.add_mutually_exclusive_group()
-    xr_group.add_argument(
-        "--with-xr",
+    record.add_argument(
+        "--xr",
         action="store_true",
         help="start the optional IsaacTeleop Quest video display",
-    )
-    xr_group.add_argument(
-        "--no-xr",
-        action="store_true",
-        help="do not start Quest video; controller teleoperation remains enabled",
     )
     policy_serve = sub.add_parser(
         "policy-serve",
@@ -2013,10 +2007,7 @@ def _main(args, config) -> int:
     if args.operation == "record":
         rendered = render_runtime_configs(config, runtime / config.sha256[:12])
         xr_video_enabled = bool(config.document["xr_video"]["enabled"])
-        default_xr = bool(config.document["xr_video"]["auto_start_with_record"])
-        include_xr = xr_video_enabled and (
-            args.with_xr or (default_xr and not args.no_xr)
-        )
+        include_xr = xr_video_enabled and args.xr
         commands = _commands(config, rendered, include_xr_receiver=include_xr)
         if args.dry_run:
             print(json.dumps(commands, indent=2))

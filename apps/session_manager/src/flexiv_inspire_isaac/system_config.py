@@ -148,9 +148,8 @@ def load_system_config(path: str | Path) -> SystemConfig:
             "session.runtime_root and session.sessions_root are required"
         )
     xr = _mapping(root.get("xr_video"), "xr_video")
-    for key in ("enabled", "auto_start_with_record"):
-        if not isinstance(xr.get(key), bool):
-            raise SystemConfigError(f"xr_video.{key} must be boolean")
+    if not isinstance(xr.get("enabled"), bool):
+        raise SystemConfigError("xr_video.enabled must be boolean")
     sampling = _mapping(root.get("sampling"), "sampling")
     for key in (
         "arm_observation_hz",

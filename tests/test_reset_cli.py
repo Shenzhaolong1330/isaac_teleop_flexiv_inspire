@@ -243,6 +243,11 @@ def test_reset_parser_needs_no_confirmation_argument():
     assert args.preview_seconds == 2.0
 
 
+def test_record_parser_only_enables_xr_with_flag():
+    assert cli._parser().parse_args(["record"]).xr is False
+    assert cli._parser().parse_args(["record", "--xr"]).xr is True
+
+
 def test_background_ros_services_get_rclpy_without_parent_ros_setup(monkeypatch):
     # A user may have activated the venv directly, which gives the prompt
     # ``(ros-py312)`` but omits the setup.bash PYTHONPATH overlay.

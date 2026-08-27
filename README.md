@@ -107,8 +107,7 @@ recording:
 
 ```bash
 robot record                 # 默认不启动 Quest 视频
-robot record --with-xr       # 同时在 Quest/桌面启动相机显示
-robot record --no-xr         # 明确关闭 Quest 视频；控制器输入仍可用
+robot record --xr            # 同时在 Quest/桌面启动相机显示
 ```
 
 录制期间：
@@ -267,7 +266,7 @@ robot convert --conversion-config config/conversion_lerobot_full.yaml
 ```bash
 robot xr-doctor       # 检查当前 Quest 输入后端和 USB 连接
 robot xr-view         # 只启动 Quest/桌面相机显示
-robot record --with-xr
+robot record --xr
 ```
 
 `oculus_reader` 只负责双腕位置姿态和按键，MANUS 仍只负责手指。`xr-view` 是

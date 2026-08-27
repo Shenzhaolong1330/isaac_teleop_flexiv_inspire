@@ -1,13 +1,11 @@
-# 日常数采只改这个文件；启动命令不接收参数。
 recording:
   # 输出目录为 <output_root>/<dataset_name>/raw/
   # <task_name>_episode_001_YYYYMMDD_HHMM/；同级 lerobot/ 存放转换结果。
   dataset_name: open_boxes_first_try
-  # 短任务名用于新 episode 目录命名；修改它不会重命名历史数据。
   task_name: open_boxes
   episode_count: 20
   output_root: sessions
-  # 写入每条 manifest，并默认作为 LeRobot/VLA 的 task prompt。
+
   task_description: "Use both thumbs to open the latches on both sides of the box, then remove the lid."
   camera_recording_mode: jpeg
   deviceio_mode: native

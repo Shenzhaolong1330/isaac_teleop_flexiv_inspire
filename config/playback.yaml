@@ -22,8 +22,8 @@ visualize:
   pointcloud_hz: 2.0
 
 replay:
-  # 设为 true 后 `robot replay` 会执行当前选中的 episode。
-  enabled: true
+  # 真机回放必须由操作者在执行前显式开启。
+  enabled: false
   # 保留为兼容旧配置；无需每次在终端输入确认词。
   operator_confirmation: "FLEXIV-REPLAY-EXECUTE"
   speed: 1.0                 # hardware replay cannot exceed recorded speed

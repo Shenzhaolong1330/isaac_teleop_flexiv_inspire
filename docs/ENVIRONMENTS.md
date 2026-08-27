@@ -22,7 +22,7 @@ overlay。
 CUDA 12.8 没有改变系统默认 CUDA 12.0。验证命令：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 ./scripts/verify_host_cuda.sh
 ```
 
@@ -39,7 +39,7 @@ cd /home/hb/isaac_teleop_flexiv_inspire
 `requirements/*.lock`。重建方式：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 ./scripts/env/create_envs.sh
 ```
 
@@ -53,10 +53,10 @@ Python 包。RDK 环境安装 `core` 和 `rdk_daemon`；ROS、Isaac、Data 环�
 每个新 shell 只 source 一个目标环境：
 
 ```bash
-source /home/hb/isaac_teleop_flexiv_inspire/scripts/env/activate_isaac.sh
-source /home/hb/isaac_teleop_flexiv_inspire/scripts/env/activate_ros.sh
-source /home/hb/isaac_teleop_flexiv_inspire/scripts/env/activate_rdk.sh
-source /home/hb/isaac_teleop_flexiv_inspire/scripts/env/activate_data.sh
+source /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/scripts/env/activate_isaac.sh
+source /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/scripts/env/activate_ros.sh
+source /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/scripts/env/activate_rdk.sh
+source /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/scripts/env/activate_data.sh
 ```
 
 激活脚本设置 `PYTHONNOUSERSITE=1`。切换环境时会先清理 Python、ROS、

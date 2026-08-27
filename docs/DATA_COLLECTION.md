@@ -19,7 +19,7 @@ recording:
 现场的 local-permission/collision-clear 仍有效后，在机器人本机交互终端只需：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 robot record
 ```
 
@@ -53,6 +53,8 @@ sessions/pick_place_demo/
       ros_mcap/
     episode_000002_attempt_01_20260801_0004/
       ...
+  rl100/
+    joint_proprio_cartesian_v1.zarr/
   lerobot/
     episode_000001_attempt_01_20260731_2359/
       sent_command/
@@ -64,24 +66,34 @@ sessions/pick_place_demo/
 如果同一分钟内再次创建完全相同的 episode/attempt，录制会拒绝覆盖已有目录。
 
 转换选择由 `config/conversion.yaml` 的 `source.episode` 决定，并自动使用隔离的
-data 环境。默认 `all` 会批量转换所有已完成 episode；已有非空输出自动跳过：
+data 环境。输入数据集和输出目录默认从 `recording.yaml` 推导；`all` 会把所有已完成
+episode 合并为 RL-100 训练使用的 Zarr，已有非空输出不会被覆盖：
 
 ```bash
 robot convert
-robot convert --action-view absolute_joint_position
-robot convert --action-view absolute_cartesian_pose
 ```
 
-输入 episode、输出目录、动作视图以及最终写进 LeRobot 的字段都在
-`config/conversion.yaml` 配置。`lerobot_export.fields` 是字段白名单；当前还会
-把头部相机原始 Z16 深度、深度比例和内参写进 Parquet。三种动作视图分别是
-30 维实际下发命令、14 维双臂绝对关节位置和 18 维 world 下双臂绝对 EE 位姿。
-输出写入
-`sessions/<dataset>/lerobot/<episode>/<action-view>/`，与原始 MCAP 的 `raw/`
-平行；已有非空目录不会被覆盖。已有旧的平铺 episode 仍可被转换和回放。
+默认输出写入 `sessions/<dataset>/rl100/joint_proprio_cartesian_v1.zarr`，包含
+26D 本体状态、24D 策略动作和三路 RGB。时间轴来自实际下发的
+`control/sent_command`，图像和状态按因果关系对齐，不跨踏板空档插值。
+
+需要导出头部深度、触觉、高频关节历史或其他动作视图时，显式使用完整 LeRobot
+配置：
+
+```bash
+robot convert --conversion-config config/conversion_lerobot_full.yaml
+robot convert --conversion-config config/conversion_lerobot_full.yaml \
+  --action-view absolute_joint_position
+robot convert --conversion-config config/conversion_lerobot_full.yaml \
+  --action-view absolute_cartesian_pose
+```
+
+`conversion_lerobot_full.yaml` 的 `lerobot_export.fields` 是字段白名单。三种动作视图
+分别是 30D 实际下发命令、14D 双臂绝对关节位置和 18D world 下双臂绝对 EE
+位姿。输出与原始 MCAP 的 `raw/` 平行，已有非空目录不会被覆盖。
 
 需要把多条轨迹合并成一个可直接训练的 LeRobot dataset 时，使用显式 profile
-配置；这不会改变上面的默认转换：
+配置：
 
 ```bash
 # 旧 dual_arm_teleop 的 38D state / 24D action 兼容格式

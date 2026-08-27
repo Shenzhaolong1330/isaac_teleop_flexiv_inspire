@@ -6,7 +6,8 @@ cameras:
   depth_width: 424
   depth_height: 240
   depth_fps: 15
-  pointcloud_enabled: true
+  # No stream records point clouds in the RGB-D MVP. Enable per stream when needed.
+  pointcloud_enabled: false
   pointcloud_stride: 2
   streams:
     # Fill these optional extrinsics paths after running camera calibration.

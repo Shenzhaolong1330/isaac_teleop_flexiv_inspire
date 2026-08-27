@@ -12,7 +12,7 @@
 数据集保持在：
 
 ```text
-/home/hb/isaac_teleop_flexiv_inspire/sessions/pick_place_demo/lerobot_merged/dual_arm_lerobot_v1
+/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/sessions/pick_place_demo/lerobot_merged/dual_arm_lerobot_v1
 ```
 
 重新转换新版本时仍在本仓库运行：
@@ -47,7 +47,7 @@ checkpoint 只写入 client 仓库：
 ## 3. RPC server（本仓库）
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source scripts/env/activate_ros.sh
 robot policy-serve
 ```

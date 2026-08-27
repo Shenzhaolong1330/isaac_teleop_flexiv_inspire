@@ -11,7 +11,7 @@
 它已实体复制到：
 
 ```text
-/home/hb/isaac_teleop_flexiv_inspire/vendor/ManusSDK
+/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/vendor/ManusSDK
 ```
 
 `vendor/` 已加入项目 `.gitignore`。目标目录不是软链接，目录内也没有
@@ -24,15 +24,15 @@
 Isaac Teleop 1.3.131 的官方 MANUS CMake 目标：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source scripts/env/activate_isaac.sh
 
 cmake -S third_party/IsaacTeleop -B build/manus-isaac -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/home/hb/isaac_teleop_flexiv_inspire/third_party/IsaacTeleop/install/manus-isaac \
+  -DCMAKE_INSTALL_PREFIX=/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/third_party/IsaacTeleop/install/manus-isaac \
   -DISAAC_TELEOP_PYTHON_VERSION=3.12 \
   -DUV_EXECUTABLE=/home/hb/.local/bin/uv \
-  -DMANUS_SDK_ROOT=/home/hb/isaac_teleop_flexiv_inspire/vendor/ManusSDK \
+  -DMANUS_SDK_ROOT=/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/vendor/ManusSDK \
   -DMANUS_ADD_SDK_TO_BUILD_RPATH=ON \
   -DBUILD_PLUGINS=ON \
   -DBUILD_PLUGIN_OAK_CAMERA=OFF \

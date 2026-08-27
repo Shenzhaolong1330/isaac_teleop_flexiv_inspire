@@ -23,15 +23,15 @@ from flexiv_inspire_isaac.system_config import (
 
 
 def _example() -> Path:
-    return Path(__file__).parents[1] / "config" / "system.example.yaml"
+    return Path(__file__).parent / "system_mock.yaml"
+
+
+def _example_document() -> dict:
+    return load_system_config(_example()).document
 
 
 def _site() -> Path:
     return Path(__file__).parents[1] / "config" / "site.yaml"
-
-
-def _rl100_site() -> Path:
-    return Path(__file__).parents[1] / "config" / "site_rl100_dp30.yaml"
 
 
 def _policy_server() -> Path:
@@ -40,7 +40,7 @@ def _policy_server() -> Path:
 
 def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     config = load_system_config(_site())
-    assert config.document["flexiv"]["policy_control"]["require_pedal"] is False
+    assert config.document["flexiv"]["policy_control"]["require_pedal"] is True
     rendered = render_runtime_configs(config, tmp_path / "rendered")
     settings = _load_policy_server_config(config, _policy_server())
     commands = _policy_serve_commands(config, rendered, settings)
@@ -51,7 +51,7 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
         "arm_hz": 200.0,
         "hand_hz": 200.0,
         "tactile_hz": 15.0,
-        "camera_hz": 15.0,
+        "camera_hz": 30.0,
         "action_hz": 30.0,
     }
     assert settings["auto_reset_before_serve"] is True
@@ -75,8 +75,8 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     assert any("flexiv_inspire_control.node" in command for command in joined)
     assert any("flexiv-inspire-camera-node" in command for command in joined)
     assert any("flexiv-inspire-dftp-node" in command for command in joined)
-    assert not any("flexiv-inspire-pedal-router" in command for command in joined)
-    assert any("rerun_viz.cli" in command for command in joined)
+    assert any("flexiv-inspire-pedal-router" in command for command in joined)
+    assert not any("rerun_viz.cli" in command for command in joined)
     assert any("policy_api.ros_adapter" in command for command in joined)
     forbidden = (
         "teleop_input_node",
@@ -212,6 +212,9 @@ def test_conversion_manifest_discovers_raw_and_legacy_episodes(tmp_path) -> None
     ) == legacy / "manifest.json"
     assert _conversion_manifests(
         Config(), {"dataset_root": str(dataset), "episode": "all"}
+    ) == [legacy / "manifest.json", raw / "manifest.json"]
+    assert _conversion_manifests(
+        Config(), {"dataset_root": "", "episode": "all"}
     ) == [legacy / "manifest.json", raw / "manifest.json"]
 
 
@@ -556,9 +559,9 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     assert config.document["sampling"]["arm_observation_hz"] == 300.0
     assert config.document["sampling"]["hand_state_hz"] == 200.0
     assert config.document["sampling"]["tactile_hz"] == 15.0
-    assert config.document["sampling"]["camera_hz"] == 15.0
+    assert config.document["sampling"]["camera_hz"] == 30.0
     assert config.document["recording"]["live_rerun"] == {
-        "enabled": True,
+        "enabled": False,
         "viewer_port": 9876,
         "telemetry_hz": 5.0,
         "tactile_hz": 10.0,
@@ -605,11 +608,11 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
 
     rendered = render_runtime_configs(config, tmp_path)
     camera = yaml.safe_load(rendered["camera.yaml"].read_text())
-    assert camera["cameras"]["head"]["fps"] == 15
-    assert camera["cameras"]["head"]["recording_hz"] == 15.0
-    assert camera["cameras"]["left_wrist"]["recording_hz"] == 15.0
+    assert camera["cameras"]["head"]["fps"] == 30
+    assert camera["cameras"]["head"]["recording_hz"] == 30.0
+    assert camera["cameras"]["left_wrist"]["recording_hz"] == 30.0
     lerobot = yaml.safe_load(rendered["lerobot_export.yaml"].read_text())
-    assert lerobot["timeline"]["fps"] == 15.0
+    assert lerobot["timeline"]["fps"] == 30.0
     assert lerobot["high_rate_arm_samples_per_frame"] == 20
     dftp = yaml.safe_load(rendered["dftp.yaml"].read_text())[
         "flexiv_inspire_dftp_driver"
@@ -624,15 +627,14 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     assert "--hardware" in rdk
     assert "--allow-hardware-writes" in rdk
     assert "--local-permit-file" in rdk
-    assert any(
+    assert not any(
         "flexiv_inspire_isaac.rerun_viz.cli" in command
         for command in _commands(config, rendered, include_xr_receiver=False)
     )
 
 
-def test_rl100_site_overlay_sets_30hz_rates_and_disables_desktop_viewer():
-    default = load_system_config(_site())
-    config = load_system_config(_rl100_site())
+def test_site_uses_validated_30hz_rates_and_disables_desktop_viewer():
+    config = load_system_config(_site())
 
     assert config.document["sampling"]["teleop_command_hz"] == 30.0
     assert config.document["sampling"]["camera_hz"] == 30.0
@@ -647,23 +649,11 @@ def test_rl100_site_overlay_sets_30hz_rates_and_disables_desktop_viewer():
         name: stream["fps"]
         for name, stream in config.document["cameras"]["streams"].items()
     } == {"head": 30, "left_wrist": 30, "right_wrist": 30}
-    assert config.document["recording"]["live_rerun"] == {
-        **default.document["recording"]["live_rerun"],
-        "enabled": False,
-    }
-    assert {
-        key: value
-        for key, value in config.document["recording"].items()
-        if key != "live_rerun"
-    } == {
-        key: value
-        for key, value in default.document["recording"].items()
-        if key != "live_rerun"
-    }
+    assert config.document["recording"]["live_rerun"]["enabled"] is False
 
 
 def test_system_config_rejects_non_executed_action_label(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     data["sampling"]["action_label"] = "safe_command"
     path = tmp_path / "bad.yaml"
     path.write_text(yaml.safe_dump(data))
@@ -713,7 +703,7 @@ def test_legacy_config_without_quest_provider_keeps_isaac_openxr(tmp_path):
 
 
 def test_system_config_rejects_unknown_quest_input_provider(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     root = Path(__file__).parents[1]
     data["flexiv"]["rdk_config"] = str(
         root / "apps/flexiv_daemon/config/robots.yaml"
@@ -728,7 +718,7 @@ def test_system_config_rejects_unknown_quest_input_provider(tmp_path):
 
 
 def test_system_config_rejects_non_boolean_xr_record_switch(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     data["xr_video"]["auto_start_with_record"] = "false"
     path = tmp_path / "bad-xr-switch.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
@@ -742,7 +732,7 @@ def test_system_config_rejects_non_boolean_xr_record_switch(tmp_path):
 
 
 def test_system_config_rejects_invalid_joint_limits(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     data["flexiv"]["safety"]["joint_lower_limits_rad"][0] = 3.0
     path = tmp_path / "bad-limits.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
@@ -755,7 +745,7 @@ def test_system_config_rejects_invalid_joint_limits(tmp_path):
 
 
 def test_system_config_rejects_command_limit_above_daemon_ceiling(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     daemon_source = Path(__file__).parents[1] / "apps/flexiv_daemon/config/robots.yaml"
     tool_source = (
         Path(__file__).parents[1] / "apps/flexiv_daemon/config/tool_payload.yaml"
@@ -789,7 +779,7 @@ def test_system_config_rejects_command_limit_above_daemon_ceiling(tmp_path):
 
 
 def test_system_config_rejects_missing_recording_prompt(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     root = Path(__file__).parents[1]
     data["flexiv"]["rdk_config"] = str(
         root / "apps/flexiv_daemon/config/robots.yaml"
@@ -808,7 +798,7 @@ def test_system_config_rejects_missing_recording_prompt(tmp_path):
 
 
 def test_system_config_rejects_invalid_recording_task_name(tmp_path):
-    data = yaml.safe_load(_example().read_text())
+    data = _example_document()
     root = Path(__file__).parents[1]
     data["flexiv"]["rdk_config"] = str(
         root / "apps/flexiv_daemon/config/robots.yaml"

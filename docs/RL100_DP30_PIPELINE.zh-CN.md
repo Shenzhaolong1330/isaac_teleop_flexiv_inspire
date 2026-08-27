@@ -9,8 +9,8 @@ RL-100 行为克隆（BC）-> 离线回放检查 -> 影子推理。真实策略�
 
 已经实现：
 
-- 使用现有 `robot record` 采集双臂、双手、三路 RGB、头部深度/点云和触觉；
-- 可选的 `site_rl100_dp30.yaml` 将训练主时间轴、三路 RGB 和遥操目标设为 30 Hz；
+- 使用现有 `robot record` 采集双臂、双手、三路 RGB、头部深度和触觉；
+- 默认 `site.yaml` 将训练主时间轴、三路 RGB 和遥操目标设为 30 Hz；
 - Quest 原始追踪、机械臂/手状态和底层伺服仍保持各自高频率；
 - 以真实通过安全链并下发的 `/control/sent_command` 为动作时间轴；
 - 从多个完整 episode 的 MCAP 合并导出 RL-100 Zarr；
@@ -22,7 +22,7 @@ RL-100 行为克隆（BC）-> 离线回放检查 -> 影子推理。真实策略�
 当前明确不包含：
 
 - 触觉作为首版 DP 输入；触觉仍完整保留在原始 MCAP；
-- 深度或融合点云作为首版 DP 输入；头部深度/点云仍保留在 MCAP；
+- 深度或融合点云作为首版 DP 输入；头部原始深度仍保留在 MCAP，可离线生成点云；
 - 三相机点云融合；三路相机在 MVP 中作为三个独立 RGB 视角；
 - 自动生成任务奖励。遥操作数据没有天然 reward，必须人工或由后续任务判定器标注；
 - 已验收的真机策略运动。代码默认影子模式，真实执行必须单独完成分阶段验收；
@@ -40,7 +40,7 @@ RL-100 行为克隆（BC）-> 离线回放检查 -> 影子推理。真实策略�
 数采环境不是 Conda，而是仓库自带的虚拟环境：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source scripts/env/activate_ros.sh
 ```
 
@@ -49,7 +49,7 @@ Conda 环境 `RL100`，避免 ROS 与训练依赖互相污染。
 
 ## 3. 频率设计
 
-选择 `config/site_rl100_dp30.yaml` 后：
+默认 `config/site.yaml` 使用以下频率：
 
 | 信号 | 频率 | 用途 |
 |---|---:|---|
@@ -112,38 +112,19 @@ MCAP 原生 30D -> 每臂 Rotation-6D 转 rotvec -> 策略 24D
 先只做配置检查和启动预览，不连接或移动机器人：
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source scripts/env/activate_ros.sh
-robot --config config/site_rl100_dp30.yaml validate
-robot --config config/site_rl100_dp30.yaml record --dry-run
+robot validate
+robot record --dry-run
 ```
 
-第一次现场验收建议使用独立的一条轨迹 smoke 配置。它继承相同硬件、标定、
-30 Hz 与安全设置，但固定写入 `sessions/rl100_dp30_smoke`，保存一条 episode 后
-自动退出，不会混入正式任务数据：
-
-```bash
-robot --config config/site_rl100_dp30_smoke.yaml validate
-robot --config config/site_rl100_dp30_smoke.yaml record --dry-run --no-xr
-# 下面这条会执行 F/T 清零和配置的 Home，只能在现场确认安全后运行。
-robot --config config/site_rl100_dp30_smoke.yaml record --no-xr
-```
-
-至少持续踩住中踏板并缓慢操作双臂和双手 5 秒，再松开中踏板并踩右踏板提交。
-对应的 smoke 数据转换命令为：
-
-```bash
-robot --config config/site_rl100_dp30_smoke.yaml convert \
-  --conversion-config config/conversion_rl100_dp30_smoke.yaml
-```
-
-转换通过后再编辑 `config/recording.yaml` 中的正式任务名、描述和 episode 数量，
-使用下面的正式 profile 采集训练示教。
+Smoke 验收已经完成，独立 Smoke 配置已移除。开始新任务前只需编辑
+`config/recording.yaml` 中的正式任务名、描述和 episode 数量。
 
 真机现场确认安全后才运行：
 
 ```bash
-robot --config config/site_rl100_dp30.yaml record
+robot record
 ```
 
 录制期间脚踏语义保持现有实现：
@@ -163,11 +144,10 @@ robot --config config/site_rl100_dp30.yaml record
 
 ## 6. 转为 RL-100 Zarr
 
-示例配置默认读取 `sessions/open_boxes_first_try` 下所有已完成 episode：
+默认从 `recording.yaml` 推导当前数据集，并读取其中所有已完成 episode：
 
 ```bash
-robot --config config/site_rl100_dp30.yaml convert \
-  --conversion-config config/conversion_rl100_dp30.yaml
+robot convert
 ```
 
 也可用 `--manifest` 只转换一条，或用 `--output-root` 指定新的空目录。转换器拒绝：
@@ -233,13 +213,13 @@ RL-100 仓库内的 `FLEXIV_DP30.zh-CN.md` 给出环境、训练和推理命令�
 策略部署仍由本仓库启动唯一硬件 server：
 
 ```bash
-robot --config config/site_rl100_dp30.yaml policy-serve --no-reset
+robot policy-serve --no-reset
 ```
 
 `--no-reset` 只适合不允许运动的影子诊断。正式运动前需去掉它并在现场完成 Reset、
 Home、方向、单臂小增量、双臂、双手、踏板、TTL、断连和急停验收。
 
-30 Hz profile 强制 `policy_control.require_pedal: true`。即使 RL-100 客户端使用真实执行
+默认 30 Hz site 强制 `policy_control.require_pedal: true`。即使 RL-100 客户端使用真实执行
 参数，server 仍要求当前 session、本地授权、物理中踏板、lease、deadman、新鲜 TTL、
 健康硬件和有效动作。客户端退出、断网、动作过期或踏板松开都会进入 hold。
 

@@ -1,0 +1,47 @@
+# Safe composed fixture for configuration and rendering tests.
+schema_version: 1
+includes:
+  - ../config/hardware.yaml
+  - ../config/sensors.yaml
+  - ../config/recording.yaml
+  - ../config/runtime.yaml
+overrides:
+  flexiv:
+    policy_control:
+      require_pedal: true
+    home:
+      lift:
+        parallel: false
+  inspire:
+    left_model: rh56dftp_2
+    right_model: rh56dftp_2
+    hardware_write_enabled: false
+    reset:
+      enabled: false
+  cameras:
+    pointcloud_enabled: true
+    streams:
+      head:
+        recording:
+          pointcloud: true
+      left_wrist:
+        recording:
+          depth: true
+      right_wrist:
+        recording:
+          depth: true
+  xr_video:
+    transport: lan
+    wifi_connection: Deepybo-Prime
+    keyframe_interval_frames: 15
+  teleop:
+    manus_calibration: ""
+    control_enabled: false
+  recording:
+    dataset_name: example_dataset
+    task_name: pick_place
+    episode_count: 10
+    task_description: "Pick up the object and place it in the target area."
+    auto_reset_before_record: false
+  commands:
+    rdk_daemon: [flexiv-rdk-daemon, --mock]

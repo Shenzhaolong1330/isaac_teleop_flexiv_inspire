@@ -2462,34 +2462,11 @@ def _episode_manifest_paths(dataset_root: Path) -> list[Path]:
     return sorted(paths)
 
 
-def _latest_completed_manifest(config) -> Path:
+def _recording_dataset_root(config) -> Path:
     recording = config.document["recording"]
-    dataset_root = config.resolve(recording["output_root"]) / str(
+    return config.resolve(str(recording.get("output_root", "sessions"))) / str(
         recording["dataset_name"]
     )
-    if not dataset_root.is_dir():
-        raise FileNotFoundError(f"数据集目录不存在: {dataset_root}")
-    candidates: list[tuple[tuple[int, int, int], Path]] = []
-    for path in _episode_manifest_paths(dataset_root):
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(document, dict) or not bool(document.get("completed", False)):
-            continue
-        candidates.append(
-            (
-                (
-                    int(document.get("episode_index", 0)),
-                    int(document.get("attempt", 0)),
-                    path.stat().st_mtime_ns,
-                ),
-                path,
-            )
-        )
-    if not candidates:
-        raise FileNotFoundError(f"没有已完成 episode: {dataset_root}")
-    return max(candidates, key=lambda item: item[0])[1]
 
 
 def _conversion_manifests(config, source: dict) -> list[Path]:
@@ -2500,9 +2477,11 @@ def _conversion_manifests(config, source: dict) -> list[Path]:
             raise FileNotFoundError(f"manifest 不存在: {path}")
         return [path]
     dataset_root_raw = str(source.get("dataset_root", "")).strip()
-    if not dataset_root_raw:
-        return [_latest_completed_manifest(config)]
-    dataset_root = config.resolve(dataset_root_raw)
+    dataset_root = (
+        config.resolve(dataset_root_raw)
+        if dataset_root_raw
+        else _recording_dataset_root(config)
+    )
     if not dataset_root.is_dir():
         raise FileNotFoundError(f"数据集目录不存在: {dataset_root}")
     selector = str(source.get("episode", "latest")).strip() or "latest"
@@ -2597,16 +2576,19 @@ def _run_convert(config, args) -> int:
     episode_subdirectory = bool(output.get("episode_subdirectory", True))
     configured_root = str(output.get("root", "")).strip()
     explicit_output_root = str(args.output_root).strip()
+    dataset_root = _recording_dataset_root(config)
+    default_output_root = (
+        dataset_root / "rl100" / f"{profile or 'dataset'}.zarr"
+        if output_format == "rl100_zarr"
+        else dataset_root / "lerobot"
+    )
     base = (
         config.resolve(explicit_output_root)
         if explicit_output_root
         else (
             config.resolve(configured_root)
             if configured_root
-            else root
-            / "sessions"
-            / dataset_name
-            / ("rl100" if output_format == "rl100_zarr" else "lerobot")
+            else default_output_root
         )
     )
     if len(manifests) > 1 and not episode_subdirectory and not profile:

@@ -70,13 +70,23 @@ def test_native_fixture_locks_current_30d_wire_order() -> None:
     ]
 
 
-def test_default_conversion_config_does_not_enable_new_profile() -> None:
-    config = yaml.safe_load((ROOT / "config" / "conversion.yaml").read_text())
+def test_full_lerobot_conversion_does_not_enable_new_profile() -> None:
+    config = yaml.safe_load(
+        (ROOT / "config" / "conversion_lerobot_full.yaml").read_text()
+    )
     export = config["lerobot_export"]
 
     assert "profile" not in export
     assert export["action"]["view"] == "sent_command"
     assert "observation.arm_pose" in export["fields"]
+
+
+def test_default_conversion_targets_rl100_zarr() -> None:
+    config = yaml.safe_load((ROOT / "config" / "conversion.yaml").read_text())
+
+    assert config["output"]["format"] == "rl100_zarr"
+    assert config["rl100_zarr_export"]["profile"] == "joint_proprio_cartesian_v1"
+    assert config["rl100_zarr_export"]["timeline"]["fps"] == 30.0
 
 
 @pytest.mark.parametrize(

@@ -34,8 +34,9 @@ dataset:
 
 Replay 只读取 `/control/sent_command`，即录制时真正通过安全检查并被控制桥确认发送的动作。它不会执行 `ros2 bag play`，也不会把历史 session、时间戳或 TTL 原样发回系统；每一帧都会重建为当前 session 的新鲜 `replay` 指令，并按照原采样间隔执行。
 
-默认配置已经启用 replay，直接执行 `robot replay` 即可。它仍会自动
-Home，并要求脚踏持续踩住；松开脚踏或 Ctrl-C 都会立即 hold。
+默认配置关闭 replay。确认数据和工作区安全后，先将 `config/playback.yaml` 中的
+`replay.enabled` 显式改为 `true`，再执行 `robot replay`。它仍会自动 Home，并要求
+脚踏持续踩住；松开脚踏或 Ctrl-C 都会立即 hold。
 
 启动前还必须满足：
 

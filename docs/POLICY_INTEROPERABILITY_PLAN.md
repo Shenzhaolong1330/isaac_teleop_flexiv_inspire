@@ -228,7 +228,7 @@ features，因此训练配置只需指向这个 dataset root，不再手写 obse
 ```yaml
 train:
   dataset:
-    root: /home/hb/isaac_teleop_flexiv_inspire/sessions/pick_place_demo/lerobot_merged
+    root: /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/sessions/pick_place_demo/lerobot_merged
 ```
 
 数据集 fps 必须是真实策略时间线。当前新数据是 15 Hz；旧 30 Hz 数据不能在未显式
@@ -265,8 +265,8 @@ P3 的 Python 3.10+ 可移植 client 与 `isaac_flexiv_rpc` shadow Robot 已完�
 环境 gRPC snapshot 和 TLS 连接已验证；长时间 shadow/checkpoint 现场验收仍待执行。
 P4 的 v2 action stream、共享 v1 lease/TTL/sequence 安全入口和显式 LeRobot
 guarded-action 模式已实现，并已通过真实 loopback gRPC 往返；默认仍为 shadow，
-真机单臂/双臂/双手现场验收尚未执行。所有新能力均为显式 opt-in，默认
-`config/conversion.yaml`、v1 RPC、shadow 配置和旧直连 Robot 未改。
+真机单臂/双臂/双手现场验收尚未执行。v1 RPC、shadow 配置和旧直连 Robot 未改；
+完整 LeRobot 兼容导出保留在 `config/conversion_lerobot_full.yaml`。
 
 ### P-1：兼容基线
 

@@ -4,7 +4,7 @@
 自动管理。后面的分阶段流程保留给首次验收和故障排查。
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source scripts/env/activate_ros.sh
 robot reset
 robot record
@@ -41,7 +41,7 @@ shadow/只读阶段。
 ## 1. 一次性环境、生成代码与构建
 
 ```bash
-export ROOT=/home/hb/isaac_teleop_flexiv_inspire
+export ROOT=/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 cd "$ROOT"
 
 ./scripts/verify_host_cuda.sh
@@ -88,7 +88,7 @@ RDK 工具审计、MANUS 标定等需要独立哈希的记录由它引用。`ren
 进程级配置生成到本会话的 runtime 目录：
 
 ```bash
-export ROOT=/home/hb/isaac_teleop_flexiv_inspire
+export ROOT=/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source "$ROOT/scripts/env/activate_ros.sh"
 flexiv-inspire --config "$ROOT/config/site.yaml" validate
 flexiv-inspire --config "$ROOT/config/site.yaml" render
@@ -135,7 +135,7 @@ flexiv-rdk-daemon \
 在一个本地 shell 创建会话变量文件，随后每个终端都 source 同一文件：
 
 ```bash
-export ROOT=/home/hb/isaac_teleop_flexiv_inspire
+export ROOT=/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source "$ROOT/scripts/env/activate_ros.sh"
 export SESSION_ID="$(python -c 'from flexiv_inspire_isaac.system_config import load_system_config; print(load_system_config("config/site.yaml").document["session"]["id"])')"
 export RUNTIME_DIR="$(python -c 'from flexiv_inspire_isaac.system_config import load_system_config; print(load_system_config("config/site.yaml").document["session"]["runtime_root"])')"
@@ -168,7 +168,7 @@ printf '%s\n' \
 后文每个终端先执行：
 
 ```bash
-source /home/hb/isaac_teleop_flexiv_inspire/artifacts/runtime/current-session.env
+source /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/artifacts/runtime/current-session.env
 ```
 
 不要复用旧会话的 F/T 结果、write permit 或 `SESSION_ID`。

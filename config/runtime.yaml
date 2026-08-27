@@ -1,4 +1,4 @@
 commands:
   # Daily commands start the real daemon automatically when it is absent.
-  rdk_daemon: [/home/hb/isaac_teleop_flexiv_inspire/envs/rdk-py310/bin/flexiv-rdk-daemon]
+  rdk_daemon: [/home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire/envs/rdk-py310/bin/flexiv-rdk-daemon]
   teleop_launch: [ros2, launch, flexiv_inspire_control, teleop_control.launch.py]

@@ -13,7 +13,7 @@
 ## 最短日常流程
 
 ```bash
-cd /home/hb/isaac_teleop_flexiv_inspire
+cd /home/hb/chp_ws/rl100_dp30/isaac_teleop_flexiv_inspire
 source scripts/env/activate_ros.sh
 
 # 修改本批任务后，直接开始遥操作数采
@@ -57,7 +57,8 @@ robot xr-doctor      # 检查当前选择的 Quest 控制器输入
 |---|---|---|
 | `config/recording.yaml` | 每一批新任务 | 数据集名、任务名/描述、episode 数、录制模态 |
 | `config/playback.yaml` | 可视化或回放前 | 选择数据集与 episode、回放速度 |
-| `config/conversion.yaml` | 导出训练数据前 | 批量选择、LeRobot 输出、字段和动作视图 |
+| `config/conversion.yaml` | 导出 RL-100 数据前 | MCAP 输入、Zarr 输出和 30 Hz 对齐设置 |
+| `config/conversion_lerobot_full.yaml` | 需要完整 LeRobot 数据时 | 深度、触觉、高频状态和动作视图 |
 | `config/sensors.yaml` | 更换相机、Quest、MANUS 或相机模态 | 序列号、相机 RGB/深度/点云开关、外参 |
 | `config/hardware.yaml` | 改 Home、速度、机械臂/手网络配置 | 硬件安装参数；非日常修改 |
 
@@ -145,7 +146,8 @@ sessions/<dataset_name>/
       manifest.json          # 任务、配置哈希、完成状态和数据来源
       deviceio.mcap          # 原始异步传感器、状态与 sent_command
       ros_mcap/              # 可选的 ROS bag
-  lerobot/                   # robot convert 的平行输出
+  rl100/                     # 默认 robot convert 生成的 RL-100 Zarr
+  lerobot/                   # 显式选择 LeRobot 配置时生成
 ```
 
 `deviceio.mcap` 是数采、可视化、回放和转换的主数据。不要移动或重命名
@@ -216,7 +218,7 @@ robot visualize
 ## Replay：让机器人复现示教
 
 `robot replay` 会让真机运动。先在 `config/playback.yaml` 确认数据集和
-episode，再执行：
+episode，并将 `replay.enabled` 从默认的 `false` 显式改为 `true`，再执行：
 
 ```bash
 robot replay
@@ -230,32 +232,35 @@ robot replay
 不要回放以下数据：任务对象/工作空间已改变、首帧不是从当前 Home 录制、工具或
 payload 已改、episode 未完成，或你不愿意让机器人复现其动作。
 
-## 转换为 LeRobot
+## 转换训练数据
 
-在 `config/conversion.yaml` 设置输入和输出：
+默认 `config/conversion.yaml` 将已完成的 MCAP 转换为 RL-100 需要的 30 Hz Zarr：
 
 ```yaml
 source:
-  dataset_root: sessions/open_boxes_first_try
+  dataset_root: ""             # 默认跟随 recording.yaml
   episode: all                 # all / latest / 编号 / 目录名
 output:
-  root: sessions/open_boxes_first_try/lerobot
-  episode_subdirectory: true
+  format: rl100_zarr
+  root: ""                     # 自动写入 <dataset>/rl100/<profile>.zarr
 ```
 
 执行：
 
 ```bash
 robot convert
-robot convert --action-view sent_command
-robot convert --action-view absolute_joint_position
-robot convert --action-view absolute_cartesian_pose
 ```
 
-默认 `all` 批量转换所有已完成 raw episode；已有非空输出会跳过，不会覆盖。
-三种动作视图分别是：实际下发的 30 维动作、14 维绝对关节、18 维 world 下双臂
-末端位姿。导出字段、深度、触觉、高频关节历史及空档切片策略都在
-`config/conversion.yaml` 配置。详见 [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)。
+默认输入、输出均从 `recording.yaml` 的当前数据集推导，包含 26D 状态、24D 动作
+和三路 RGB。已有非空 Zarr 不会被覆盖。
+需要完整 LeRobot 数据时显式选择保留的兼容配置：
+
+```bash
+robot convert --conversion-config config/conversion_lerobot_full.yaml
+```
+
+该配置支持 `--action-view` 切换实际下发的 30D 动作、14D 绝对关节或 18D 双臂
+末端位姿。详见 [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)。
 
 ## Quest 图像与 MANUS
 

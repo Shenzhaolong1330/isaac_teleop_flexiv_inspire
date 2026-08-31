@@ -15,7 +15,7 @@ RL-100 行为克隆（BC）-> 离线回放检查 -> 影子推理。真实策略�
 - 以真实通过安全链并下发的 `/control/sent_command` 为动作时间轴；
 - 从多个完整 episode 的 MCAP 合并导出 RL-100 Zarr；
 - 26D 状态、24D 动作、三路 CHW RGB 的严格维度和语义检查；
-- 按松开中踏板产生的时间空档切分训练 episode，不在空档中插值造帧；
+- 把松开中踏板产生的时间空档压缩为相邻 30 Hz 时间步，不在空档中插值造帧；
 - 通过显式人工成功/失败标签生成离线 RL 所需 reward/done/return；
 - Policy RPC 的只读观测、影子推理和带 lease、TTL、踏板、安全监督的动作接口。
 
@@ -138,9 +138,11 @@ robot record
 | Quest A | 暂停/恢复当前 episode，并执行受控 Home |
 | `Ctrl-C` | 完成本条写入并退出，等待 MCAP 落盘 |
 
-`record_only_while_pedal_pressed: true` 会在松开中踏板时留下真实时间空档。转换器把
-超过 0.05 s 的空档或 capture segment 变化作为 episode 边界；不足 9 帧的短片段被
-丢弃并计入验证报告。这样不会让模型跨过 Home、暂停或重新接管学习虚假连续动作。
+`record_only_while_pedal_pressed: true` 会在松开中踏板时留下真实时间空档。正式配置
+启用 `segments.stitch_gaps: true`，把空档压缩成相邻 30 Hz 时间步，同一条任务仍是
+一个训练 episode；转换器不会插值、补帧或复制图像。Zarr 同时保存压缩后的
+`timestamp_ns`、原始 `source_timestamp_ns` 和 `capture_segment`；无效帧会被计数、
+跳过并连接相邻有效帧，原始 MCAP 不变。
 
 ## 6. 转为 RL-100 Zarr
 
@@ -174,7 +176,8 @@ Zarr v2 schema：
 | `data/rgb_head` | `[N,3,H,W] uint8` | 头部 RGB |
 | `data/rgb_left_wrist` | `[N,3,H,W] uint8` | 左腕 RGB |
 | `data/rgb_right_wrist` | `[N,3,H,W] uint8` | 右腕 RGB |
-| `data/timestamp_ns` | `[N] int64` | sent_command 单调时钟时间戳 |
+| `data/timestamp_ns` | `[N] int64` | 压缩踏板空档后的 30 Hz 时间戳 |
+| `data/source_timestamp_ns` | `[N] int64` | 压缩踏板空档前的 MCAP 原始时间戳 |
 | `data/source_episode_index` | `[N] int32` | 原始 manifest 索引 |
 | `data/capture_segment` | `[N] int32` | 原始采集片段编号 |
 | `meta/episode_ends` | `[E] int64` | RL-100 episode 累积结束下标 |

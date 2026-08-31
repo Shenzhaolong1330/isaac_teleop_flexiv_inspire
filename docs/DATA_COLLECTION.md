@@ -75,7 +75,9 @@ robot convert
 
 默认输出写入 `sessions/<dataset>/rl100/joint_proprio_cartesian_v1.zarr`，包含
 26D 本体状态、24D 策略动作和三路 RGB。时间轴来自实际下发的
-`control/sent_command`，图像和状态按因果关系对齐，不跨踏板空档插值。
+`control/sent_command`，图像和状态按因果关系对齐。默认把中踏板空档压缩为一个
+30 Hz 时间步，不插值或补帧；`source_timestamp_ns` 和 `capture_segment` 保留原始
+时间与片段边界。无效帧会被计数并跳过，相邻有效帧按同一规则连接；原始 MCAP 不变。
 
 需要导出头部深度、触觉、高频关节历史或其他动作视图时，显式使用完整 LeRobot
 配置：

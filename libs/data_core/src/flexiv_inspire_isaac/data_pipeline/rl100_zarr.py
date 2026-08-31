@@ -45,6 +45,7 @@ class RL100ZarrSpec:
     channels: Mapping[str, str] | None = None
     gap_threshold_s: float = 0.05
     min_frames: int = 9
+    stitch_gaps: bool = False
     max_period_error_fraction: float = 0.25
 
     def __post_init__(self) -> None:
@@ -102,6 +103,7 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
     camera_alignment = str(raw.get("camera_alignment", ""))
     gap_threshold_s = float(segments.get("gap_threshold_s", 0.0))
     min_frames = int(segments.get("min_frames", 0))
+    stitch_gaps = segments.get("stitch_gaps", False)
     max_period_error_fraction = float(
         timeline.get("max_period_error_fraction", 0.25)
     )
@@ -127,6 +129,8 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
         raise RL100ZarrSpecError("segments.gap_threshold_s must be in [0.05,60]")
     if min_frames < 2:
         raise RL100ZarrSpecError("segments.min_frames must be at least 2")
+    if not isinstance(stitch_gaps, bool):
+        raise RL100ZarrSpecError("segments.stitch_gaps must be a bool")
     if not 0.0 < max_period_error_fraction <= 0.5:
         raise RL100ZarrSpecError(
             "timeline.max_period_error_fraction must be in (0,0.5]"
@@ -144,6 +148,7 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
         channels={key.lstrip("/"): value.lstrip("/") for key, value in channels.items()},
         gap_threshold_s=gap_threshold_s,
         min_frames=min_frames,
+        stitch_gaps=stitch_gaps,
         max_period_error_fraction=max_period_error_fraction,
     )
 
@@ -222,6 +227,7 @@ class _StreamingZarrWriter:
         *,
         fps: float,
         source_manifests: Sequence[str],
+        stitch_gaps: bool,
     ) -> None:
         self.root = root
         self.data = root.create_group("data")
@@ -247,6 +253,9 @@ class _StreamingZarrWriter:
                 "state_semantics": profile.state_semantics,
                 "action_semantics": profile.action_semantics,
                 "timeline_source": "control/sent_command",
+                "timestamp_semantics": (
+                    "pedal_gaps_removed" if stitch_gaps else "source_monotonic"
+                ),
                 "observation_alignment": "latest_causal",
                 "reward_available": False,
                 "offline_rl_ready": False,
@@ -278,6 +287,7 @@ class _StreamingZarrWriter:
             )
         for key, dtype in (
             ("timestamp_ns", "i8"),
+            ("source_timestamp_ns", "i8"),
             ("source_episode_index", "i4"),
             ("capture_segment", "i4"),
         ):
@@ -297,13 +307,13 @@ class _StreamingZarrWriter:
 
     def append(
         self,
-        records: Sequence[tuple[dict[str, np.ndarray], int, int, int]],
+        records: Sequence[tuple[dict[str, np.ndarray], int, int, int, int]],
     ) -> None:
         if not records:
             return
         if not self.arrays:
             self._initialize(records[0][0])
-        for frame, _, _, _ in records:
+        for frame, _, _, _, _ in records:
             self.validate_shapes(frame)
         start = self.count
         end = start + len(records)
@@ -314,8 +324,9 @@ class _StreamingZarrWriter:
         for key in IMAGE_SOURCES:
             self.arrays[key][start:end] = np.stack([item[0][key] for item in records])
         self.arrays["timestamp_ns"][start:end] = [item[1] for item in records]
-        self.arrays["source_episode_index"][start:end] = [item[2] for item in records]
-        self.arrays["capture_segment"][start:end] = [item[3] for item in records]
+        self.arrays["source_timestamp_ns"][start:end] = [item[2] for item in records]
+        self.arrays["source_episode_index"][start:end] = [item[3] for item in records]
+        self.arrays["capture_segment"][start:end] = [item[4] for item in records]
         self.count = end
 
     def finish_episode(self, source_index: int) -> None:
@@ -367,17 +378,23 @@ def export_rl100_zarr(
             root,
             fps=spec.fps,
             source_manifests=[item.source_manifest for item in episodes],
+            stitch_gaps=spec.stitch_gaps,
         )
-        pending: list[tuple[dict[str, np.ndarray], int, int, int]] = []
+        pending: list[tuple[dict[str, np.ndarray], int, int, int, int]] = []
         active = False
         active_source = -1
         previous_timestamp: int | None = None
+        previous_source_timestamp: int | None = None
         previous_segment: tuple[int, int] | None = None
         run_periods_ns: list[int] = []
+        timestamp_offset_ns = 0
+        gaps_stitched = 0
+        gap_duration_removed_ns = 0
 
         def finish_run() -> None:
             nonlocal pending, active, active_source, previous_timestamp
-            nonlocal previous_segment, run_periods_ns
+            nonlocal previous_source_timestamp, previous_segment, run_periods_ns
+            nonlocal timestamp_offset_ns
             if active:
                 median_period_ns = float(np.median(run_periods_ns))
                 relative_error = abs(median_period_ns - expected_period_ns) / expected_period_ns
@@ -395,32 +412,46 @@ def export_rl100_zarr(
             active = False
             active_source = -1
             previous_timestamp = None
+            previous_source_timestamp = None
             previous_segment = None
             run_periods_ns = []
+            timestamp_offset_ns = 0
 
         for source_index, episode in enumerate(episodes):
             finish_run()
             for row in episode.rows:
-                timestamp = int(row["timestamp_ns"])
+                source_timestamp = int(row["timestamp_ns"])
                 segment = int(row.get("observation.capture_segment", 0))
                 segment_key = (source_index, segment)
                 boundary = (
                     previous_segment is not None
                     and (
                         segment_key != previous_segment
-                        or timestamp - int(previous_timestamp) > gap_ns
+                        or source_timestamp - int(previous_source_timestamp) > gap_ns
                     )
                 )
-                if boundary:
-                    finish_run()
                 try:
                     frame = aligned_row_to_rl100_frame(row)
                     writer.validate_shapes(frame)
                 except InvalidPolicyFrame as exc:
                     category = exc.category if exc.category in dropped else "observation"
                     dropped[category] += 1
-                    finish_run()
+                    if not spec.stitch_gaps:
+                        finish_run()
                     continue
+
+                timestamp = source_timestamp - timestamp_offset_ns
+                if boundary:
+                    if spec.stitch_gaps:
+                        expected_timestamp = int(previous_timestamp) + round(expected_period_ns)
+                        removed_ns = timestamp - expected_timestamp
+                        timestamp_offset_ns += removed_ns
+                        timestamp = expected_timestamp
+                        gaps_stitched += 1
+                        gap_duration_removed_ns += removed_ns
+                    else:
+                        finish_run()
+                        timestamp = source_timestamp
 
                 if previous_timestamp is not None:
                     period_ns = timestamp - previous_timestamp
@@ -429,9 +460,12 @@ def export_rl100_zarr(
                             "sent_command timestamps must be strictly increasing"
                         )
                     run_periods_ns.append(period_ns)
-                pending.append((frame, timestamp, source_index, segment))
+                pending.append(
+                    (frame, timestamp, source_timestamp, source_index, segment)
+                )
                 active_source = source_index
                 previous_timestamp = timestamp
+                previous_source_timestamp = source_timestamp
                 previous_segment = segment_key
                 if len(pending) >= spec.min_frames:
                     active = True
@@ -464,6 +498,9 @@ def export_rl100_zarr(
                     "timeline_resampled": spec.resample_timeline,
                     "camera_alignment": spec.camera_alignment,
                     "segment_gap_threshold_s": spec.gap_threshold_s,
+                    "stitch_gaps": spec.stitch_gaps,
+                    "gaps_stitched": gaps_stitched,
+                    "gap_duration_removed_s": gap_duration_removed_ns / 1e9,
                     "minimum_segment_frames": spec.min_frames,
                     "maximum_period_error_fraction": spec.max_period_error_fraction,
                     "reward_available": False,

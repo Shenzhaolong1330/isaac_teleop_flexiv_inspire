@@ -86,6 +86,36 @@ def test_export_writes_rl100_schema_and_splits_command_gaps(tmp_path):
     assert report["offline_rl_ready"] is False
 
 
+def test_export_can_stitch_pedal_gaps_without_losing_source_timestamps(tmp_path):
+    period = 33_333_333
+    first = [_row(index * period, segment=0) for index in range(9)]
+    second_start = first[-1]["timestamp_ns"] + 200_000_000
+    second = [_row(second_start + index * period, segment=1) for index in range(9)]
+    second[0]["action.valid"] = False
+    output = tmp_path / "stitched.zarr"
+
+    result = export_rl100_zarr(
+        [RL100SourceEpisode([*first, *second], "episode/manifest.json", "task")],
+        output_root=output,
+        spec=RL100ZarrSpec(stitch_gaps=True),
+    )
+
+    root = zarr.open(str(output), mode="r")
+    assert root.attrs["timestamp_semantics"] == "pedal_gaps_removed"
+    assert root["meta/episode_ends"][:].tolist() == [17]
+    assert np.diff(root["data/timestamp_ns"][:]).max() == period
+    assert (
+        root["data/source_timestamp_ns"][9]
+        - root["data/source_timestamp_ns"][8]
+        == 200_000_000 + period
+    )
+    assert root["data/capture_segment"][[8, 9]].tolist() == [0, 1]
+    report = json.loads((output / "export_validation.json").read_text())
+    assert report["gaps_stitched"] == 1
+    assert report["frames_dropped_invalid_action"] == 1
+    assert result.episodes_written == 1
+
+
 def test_invalid_frame_breaks_sequence_and_short_runs_are_dropped(tmp_path):
     rows = [_row(index * 33_333_333) for index in range(8)]
     rows[4]["observation.images.head.valid"] = False

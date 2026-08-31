@@ -28,3 +28,5 @@ rl100_zarr_export:
   segments:
     gap_threshold_s: 0.05
     min_frames: 9
+    # Treat a released middle pedal as a recording pause inside the same task.
+    stitch_gaps: true

@@ -4,8 +4,9 @@
 遥操作、数采、可视化、回放和数据转换系统。日常操作只使用 `robot`；不要再
 手工启动 RDK daemon、ROS 控制桥、手部驱动、socket 或脚踏服务。
 
-面向 RL-100 的 30 Hz 三视角 RGB MVP、26D/24D 数据契约、MCAP 到 Zarr
-转换和安全部署流程见 [docs/RL100_DP30_PIPELINE.zh-CN.md](docs/RL100_DP30_PIPELINE.zh-CN.md)。
+当前 `feature/right-arm-two-rgb` 分支默认使用右臂、右手、头部/右腕两路 RGB，
+RL-100 契约为 13D 状态和 12D 动作。保留的双臂三视角 26D/24D 基线说明见
+[docs/RL100_DP30_PIPELINE.zh-CN.md](docs/RL100_DP30_PIPELINE.zh-CN.md)。
 
 > 真机操作只能在机器人主机本地终端执行。运行前确认工作区无人、双臂和双手
 > 无接触/无外载、线缆不受拉扯，且中踏板处于松开状态。
@@ -114,15 +115,16 @@ robot record --xr            # 同时在 Quest/桌面启动相机显示
 
 | 输入 | 行为 |
 |---|---|
-| 中踏板按住 | Quest 双腕位姿有效时，允许双臂遥操作；数据在此期间写入 |
+| 中踏板按住 | Quest 右腕位姿有效时，只允许右臂和右手遥操作；数据在此期间写入 |
 | 中踏板松开 | 立即保持；再次按下从当前机器人姿态重新接管 |
 | 左踏板 | 丢弃当前 attempt，Home 后重录同一 episode 编号 |
 | 右踏板 | 保存当前 episode，Home 后进入下一条 |
 | Quest A | 暂停/恢复当前 episode，并执行受控 Home |
 | `Ctrl-C` | 保存当前条并退出；等待 MCAP 写完 |
 
-MANUS 控制手指；Quest 控制双臂末端。若中踏板踩下仍不动，先确认 Quest 双腕
-追踪、MANUS、脚踏和控制器在线状态，而不要重复启动多个 `robot record`。
+右侧 MANUS 控制右手手指；Quest 右控制器控制右臂末端。若中踏板踩下仍不动，
+先确认 Quest 右腕追踪、右侧 MANUS、脚踏和控制器在线状态，而不要重复启动多个
+`robot record`。启动时的 F/T、Home 和双手开合仍按双侧执行；进入遥操后左侧保持。
 
 Quest 输入后端在 `config/sensors.yaml` 中选择。默认轻量 USB 后端不会启动
 CloudXR/OpenXR；需要回退到原 Isaac Teleop 输入时只改一行并重启 `robot record`：
@@ -250,8 +252,9 @@ output:
 robot convert
 ```
 
-默认输入、输出均从 `recording.yaml` 的当前数据集推导，包含 26D 状态、24D 动作
-和三路 RGB。已有非空 Zarr 不会被覆盖。
+默认输入、输出均从 `recording.yaml` 的当前数据集推导，包含右臂 7 关节与右手
+6 维状态组成的 13D 状态、右臂 6D 末端增量与右手 6D 目标组成的 12D 动作，
+以及头部/右腕两路 RGB。已有非空 Zarr 不会被覆盖。
 需要完整 LeRobot 数据时显式选择保留的兼容配置：
 
 ```bash
@@ -294,9 +297,9 @@ robot policy-serve
 | RDK socket 未运行 | 直接 `robot reset`、`robot record` 或 `robot replay`；无需手启 daemon |
 | 双手 `No route to host` | 检查 `eno1`、`192.168.5.11/.12`、手部电源和网线 |
 | 中踏板没反应 | 确认 `robot record`/`robot replay` 正在前台运行，脚踏设备未被其他程序独占 |
-| Quest 有画面但不遥操 | 确认中踏板持续按住、Quest 双腕追踪有效；用 `robot xr-doctor` 检查 Quest |
+| Quest 有画面但不遥操 | 确认中踏板持续按住、Quest 右腕追踪有效；用 `robot xr-doctor` 检查 Quest |
 | `record` 或 `replay` 残留服务 | `robot stop`，然后 `robot reset` |
-| LeRobot 提示无有效图像 | 先 `robot visualize` 检查三路 RGB 是否录到；确认 conversion 的相机字段与数据集一致 |
+| 转换提示无有效图像 | 先 `robot visualize` 检查头部和右腕 RGB 是否录到；确认 conversion profile 为 `right_joint_proprio_cartesian_v1` |
 | 点云与世界坐标不重合 | 完成相机外参标定并在 `config/sensors.yaml` 填写 `extrinsics` |
 
 ## 首次安装、开发与文件结构

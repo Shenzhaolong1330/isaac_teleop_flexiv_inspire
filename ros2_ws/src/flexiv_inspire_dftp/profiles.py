@@ -8,6 +8,7 @@ and handedness explicit without forking the ROS topics or command path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from .protocol import SurfaceSpec, TACTILE_LAYOUT
 
@@ -48,6 +49,21 @@ class HandProfile:
                     f"{self.name} safe_force_limits[{actuator}]={value} "
                     f"is outside 0..{maximum} g"
                 )
+
+    def canonicalize_angles(
+        self, positions: Sequence[int], angles: Sequence[int]
+    ) -> tuple[int, ...]:
+        result = [int(value) for value in angles]
+        thumb_position = int(positions[4])
+        if (
+            self.name == "rh56e2_2l_t1"
+            and (thumb_position <= 100 or thumb_position >= 7900)
+            and result[4] == 0
+        ):
+            # The installed left thumb encoder wraps 7999 -> 0 at the open
+            # endpoint, making ANGLE_ACTUAL alternate between 0 and 1000.
+            result[4] = 1000
+        return tuple(result)
 
 
 _DFTP_FORCE_MAX_G = (1000, 1000, 1000, 1000, 1500, 1000)

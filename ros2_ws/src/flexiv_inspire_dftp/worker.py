@@ -118,7 +118,9 @@ class DftpProtocolReader:
         return HandState(
             side=self.side,
             actuator_position=values["position"],
-            actuator_angle=values["angle"],
+            actuator_angle=self.profile.canonicalize_angles(
+                values["position"], values["angle"]
+            ),
             actual_force_g=values["force"],
             current_ma=values["current"],
             temperature_c=values["temperature"],

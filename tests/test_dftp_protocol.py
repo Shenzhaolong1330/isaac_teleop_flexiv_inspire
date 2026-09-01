@@ -51,6 +51,18 @@ def test_hand_profiles_share_protocol_but_keep_model_limits_and_handedness():
         old.validate_force_limits((1001,) * 6)
 
 
+def test_left_e2_thumb_open_encoder_wrap_is_canonicalized():
+    left = hand_profile("rh56e2_2l_t1", side="left")
+    right = hand_profile("rh56e2_2r_t1", side="right")
+    positions = (0, 0, 0, 0, 7999, 0)
+    angles = (1000, 1000, 1000, 1000, 0, 1000)
+
+    assert left.canonicalize_angles(positions, angles)[4] == 1000
+    assert left.canonicalize_angles((0,) * 6, angles)[4] == 1000
+    assert right.canonicalize_angles(positions, angles)[4] == 0
+    assert left.canonicalize_angles((0, 0, 0, 0, 4000, 0), angles)[4] == 0
+
+
 def test_tactile_modbus_response_is_big_endian_raw_uint16():
     spec = TACTILE_LAYOUT[0]
     payload = bytes.fromhex("001b") + struct.pack(">8H", *range(1, 9))

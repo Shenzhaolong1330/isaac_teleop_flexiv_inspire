@@ -1,12 +1,12 @@
 recording:
   # 输出目录为 <output_root>/<dataset_name>/raw/
   # <task_name>_episode_001_YYYYMMDD_HHMM/；同级 lerobot/ 存放转换结果。
-  dataset_name: open_boxes_first_try
-  task_name: open_boxes
+  dataset_name: pick_place_first_try
+  task_name: pick_place
   episode_count: 20
   output_root: sessions
 
-  task_description: "Use both thumbs to open the latches on both sides of the box, then remove the lid."
+  task_description: "Pick up the object from the source area and place it in the target area."
   camera_recording_mode: jpeg
   deviceio_mode: native
   # 训练与 replay 都使用 deviceio.mcap；关闭重复的 ROS bag 可显著省空间。

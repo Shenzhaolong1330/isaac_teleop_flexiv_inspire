@@ -72,7 +72,8 @@ def test_reset_composes_zero_ft_then_home_without_operator_tokens(
     assert argv[argv.index("--rdk-socket") + 1] == str(tmp_path / "rdk.sock")
     assert argv[argv.index("--tool-payload-config") + 1] == str(tool_config)
     assert "--confirm-ft-unloaded" in argv
-    assert "--skip-hand-preview" in argv
+    assert "--skip-hand-preview" not in argv
+    assert argv[argv.index("--preview-seconds") + 1] == "1.5"
     assert argv[argv.index("--max-hand-delta") + 1] == "150"
     assert "--skip-preview-if-ft-zeroed" in argv
     assert "--home-after-zero" in argv

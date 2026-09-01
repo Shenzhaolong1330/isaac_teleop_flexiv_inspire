@@ -2769,7 +2769,6 @@ def _run_reset(config, args) -> int:
         str(tool_config),
         "--preview-seconds",
         str(float(args.preview_seconds)),
-        "--skip-hand-preview",
         "--max-hand-delta",
         "150",
         "--skip-preview-if-ft-zeroed",

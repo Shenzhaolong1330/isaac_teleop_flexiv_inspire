@@ -367,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rdk-socket", type=Path, required=True)
     parser.add_argument("--tool-payload-config", type=Path, required=True)
     parser.add_argument("--preview-seconds", type=float, default=2.0)
+    parser.add_argument("--hand-warmup-seconds", type=float, default=1.0)
     parser.add_argument(
         "--skip-hand-preview",
         action="store_true",
@@ -435,6 +436,11 @@ def main(argv: list[str] | None = None) -> int:
                     "preview_skipped": True,
                 }
         else:
+            warmup_deadline = time.monotonic() + max(
+                0.0, args.hand_warmup_seconds
+            )
+            while time.monotonic() < warmup_deadline:
+                rclpy.spin_once(node, timeout_sec=0.02)
             node.samples = {"left": [], "right": []}
             deadline = time.monotonic() + args.preview_seconds
             while time.monotonic() < deadline:

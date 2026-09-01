@@ -74,6 +74,7 @@ def test_reset_composes_zero_ft_then_home_without_operator_tokens(
     assert "--confirm-ft-unloaded" in argv
     assert "--skip-hand-preview" not in argv
     assert argv[argv.index("--preview-seconds") + 1] == "1.5"
+    assert argv[argv.index("--hand-warmup-seconds") + 1] == "1.0"
     assert argv[argv.index("--max-hand-delta") + 1] == "150"
     assert "--skip-preview-if-ft-zeroed" in argv
     assert "--home-after-zero" in argv

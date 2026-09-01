@@ -138,6 +138,12 @@ def test_safe_command_ros_dictionary_flattens_to_canonical_30d():
         "trajectory": [point],
     }
     assert len(_flatten_safe_command(payload)) == 30
+    payload["valid_mask"] = 10
+    values, reason = _flatten_safe_command_checked(
+        payload, accepted_valid_masks=(10,)
+    )
+    assert reason == "" and len(values) == 30
+    payload["valid_mask"] = 15
     payload["rotation_order"] = "wrong"
     assert _flatten_safe_command(payload) is None
 

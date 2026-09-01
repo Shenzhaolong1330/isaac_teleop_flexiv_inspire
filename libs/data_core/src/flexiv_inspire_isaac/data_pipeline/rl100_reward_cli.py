@@ -11,7 +11,7 @@ import numcodecs
 import numpy as np
 import zarr
 
-from .rl100_zarr import SCHEMA_ID
+from .rl100_zarr import RIGHT_SCHEMA_ID, SCHEMA_ID
 
 
 def apply_episode_reward_labels(
@@ -27,8 +27,8 @@ def apply_episode_reward_labels(
         raise ValueError("reward labels must use schema_version: 1")
 
     root = zarr.open(str(dataset_path), mode="a")
-    if str(root.attrs.get("schema_id", "")) != SCHEMA_ID:
-        raise ValueError(f"expected Zarr schema_id={SCHEMA_ID}")
+    if str(root.attrs.get("schema_id", "")) not in {SCHEMA_ID, RIGHT_SCHEMA_ID}:
+        raise ValueError("expected a supported Flexiv RL-100 Zarr schema")
     episode_ends = np.asarray(root["meta/episode_ends"][:], dtype=np.int64)
     raw_episodes = labels.get("episodes")
     if not isinstance(raw_episodes, list):

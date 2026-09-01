@@ -9,20 +9,20 @@ from pathlib import Path
 
 from .lerobot_cli import _manifest_paths
 from .lerobot_export import EpisodeAligner
-from .mcap_input import load_json_mcap_streams, load_ros2_camera_mcap_streams
+from .mcap_input import (
+    FULL_VALID_MASK,
+    RIGHT_VALID_MASK,
+    load_json_mcap_streams,
+    load_ros2_camera_mcap_streams,
+)
 from .rl100_zarr import (
     IMAGE_SOURCES,
+    RIGHT_IMAGE_SOURCES,
+    RIGHT_PROFILE_ID,
     RL100SourceEpisode,
     export_rl100_zarr,
     load_rl100_zarr_spec,
 )
-
-
-REQUIRED_CAMERAS = {
-    "camera/head/jpeg",
-    "camera/left_wrist/jpeg",
-    "camera/right_wrist/jpeg",
-}
 
 
 def _load_source_episode(manifest_path: Path, spec) -> tuple[RL100SourceEpisode, dict]:
@@ -38,20 +38,32 @@ def _load_source_episode(manifest_path: Path, spec) -> tuple[RL100SourceEpisode,
         raise FileNotFoundError(
             f"manifest deviceio_mcap cannot be resolved: {manifest_path}"
         )
-    streams = load_json_mcap_streams(deviceio_paths)
+    image_sources = (
+        RIGHT_IMAGE_SOURCES if spec.profile == RIGHT_PROFILE_ID else IMAGE_SOURCES
+    )
+    required_cameras = {
+        source.replace("observation.images.", "camera/") + "/jpeg"
+        for source in image_sources.values()
+    }
+    streams = load_json_mcap_streams(
+        deviceio_paths,
+        accepted_command_masks=(
+            RIGHT_VALID_MASK if spec.profile == RIGHT_PROFILE_ID else FULL_VALID_MASK,
+        ),
+    )
     ros_paths: list[Path] = []
     recovered_cameras: list[str] = []
-    if not REQUIRED_CAMERAS.issubset(streams):
+    if not required_cameras.issubset(streams):
         ros_value = str(manifest.get("ros_mcap", "")).strip()
         ros_paths = _manifest_paths(manifest_path, ros_value) if ros_value else []
         if not ros_paths:
-            missing = sorted(REQUIRED_CAMERAS.difference(streams))
+            missing = sorted(required_cameras.difference(streams))
             raise FileNotFoundError(
                 "native MCAP is missing camera streams and ros_mcap cannot be "
                 f"resolved for recovery: {missing}"
             )
         recovered = load_ros2_camera_mcap_streams(ros_paths)
-        for name in REQUIRED_CAMERAS.difference(streams):
+        for name in required_cameras.difference(streams):
             if name in recovered:
                 streams[name] = recovered[name]
                 recovered_cameras.append(name)

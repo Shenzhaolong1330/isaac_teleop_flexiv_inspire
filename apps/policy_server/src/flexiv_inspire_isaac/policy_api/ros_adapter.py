@@ -626,10 +626,7 @@ def build_ros_node(
             message.representation = BimanualCommand.CARTESIAN_ROT6D
             message.frame_id = "world"
             message.rotation_order = ROTATION_ORDER
-            message.valid_mask = (
-                BimanualCommand.LEFT_ARM_VALID | BimanualCommand.RIGHT_ARM_VALID
-                | BimanualCommand.LEFT_HAND_VALID | BimanualCommand.RIGHT_HAND_VALID
-            )
+            message.valid_mask = int(chunk.valid_mask)
             message.deadman = chunk.deadman
             for point, offset_ns in zip(chunk.points, offsets_ns):
                 target = BimanualCommandPoint()

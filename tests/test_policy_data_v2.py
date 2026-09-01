@@ -137,6 +137,7 @@ def test_system_description_exposes_independent_rates_and_minimal_action() -> No
     assert channels["hand.left.actual_force"].native_rate_hz == 200.0
     assert actions["cartesian_delta_rotvec_v1"].rate_hz == 30.0
     assert tuple(actions["cartesian_delta_rotvec_v1"].tensor.shape) == (24,)
+    assert tuple(actions["right_cartesian_delta_rotvec_v1"].tensor.shape) == (12,)
     assert tuple(actions["flexiv_inspire_native_rot6d_v1"].tensor.shape) == (30,)
 
 
@@ -154,6 +155,23 @@ def test_v2_policy_action_converts_once_to_canonical_30d() -> None:
     assert np.allclose(values[9:12], 0.0)
     assert np.allclose(values[12:18], [1, 0, 0, 0, 1, 0])
     assert np.allclose(values[18:30], 500.0)
+
+
+def test_v2_right_policy_action_masks_left_side() -> None:
+    schema = build_system_schema()
+    request = _policy_action(schema, values=np.full(12, 0.5, dtype=np.float32))
+    request.action_schema_id = "right_cartesian_delta_rotvec_v1"
+
+    chunk = decode_policy_action_chunk(request, schema=schema, receive_ns=100)
+    validate_action_chunk(chunk, now_ns=101)
+
+    values = np.asarray(chunk.points[0].values)
+    assert chunk.valid_mask == 0xA
+    assert values.shape == (30,)
+    assert np.allclose(values[0:3], 0.0)
+    assert np.allclose(values[3:9], [1, 0, 0, 0, 1, 0])
+    assert np.allclose(values[18:24], 0.0)
+    assert np.allclose(values[24:30], 500.0)
 
 
 @pytest.mark.parametrize(

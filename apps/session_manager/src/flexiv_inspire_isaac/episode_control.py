@@ -130,6 +130,7 @@ class EpisodeController(Node):
             "deviceio_mode": "native",
             "ros_mcap_enabled": True,
             "deviceio_profile": "full",
+            "controlled_side": "both",
             "record_only_while_pedal_pressed": False,
             "camera_hz": 15.0,
             "action_hz": 30.0,
@@ -202,9 +203,15 @@ class EpisodeController(Node):
                 qos,
             )
         self.create_timer(0.25, self._tick)
+        controlled_side = str(self.get_parameter("controlled_side").value)
+        controlled_label = {
+            "left": "左臂/左手",
+            "right": "右臂/右手",
+            "both": "双臂/双手",
+        }.get(controlled_side, controlled_side)
         self.get_logger().info(
             "数采控制：左踏板=丢弃当前条并 Home 后重录；"
-            "中踏板=按住使能双臂、松开立即停止；"
+            f"中踏板=按住使能{controlled_label}、松开立即停止；"
             "右踏板=保存当前条并 Home 后无缝开始下一条；"
             "Quest A=暂停记录、Home 后继续当前条；Ctrl+C=结束数采"
         )
@@ -238,6 +245,10 @@ class EpisodeController(Node):
             raise RuntimeError("task_description is required")
         if str(self.get_parameter("deviceio_mode").value) != "native":
             raise RuntimeError("automatic collection requires native DeviceIO")
+        if str(self.get_parameter("controlled_side").value) not in {
+            "left", "right", "both"
+        }:
+            raise RuntimeError("controlled_side must be left, right or both")
         for key in ("home_result_timeout_s", "recorder_state_timeout_s"):
             if not 1.0 <= float(self.get_parameter(key).value) <= 120.0:
                 raise RuntimeError(f"{key} must be in [1,120]")

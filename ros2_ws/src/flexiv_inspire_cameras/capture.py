@@ -670,15 +670,15 @@ class RealSenseRgbCapture:
 
 
 class TripleRealSenseCapture:
-    """Lifecycle wrapper for exactly head, left-wrist and right-wrist cameras."""
+    """Lifecycle wrapper for the configured RealSense camera subset."""
 
     def __init__(
         self,
         configs: Mapping[str, CameraConfig],
         **capture_kwargs,
     ) -> None:
-        if set(configs) != {"head", "left_wrist", "right_wrist"}:
-            raise ValueError("three configured cameras are required")
+        if not configs:
+            raise ValueError("at least one configured camera is required")
         self.captures = {
             name: RealSenseRgbCapture(config, **capture_kwargs)
             for name, config in configs.items()

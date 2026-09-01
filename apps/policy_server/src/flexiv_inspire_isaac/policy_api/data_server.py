@@ -125,6 +125,7 @@ def decode_policy_action_chunk(
         frame_id=descriptor.frame_id,
         deadman=bool(request.deadman),
         points=tuple(points),
+        valid_mask=(10 if descriptor.schema_id == "right_cartesian_delta_rotvec_v1" else 15),
     )
 
 

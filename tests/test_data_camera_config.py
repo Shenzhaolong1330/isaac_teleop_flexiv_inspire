@@ -3,6 +3,7 @@ import importlib.util
 import sys
 
 import pytest
+import yaml
 
 from flexiv_inspire_isaac.cameras.config import load_camera_configs
 from flexiv_inspire_isaac.cameras.smoke import DEFAULT_CONFIG as SMOKE_DEFAULT_CONFIG
@@ -29,6 +30,17 @@ def test_three_camera_config_records_aligned_depth_and_pointcloud_at_30():
     assert cameras["head"].depth_spatial_filter_enabled is True
     assert cameras["head"].depth_temporal_filter_enabled is True
     assert cameras["left_wrist"].depth_visual_preset == "unchanged"
+
+
+def test_camera_config_accepts_right_arm_two_camera_subset(tmp_path):
+    document = yaml.safe_load(CONFIG.read_text())
+    document["cameras"].pop("left_wrist")
+    path = tmp_path / "right_two_rgb.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    cameras = load_camera_configs(path)
+
+    assert set(cameras) == {"head", "right_wrist"}
 
 
 def test_camera_cli_defaults_follow_the_packaged_config():

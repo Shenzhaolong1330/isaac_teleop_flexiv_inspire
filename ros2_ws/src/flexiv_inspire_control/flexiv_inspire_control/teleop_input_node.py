@@ -439,6 +439,7 @@ class TeleopInput(Node):
         super().__init__("isaac_teleop_input")
         defaults = {
             "command_enabled": False,
+            "controlled_side": "both",
             "session_id": "",
             "ee_topic": "/xr_teleop/ee_poses",
             "controller_topic": "/xr_teleop/controller_data",
@@ -473,12 +474,20 @@ class TeleopInput(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
         self._enabled = bool(self.get_parameter("command_enabled").value)
+        controlled_side = str(self.get_parameter("controlled_side").value).strip()
+        if controlled_side not in {"left", "right", "both"}:
+            raise ValueError("controlled_side must be left, right or both")
+        self._controlled_side = controlled_side
+        self._controlled_sides = (
+            ("left", "right") if controlled_side == "both" else (controlled_side,)
+        )
         configured_session = str(self.get_parameter("session_id").value).strip()
         self._session = configured_session or f"teleop-{uuid.uuid4()}"
         axis = np.asarray(
             self.get_parameter("axis_rotation").value, dtype=np.float64
         ).reshape(3, 3)
         self._mapper = QuestSE3Mapper(
+            controlled_sides=self._controlled_sides,
             world_frame=str(self.get_parameter("world_frame").value),
             axis_rotation=axis,
             translation_gain=float(self.get_parameter("translation_gain").value),
@@ -531,7 +540,7 @@ class TeleopInput(Node):
             qos_profile_sensor_data,
         )
         if self._retarget.uses_ergonomics:
-            for side in ("left", "right"):
+            for side in self._controlled_sides:
                 self.create_subscription(
                     JointState,
                     str(self.get_parameter(f"manus_{side}_ergonomics_topic").value),
@@ -574,10 +583,15 @@ class TeleopInput(Node):
     def _on_pose(self, message: PoseArray) -> None:
         receive = time.monotonic_ns()
         try:
-            left_index = int(self.get_parameter("left_pose_index").value)
-            right_index = int(self.get_parameter("right_pose_index").value)
-            left = message.poses[left_index]
-            right = message.poses[right_index]
+            poses = {
+                side: message.poses[
+                    int(self.get_parameter(f"{side}_pose_index").value)
+                ]
+                for side in self._controlled_sides
+            }
+            fallback = poses[self._controlled_sides[0]]
+            left = poses.get("left", fallback)
+            right = poses.get("right", fallback)
             self._pose_sequence += 1
             source_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(
                 message.header.stamp.nanosec
@@ -636,8 +650,8 @@ class TeleopInput(Node):
         now = time.monotonic_ns()
         world = _frame(str(self.get_parameter("world_frame").value))
         watched = {
-            _frame(str(self.get_parameter("left_wrist_frame").value)),
-            _frame(str(self.get_parameter("right_wrist_frame").value)),
+            _frame(str(self.get_parameter(f"{side}_wrist_frame").value))
+            for side in self._controlled_sides
         }
         for transform in message.transforms:
             if (
@@ -663,10 +677,11 @@ class TeleopInput(Node):
             features = split_bimanual_pose_array(pose_message_values(message.poses))
             commands = {
                 side: self._retarget.apply_features(side, features[side])
-                for side in ("left", "right")
+                for side in self._controlled_sides
             }
             self._hands.update(commands)
-            self._hands_received = {"left": now, "right": now}
+            for side in self._controlled_sides:
+                self._hands_received[side] = now
             self._refresh_manus_ready(now)
         except Exception as exc:
             self._hands = {"left": None, "right": None}
@@ -715,12 +730,12 @@ class TeleopInput(Node):
         ready = all(
             self._hands[side] is not None
             and now - self._hands_received[side] <= max_age
-            for side in ("left", "right")
+            for side in self._controlled_sides
         )
         if ready and not self._manus_ready:
             source = "Ergonomics" if self._retarget.uses_ergonomics else "skeleton"
             self.get_logger().info(
-                "MANUS_HANDS_READY: both gloves are valid; "
+                f"MANUS_HANDS_READY: {self._controlled_side} glove input is valid; "
                 f"{source} retargeting is active"
             )
         self._manus_ready = ready
@@ -752,7 +767,9 @@ class TeleopInput(Node):
             return self._sample
         max_age = int(float(self.get_parameter("max_tf_age_s").value) * 1e9)
         missing = []
-        for parameter in ("left_wrist_frame", "right_wrist_frame"):
+        for parameter in (
+            f"{side}_wrist_frame" for side in self._controlled_sides
+        ):
             frame = _frame(str(self.get_parameter(parameter).value))
             if now - self._tf_received.get(frame, 0) > max_age:
                 missing.append(frame)
@@ -777,7 +794,7 @@ class TeleopInput(Node):
             self._hands[side] is not None
             and now - self._hands_received[side]
             <= int(float(self.get_parameter("max_manus_age_s").value) * 1e9)
-            for side in ("left", "right")
+            for side in self._controlled_sides
         )
         authority = (
             self._enabled and deadman and delta.active and not delta.hold_latched
@@ -786,13 +803,19 @@ class TeleopInput(Node):
             reason = self._tracking_unavailable_reason or delta.reason
             self.get_logger().warning(
                 "中踏板已踩下，但机械臂未使能："
-                f"{reason}；请确认左右 Quest 控制器均被追踪，"
+                f"{reason}；请确认 {self._controlled_side} Quest 控制器被追踪，"
                 "松开中踏板后再踩下",
                 throttle_duration_sec=1.0,
             )
-        valid_mask = 0x3 if authority else 0
+        arm_bits = {"left": 0x1, "right": 0x2}
+        hand_bits = {"left": 0x4, "right": 0x8}
+        valid_mask = (
+            sum(arm_bits[side] for side in self._controlled_sides)
+            if authority
+            else 0
+        )
         if authority and hand_valid:
-            valid_mask |= 0xC
+            valid_mask |= sum(hand_bits[side] for side in self._controlled_sides)
         self._command_sequence += 1
         message = BimanualCommand()
         message.header.stamp = self.get_clock().now().to_msg()
@@ -817,15 +840,20 @@ class TeleopInput(Node):
         point.left_delta_quaternion_xyzw = [0.0, 0.0, 0.0, 1.0]
         point.right_delta_quaternion_xyzw = [0.0, 0.0, 0.0, 1.0]
         point.left_hand_targets = (
-            self._hands["left"].tolist() if hand_valid else [0.0] * 6
+            self._hands["left"].tolist()
+            if hand_valid and "left" in self._controlled_sides
+            else [0.0] * 6
         )
         point.right_hand_targets = (
-            self._hands["right"].tolist() if hand_valid else [0.0] * 6
+            self._hands["right"].tolist()
+            if hand_valid and "right" in self._controlled_sides
+            else [0.0] * 6
         )
         message.trajectory = [point]
-        message.metadata_keys = ["teleop_mode", "mapping_reason"]
+        message.metadata_keys = ["teleop_mode", "controlled_side", "mapping_reason"]
         message.metadata_values = [
             "command" if self._enabled else "shadow",
+            self._controlled_side,
             self._tracking_unavailable_reason or delta.reason,
         ]
         self._command_pub.publish(message)

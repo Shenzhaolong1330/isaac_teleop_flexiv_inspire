@@ -8,13 +8,17 @@ from .mapping import (
     joint_minimal_state,
     legacy_state38,
     native_action30_to_policy24,
+    native_action30_to_right_policy12,
     policy_action24_to_native30,
+    right_joint_minimal_state,
+    right_policy_action12_to_native30,
 )
 from .registry import ActionMappingRegistry, ActionTensorMapping
 from .profiles import (
     CARTESIAN_MINIMAL_PROFILE,
     DUAL_ARM_LEROBOT_V1_PROFILE,
     JOINT_MINIMAL_PROFILE,
+    RIGHT_JOINT_MINIMAL_PROFILE,
     PolicyProfile,
     get_profile,
 )
@@ -44,6 +48,7 @@ __all__ = [
     "FeatureContractError",
     "FeatureDescriptor",
     "JOINT_MINIMAL_PROFILE",
+    "RIGHT_JOINT_MINIMAL_PROFILE",
     "MappingError",
     "PolicyProfile",
     "SchemaError",
@@ -57,7 +62,10 @@ __all__ = [
     "matrix_to_rotation6d",
     "matrix_to_rotvec",
     "native_action30_to_policy24",
+    "native_action30_to_right_policy12",
     "policy_action24_to_native30",
+    "right_joint_minimal_state",
+    "right_policy_action12_to_native30",
     "quaternion_xyzw_to_matrix",
     "rotation6d_to_matrix",
     "rotvec_to_matrix",

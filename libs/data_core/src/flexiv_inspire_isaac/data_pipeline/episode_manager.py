@@ -114,6 +114,19 @@ TRAINING_DEVICEIO_TOPICS = {
     "/control/sent_command",
 }
 
+RIGHT_TRAINING_DEVICEIO_TOPICS = {
+    "/robot/right_arm/state",
+    "/robot/right_hand/state",
+    "/robot/right_hand/tactile_raw",
+    "/camera/head/color/image_raw/compressed",
+    "/camera/right_wrist/color/image_raw/compressed",
+    "/control/sent_command",
+}
+DEVICEIO_PROFILE_TOPICS = {
+    "training": TRAINING_DEVICEIO_TOPICS,
+    "right_training": RIGHT_TRAINING_DEVICEIO_TOPICS,
+}
+
 
 def _time_ns(value: Any) -> int:
     return int(value.sec) * 1_000_000_000 + int(value.nanosec)
@@ -464,8 +477,10 @@ class EpisodeSession:
             raise ValueError(
                 "episode manager records the atomic ROS JPEG mirror only; raw_rgb must be recorded by the camera DeviceIO sink"
             )
-        if deviceio_profile not in {"training", "full"}:
-            raise ValueError("deviceio_profile must be training or full")
+        if deviceio_profile not in {"training", "right_training", "full"}:
+            raise ValueError(
+                "deviceio_profile must be training, right_training or full"
+            )
         # Complete every read-only authorization/hash check before creating an
         # episode directory, so a rejected F/T record cannot leave an orphan.
         tool_hash = canonical_yaml_sha256(tool_config)
@@ -590,10 +605,8 @@ class EpisodeSession:
         return self._critical_sequence
 
     def submit(self, envelope: RecordEnvelope, *, critical: bool = False) -> None:
-        if (
-            self._deviceio_profile == "training"
-            and envelope.topic not in TRAINING_DEVICEIO_TOPICS
-        ):
+        profile_topics = DEVICEIO_PROFILE_TOPICS.get(self._deviceio_profile)
+        if profile_topics is not None and envelope.topic not in profile_topics:
             return
         if self._record_only_while_pedal_pressed and not self._motion_recording_enabled:
             with self._stats_lock:
@@ -689,10 +702,8 @@ class EpisodeSession:
                 with self._stats_lock:
                     self.manifest.native_source_stats[producer] = dict(payload)
             return
-        if (
-            self._deviceio_profile == "training"
-            and topic not in TRAINING_DEVICEIO_TOPICS
-        ):
+        profile_topics = DEVICEIO_PROFILE_TOPICS.get(self._deviceio_profile)
+        if profile_topics is not None and topic not in profile_topics:
             return
         mapped = document.get("mapped_host_time_ns")
         if not bool(document.get("timing_valid", False)):
@@ -734,17 +745,12 @@ class EpisodeSession:
                 )
 
     def _required_stream_errors(self) -> list[str]:
-        required = (
-            "camera/head/color/image_raw/compressed",
-            "camera/left_wrist/color/image_raw/compressed",
-            "camera/right_wrist/color/image_raw/compressed",
-            "robot/left_arm/state",
-            "robot/right_arm/state",
-            "robot/left_hand/state",
-            "robot/right_hand/state",
-            "robot/left_hand/tactile_raw",
-            "robot/right_hand/tactile_raw",
-            "control/sent_command",
+        profile = getattr(self, "_deviceio_profile", "training")
+        required = tuple(
+            topic.lstrip("/")
+            for topic in DEVICEIO_PROFILE_TOPICS.get(
+                profile, TRAINING_DEVICEIO_TOPICS
+            )
         )
         errors = []
         for name in required:
@@ -1111,7 +1117,9 @@ def _parse_args(argv=None):
         "--deviceio-socket", type=Path, default=default_deviceio_socket()
     )
     parser.add_argument(
-        "--deviceio-profile", choices=("training", "full"), default="full"
+        "--deviceio-profile",
+        choices=("training", "right_training", "full"),
+        default="full",
     )
     parser.add_argument("--no-ros-mcap", action="store_true")
     parser.add_argument("--record-only-while-pedal-pressed", action="store_true")

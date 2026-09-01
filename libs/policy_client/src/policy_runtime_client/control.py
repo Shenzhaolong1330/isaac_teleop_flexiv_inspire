@@ -9,7 +9,10 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
-from policy_contracts import policy_action24_to_native30
+from policy_contracts import (
+    policy_action24_to_native30,
+    right_policy_action12_to_native30,
+)
 
 from .generated import policy_data_v2_pb2 as data_pb
 from .generated import policy_data_v2_pb2_grpc as data_pb_grpc
@@ -165,8 +168,24 @@ class SyncPolicyActionClient:
         if values.ndim == 1:
             values = values.reshape(1, -1)
         offsets = tuple(int(item) for item in execute_after_ns)
-        if values.ndim != 2 or values.shape[1] != 24 or values.shape[0] != len(offsets):
-            raise PolicyActionError("action chunk must have shape [N,24] with N offsets")
+        mapper = self.profile_client.mapper
+        if mapper is None:
+            raise PolicyActionError("profile client is disconnected")
+        right_only = mapper.profile_id == "right_joint_proprio_cartesian_v1"
+        action_dimension = 12 if right_only else 24
+        action_schema_id = (
+            "right_cartesian_delta_rotvec_v1"
+            if right_only
+            else "cartesian_delta_rotvec_v1"
+        )
+        if (
+            values.ndim != 2
+            or values.shape[1] != action_dimension
+            or values.shape[0] != len(offsets)
+        ):
+            raise PolicyActionError(
+                f"action chunk must have shape [N,{action_dimension}] with N offsets"
+            )
         if not 1 <= values.shape[0] <= 32:
             raise PolicyActionError("action chunk must contain 1..32 points")
         if any(item < 0 for item in offsets) or any(
@@ -179,7 +198,11 @@ class SyncPolicyActionClient:
         # validation.  The server repeats validation and owns the authoritative
         # conversion; no native vector is transmitted from this policy client.
         for point in values:
-            policy_action24_to_native30(point)
+            (
+                right_policy_action12_to_native30(point)
+                if right_only
+                else policy_action24_to_native30(point)
+            )
 
         with self._lock:
             self._ensure_ready()
@@ -193,7 +216,7 @@ class SyncPolicyActionClient:
             request = data_pb.PolicyActionChunk(
                 schema_version=2,
                 schema_hash=mapper.schema_hash,
-                action_schema_id="cartesian_delta_rotvec_v1",
+                action_schema_id=action_schema_id,
                 lease_id=self._lease_id,
                 session_id=mapper.session_id,
                 sequence=sequence,
@@ -207,7 +230,7 @@ class SyncPolicyActionClient:
                 target.action.CopyFrom(
                     data_pb.TensorPayload(
                         dtype=data_pb.FLOAT32,
-                        shape=(24,),
+                        shape=(action_dimension,),
                         data=packed.tobytes(),
                     )
                 )

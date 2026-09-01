@@ -154,6 +154,22 @@ def test_runtime_mapper_minimal_state_does_not_request_tcp_pose():
     assert not any("tcp_pose" in item for item in mapper.required_channels)
 
 
+def test_runtime_mapper_right_profile_requests_only_right_and_two_rgb():
+    mapper = ProfileSnapshotMapper(
+        _description(), profile_id="right_joint_proprio_cartesian_v1"
+    )
+
+    frame = mapper.frame_from_snapshot(_snapshot(mapper))
+
+    assert frame["observation.state"].shape == (13,)
+    assert set(frame) == {
+        "observation.state",
+        "observation.images.head_image",
+        "observation.images.right_wrist_image",
+    }
+    assert not any("left" in item for item in mapper.required_channels)
+
+
 def test_runtime_mapper_fails_closed_on_incomplete_snapshot():
     mapper = ProfileSnapshotMapper(
         _description(), profile_id="joint_proprio_cartesian_v1"

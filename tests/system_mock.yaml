@@ -25,6 +25,7 @@ overrides:
         recording:
           pointcloud: true
       left_wrist:
+        enabled: true
         recording:
           depth: true
       right_wrist:
@@ -35,6 +36,7 @@ overrides:
     wifi_connection: Deepybo-Prime
     keyframe_interval_frames: 15
   teleop:
+    controlled_side: both
     manus_calibration: ""
     control_enabled: false
   recording:

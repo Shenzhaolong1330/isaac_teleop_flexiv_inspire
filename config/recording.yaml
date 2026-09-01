@@ -11,8 +11,8 @@ recording:
   deviceio_mode: native
   # 训练与 replay 都使用 deviceio.mcap；关闭重复的 ROS bag 可显著省空间。
   ros_mcap_enabled: false
-  # training 仅保留相机、双臂完整状态、双手/触觉和 sent_command。
-  deviceio_profile: training  # training | full
+  # right_training 仅保留头部/右腕 RGB、右臂/右手/触觉和 sent_command。
+  deviceio_profile: right_training  # right_training | training | full
   # true: 只在中踏板踩下、机械臂允许运动时写入上述训练数据。
   # 松开踏板不会结束 episode，再次踩下会继续写入同一条数据。
   record_only_while_pedal_pressed: true

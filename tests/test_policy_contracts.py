@@ -15,6 +15,7 @@ from policy_contracts import (
     FeatureContract,
     FeatureContractError,
     JOINT_MINIMAL_PROFILE,
+    RIGHT_JOINT_MINIMAL_PROFILE,
     SystemSchema,
     TensorDescriptor,
     cartesian_minimal_state,
@@ -23,7 +24,10 @@ from policy_contracts import (
     legacy_state38,
     matrix_to_rotvec,
     native_action30_to_policy24,
+    native_action30_to_right_policy12,
     policy_action24_to_native30,
+    right_joint_minimal_state,
+    right_policy_action12_to_native30,
     quaternion_xyzw_to_matrix,
     rotation6d_to_matrix,
     rotvec_to_matrix,
@@ -85,7 +89,10 @@ def test_default_conversion_targets_rl100_zarr() -> None:
     config = yaml.safe_load((ROOT / "config" / "conversion.yaml").read_text())
 
     assert config["output"]["format"] == "rl100_zarr"
-    assert config["rl100_zarr_export"]["profile"] == "joint_proprio_cartesian_v1"
+    assert (
+        config["rl100_zarr_export"]["profile"]
+        == "right_joint_proprio_cartesian_v1"
+    )
     assert config["rl100_zarr_export"]["timeline"]["fps"] == 30.0
 
 
@@ -135,6 +142,22 @@ def test_native_and_policy_action_roundtrip_preserves_se3_and_hands() -> None:
     assert np.allclose(recovered[18:30], native[18:30])
 
 
+def test_right_action_roundtrip_selects_only_right_side() -> None:
+    native = _native_action()
+    policy = native_action30_to_right_policy12(native)
+    recovered = right_policy_action12_to_native30(policy)
+
+    assert policy.shape == (12,)
+    assert np.allclose(recovered[9:12], native[9:12])
+    assert np.allclose(
+        rotation6d_to_matrix(recovered[12:18]),
+        rotation6d_to_matrix(native[12:18]),
+        atol=1e-7,
+    )
+    assert np.allclose(recovered[24:30], native[24:30])
+    assert np.allclose(recovered[18:24], 0.0)
+
+
 def test_action_mapping_registry_supports_multiple_contracts_without_transport() -> None:
     registry = flexiv_inspire_action_mappings()
     policy = native_action30_to_policy24(_native_action())
@@ -145,6 +168,7 @@ def test_action_mapping_registry_supports_multiple_contracts_without_transport()
     assert registry.schema_ids == (
         "cartesian_delta_rotvec_v1",
         "flexiv_inspire_native_rot6d_v1",
+        "right_cartesian_delta_rotvec_v1",
     )
     assert np.allclose(mapped_policy, policy_action24_to_native30(policy))
     assert np.allclose(mapped_native, _native_action())
@@ -177,6 +201,9 @@ def test_state_profiles_do_not_duplicate_pose_representations() -> None:
     assert all("ee_pose" not in name for name in JOINT_MINIMAL_PROFILE.state_names)
     assert JOINT_MINIMAL_PROFILE.state_dimension == 26
     assert JOINT_MINIMAL_PROFILE.action_dimension == 24
+    assert right_joint_minimal_state(q[7:14], hands[6:12]).shape == (13,)
+    assert RIGHT_JOINT_MINIMAL_PROFILE.state_dimension == 13
+    assert RIGHT_JOINT_MINIMAL_PROFILE.action_dimension == 12
 
 
 def test_feature_contract_rejects_unrequested_observation_fields() -> None:

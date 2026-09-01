@@ -98,6 +98,24 @@ JOINT_MINIMAL_PROFILE = PolicyProfile(
     action_semantics="world relative xyz+rotvec, normalized absolute hand target",
 )
 
+RIGHT_JOINT_MINIMAL_PROFILE = PolicyProfile(
+    profile_id="right_joint_proprio_cartesian_v1",
+    state_names=tuple(
+        [f"right_joint_{index}.pos" for index in range(1, 8)]
+        + [f"right_hand_state.{name}" for name in HAND_ACTUATORS]
+    ),
+    action_names=tuple(
+        [f"right_delta_ee_pose.{axis}" for axis in POSE_AXES]
+        + [f"right_hand_cmd.{name}" for name in HAND_ACTUATORS]
+    ),
+    image_keys=(
+        "observation.images.right_wrist_image",
+        "observation.images.head_image",
+    ),
+    state_semantics="right q+normalized_hand; no left-side policy channels",
+    action_semantics="right world relative xyz+rotvec, normalized absolute hand target",
+)
+
 CARTESIAN_MINIMAL_PROFILE = PolicyProfile(
     profile_id="cartesian_proprio_v1",
     state_names=tuple(
@@ -119,6 +137,7 @@ _PROFILES = {
     for item in (
         DUAL_ARM_LEROBOT_V1_PROFILE,
         JOINT_MINIMAL_PROFILE,
+        RIGHT_JOINT_MINIMAL_PROFILE,
         CARTESIAN_MINIMAL_PROFILE,
     )
 }

@@ -29,7 +29,7 @@ cameras:
       depth_spatial_filter_enabled: true
       depth_temporal_filter_enabled: true
       recording: {rgb: true, depth: true, pointcloud: false}
-    left_wrist: {serial: "342522074353", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
+    left_wrist: {enabled: false, serial: "342522074353", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
     right_wrist: {serial: "347622074577", width: 424, height: 240, fps: 15, pixel_format: rgb8, extrinsics: "", recording: {rgb: true, depth: false, pointcloud: false}}
 
 xr_video:
@@ -86,6 +86,9 @@ xr_video:
     transition_duration: 0.3
 
 teleop:
+  # Temporary single-arm profile: the middle pedal controls only the right
+  # Flexiv and right Inspire hand. The left side stays in hardware Hold.
+  controlled_side: right
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
   # Quest controls only wrist position/orientation and buttons. OculusReader

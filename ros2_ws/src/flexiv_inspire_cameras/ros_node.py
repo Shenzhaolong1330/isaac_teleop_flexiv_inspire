@@ -1,4 +1,4 @@
-"""ROS 2 publisher and optional DeviceIO MCAP tap for three RGB cameras."""
+"""ROS 2 publisher and optional DeviceIO MCAP tap for configured RGB cameras."""
 
 from __future__ import annotations
 
@@ -105,7 +105,7 @@ def main(args=None) -> int:
             self.create_timer(5.0, self._report_health)
             self._capture.start()
             self.get_logger().info(
-                "three independent RealSense RGB+depth pipelines started; "
+                f"{len(self._configs)} independent RealSense RGB+depth pipelines started; "
                 "capture/record rates="
                 + ", ".join(
                     f"{name}:{camera.fps}/{camera.recording_hz or camera.fps:g}Hz"

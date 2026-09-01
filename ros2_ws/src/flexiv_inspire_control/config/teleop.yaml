@@ -1,6 +1,7 @@
 /**:
   ros__parameters:
     command_enabled: false
+    controlled_side: both
     ee_topic: /xr_teleop/ee_poses
     controller_topic: /xr_teleop/controller_data
     tf_topic: /tf

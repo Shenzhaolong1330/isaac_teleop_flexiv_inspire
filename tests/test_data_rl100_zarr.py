@@ -58,6 +58,46 @@ def test_rl100_frame_has_exact_mvp_dimensions_and_normalized_hands():
     assert np.allclose(frame["action"][12:24], 0.5)
 
 
+def test_right_profile_has_13d_state_12d_action_and_two_rgb_inputs():
+    frame = aligned_row_to_rl100_frame(
+        _row(0), profile_id="right_joint_proprio_cartesian_v1"
+    )
+
+    assert set(frame) == {"state", "action", "rgb_head", "rgb_right_wrist"}
+    assert frame["state"].shape == (13,)
+    assert frame["action"].shape == (12,)
+    np.testing.assert_allclose(frame["state"][:7], np.arange(8, 15))
+    np.testing.assert_allclose(frame["state"][7:], 0.75)
+    np.testing.assert_allclose(frame["action"][:3], [-0.01, -0.02, -0.03])
+    np.testing.assert_allclose(frame["action"][6:], 0.5)
+
+
+def test_right_profile_export_writes_only_right_contract_arrays(tmp_path):
+    output = tmp_path / "right.zarr"
+    rows = [_row(index * 33_333_333) for index in range(9)]
+
+    export_rl100_zarr(
+        [RL100SourceEpisode(rows, "episode/manifest.json")],
+        output_root=output,
+        spec=RL100ZarrSpec(profile="right_joint_proprio_cartesian_v1"),
+    )
+
+    root = zarr.open(str(output), mode="r")
+    assert root.attrs["schema_id"] == "flexiv_rl100_right_dp_rgb_v1"
+    assert root["data/state"].shape == (9, 13)
+    assert root["data/action"].shape == (9, 12)
+    assert set(root["data"].array_keys()) == {
+        "action",
+        "capture_segment",
+        "rgb_head",
+        "rgb_right_wrist",
+        "source_episode_index",
+        "source_timestamp_ns",
+        "state",
+        "timestamp_ns",
+    }
+
+
 def test_export_writes_rl100_schema_and_splits_command_gaps(tmp_path):
     period = 33_333_333
     first = [_row(index * period, segment=0) for index in range(9)]

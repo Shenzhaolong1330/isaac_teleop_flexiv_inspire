@@ -152,3 +152,30 @@ def test_clutch_release_clears_local_mapping_latch_and_reanchors():
     )
     assert reanchor.active and not reanchor.hold_latched
     np.testing.assert_allclose(reanchor.left_xyz, np.zeros(3))
+
+
+def test_right_only_mapper_ignores_left_jump_and_emits_identity_left_delta():
+    mapper = QuestSE3Mapper(controlled_sides=("right",))
+    first = TrackingSample(
+        left=TrackedPose.make([0, 0, 0], [0, 0, 0, 1]),
+        right=TrackedPose.make([0, 0, 0], [0, 0, 0, 1]),
+        sequence=1,
+        source_time_ns=1_000_000,
+        receive_monotonic_ns=1_000_000_000,
+        frame_id="world",
+    )
+    second = TrackingSample(
+        left=TrackedPose.make([1, 0, 0], [0, 0, 0, 1]),
+        right=TrackedPose.make([0.01, 0, 0], [0, 0, 0, 1]),
+        sequence=2,
+        source_time_ns=2_000_000,
+        receive_monotonic_ns=1_010_000_000,
+        frame_id="world",
+    )
+
+    mapper.update(first, deadman=True, now_ns=1_000_000_000)
+    result = mapper.update(second, deadman=True, now_ns=1_010_000_000)
+
+    assert result.active and not result.hold_latched
+    np.testing.assert_allclose(result.left_xyz, np.zeros(3))
+    np.testing.assert_allclose(result.right_xyz, [0.01, 0, 0])

@@ -83,11 +83,13 @@ class _DataStub:
         return call
 
 
-def _profile_client():
+def _profile_client(profile_id="joint_proprio_cartesian_v1"):
     return SimpleNamespace(
         channel=object(),
         stub=object(),
-        mapper=SimpleNamespace(schema_hash="schema", session_id="session"),
+        mapper=SimpleNamespace(
+            schema_hash="schema", session_id="session", profile_id=profile_id
+        ),
         request_timeout_s=0.5,
     )
 
@@ -136,6 +138,25 @@ def test_action_client_lazily_acquires_and_keeps_one_stream(monkeypatch):
     )
     assert len(controls[0].stops) == 1
     assert not controls[0].releases
+
+
+def test_right_action_client_sends_12d_registered_schema(monkeypatch):
+    controls, data = _install_fakes(monkeypatch)
+    client = SyncPolicyActionClient(
+        _profile_client("right_joint_proprio_cartesian_v1"), client_id="right"
+    )
+    action = np.concatenate((np.zeros(6), np.full(6, 0.5)))
+
+    result = client.send(action)
+    client.close()
+
+    wire = data[0].received[0]
+    assert result.accepted
+    assert wire.action_schema_id == "right_cartesian_delta_rotvec_v1"
+    assert tuple(wire.points[0].action.shape) == (12,)
+    assert np.allclose(
+        np.frombuffer(wire.points[0].action.data, dtype="<f4"), action
+    )
 
 
 def test_action_rejection_drops_lease_and_stream(monkeypatch):

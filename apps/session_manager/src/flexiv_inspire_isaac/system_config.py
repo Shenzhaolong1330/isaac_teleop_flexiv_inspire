@@ -462,6 +462,9 @@ def load_system_config(path: str | Path) -> SystemConfig:
         "quest_squeeze_either",
     }:
         raise SystemConfigError("teleop.deadman_source is unsupported")
+    controlled_side = str(teleop.get("controlled_side", "both"))
+    if controlled_side not in {"left", "right", "both"}:
+        raise SystemConfigError("teleop.controlled_side must be left, right or both")
     quest_input_raw = teleop.get("quest_input")
     if quest_input_raw is not None:
         quest_input = _mapping(quest_input_raw, "teleop.quest_input")
@@ -615,6 +618,8 @@ def load_system_config(path: str | Path) -> SystemConfig:
         )
     for name, stream_value in streams.items():
         stream = _mapping(stream_value, f"cameras.streams.{name}")
+        if not isinstance(stream.get("enabled", True), bool):
+            raise SystemConfigError(f"cameras.streams.{name}.enabled must be a bool")
         recording = _mapping(
             stream.get("recording", {}), f"cameras.streams.{name}.recording"
         )
@@ -679,6 +684,19 @@ def load_system_config(path: str | Path) -> SystemConfig:
             raise SystemConfigError(
                 f"cameras.streams.{name}.extrinsics must be a YAML file"
             )
+    active_cameras = {
+        name for name, stream in streams.items() if bool(stream.get("enabled", True))
+    }
+    controlled_sides = (
+        ("left", "right") if controlled_side == "both" else (controlled_side,)
+    )
+    required_cameras = {"head"} | {
+        f"{side}_wrist" for side in controlled_sides
+    }
+    if not required_cameras.issubset(active_cameras):
+        raise SystemConfigError(
+            "enabled cameras must include " + ", ".join(sorted(required_cameras))
+        )
     if xr.get("transport") not in {"lan", "usb_tcp"}:
         raise SystemConfigError("xr_video.transport must be lan or usb_tcp")
     if xr.get("transport") == "lan" and not str(xr.get("wifi_connection", "")).strip():
@@ -786,8 +804,14 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError("recording.deviceio_mode must be native")
     if not isinstance(recording.get("ros_mcap_enabled"), bool):
         raise SystemConfigError("recording.ros_mcap_enabled must be a bool")
-    if recording.get("deviceio_profile") not in {"training", "full"}:
-        raise SystemConfigError("recording.deviceio_profile must be training or full")
+    if recording.get("deviceio_profile") not in {
+        "training",
+        "right_training",
+        "full",
+    }:
+        raise SystemConfigError(
+            "recording.deviceio_profile must be training, right_training or full"
+        )
     if not isinstance(recording.get("record_only_while_pedal_pressed"), bool):
         raise SystemConfigError(
             "recording.record_only_while_pedal_pressed must be a bool"
@@ -837,6 +861,8 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
         "cameras": {},
     }
     for name, stream in cameras["streams"].items():
+        if not bool(stream.get("enabled", True)):
+            continue
         recording = stream.get("recording", {})
         extrinsics = str(stream.get("extrinsics", "")).strip()
         camera["cameras"][name] = {
@@ -1066,6 +1092,7 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
                 "ros__parameters": {
                     "session_id": session["id"],
                     "command_enabled": bool(teleop["control_enabled"]),
+                    "controlled_side": str(teleop.get("controlled_side", "both")),
                     "control_rate_hz": sampling["teleop_command_hz"],
                     "manus_calibration": str(
                         config.resolve(teleop["manus_calibration"])

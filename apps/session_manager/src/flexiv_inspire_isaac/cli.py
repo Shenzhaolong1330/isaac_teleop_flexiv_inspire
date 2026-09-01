@@ -1248,6 +1248,8 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         "-p",
         f"deviceio_profile:={recording['deviceio_profile']}",
         "-p",
+        f"controlled_side:={root['teleop'].get('controlled_side', 'both')}",
+        "-p",
         "record_only_while_pedal_pressed:="
         + str(bool(recording["record_only_while_pedal_pressed"])).lower(),
         "-p",
@@ -2101,7 +2103,11 @@ def _main(args, config) -> int:
             commands,
             processes,
             logs,
-            tuple(config.document["cameras"]["streams"]),
+            tuple(
+                name
+                for name, stream in config.document["cameras"]["streams"].items()
+                if bool(stream.get("enabled", True))
+            ),
         )
         if any("run_xr_raw_source.sh" in " ".join(command) for command in commands):
             _wait_for_cloudxr_runtime(processes, logs)
@@ -2232,7 +2238,11 @@ def _main(args, config) -> int:
                 commands,
                 processes,
                 logs,
-                tuple(config.document["cameras"]["streams"]),
+                tuple(
+                    name
+                    for name, stream in config.document["cameras"]["streams"].items()
+                    if bool(stream.get("enabled", True))
+                ),
             )
             if settings["auto_authorize_policy"] and reset_requested:
                 policy_pedal_required = bool(
@@ -3031,7 +3041,8 @@ def _run_collection(config, rendered: dict[str, Path]) -> int:
         + (
             "capture: middle pedal pressed only; action=sent_command\n"
             if recording.get("record_only_while_pedal_pressed", False)
-            and recording.get("deviceio_profile", "full") == "training"
+            and recording.get("deviceio_profile", "full")
+            in {"training", "right_training"}
             else "capture: whole episode\n"
         )
         + "right=commit/Home/next, left=discard/Home/retry, Quest A=pause/Home/resume, Ctrl-C=save/stop",

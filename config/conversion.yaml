@@ -15,7 +15,7 @@ output:
 
 rl100_zarr_export:
   schema_version: 1
-  profile: joint_proprio_cartesian_v1
+  profile: right_joint_proprio_cartesian_v1
   timeline:
     source: control/sent_command
     fps: 30.0

@@ -16,9 +16,12 @@ LEGACY_ROT6D_ORDER = "R00,R10,R20,R01,R11,R21"
 QUATERNION_ORDER = "QUATERNION_XYZW"
 LEGACY_QUATERNION_ORDER = "qx,qy,qz,qw"
 FULL_VALID_MASK = 1 | 2 | 4 | 8
+RIGHT_VALID_MASK = 2 | 8
 
 
-def _flatten_safe_command_checked(payload):
+def _flatten_safe_command_checked(
+    payload, *, accepted_valid_masks: tuple[int, ...] = (FULL_VALID_MASK,)
+):
     if not isinstance(payload, dict):
         return None, "sent-command-payload-not-mapping"
     try:
@@ -29,7 +32,7 @@ def _flatten_safe_command_checked(payload):
     if (
         schema_version != 1
         or payload.get("frame_id") != "world"
-        or valid_mask != FULL_VALID_MASK
+        or valid_mask not in accepted_valid_masks
         or not bool(payload.get("deadman", False))
     ):
         return None, "sent-command-schema-frame-mask-or-deadman-invalid"
@@ -142,7 +145,11 @@ def _stream_name(topic: str) -> str:
         return f"camera/{parts[1]}/jpeg"
     return normalized
 
-def load_json_mcap_streams(paths: Iterable[str | Path]) -> dict[str, list[TimedSample]]:
+def load_json_mcap_streams(
+    paths: Iterable[str | Path],
+    *,
+    accepted_command_masks: tuple[int, ...] = (FULL_VALID_MASK,),
+) -> dict[str, list[TimedSample]]:
     try:
         from mcap.reader import make_reader
     except ImportError as exc:
@@ -163,7 +170,8 @@ def load_json_mcap_streams(paths: Iterable[str | Path]) -> dict[str, list[TimedS
                 topic = _stream_name(raw_topic)
                 if raw_topic.rstrip("/").endswith("control/sent_command"):
                     payload, safe_reason = _flatten_safe_command_checked(
-                        document["payload"]
+                        document["payload"],
+                        accepted_valid_masks=accepted_command_masks,
                     )
                     if payload is None:
                         document["valid"] = False

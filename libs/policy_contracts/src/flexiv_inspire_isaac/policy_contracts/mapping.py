@@ -26,15 +26,15 @@ def _finite(value: Sequence[float], size: int, name: str) -> np.ndarray:
     return result
 
 
-def _normalized_hands(value: Sequence[float]) -> np.ndarray:
-    result = _finite(value, 12, "hand angle")
+def _normalized_hands(value: Sequence[float], size: int = 12) -> np.ndarray:
+    result = _finite(value, size, "hand angle")
     if np.any(result < 0.0) or np.any(result > 1000.0):
         raise MappingError("native hand angle must be in [0,1000]")
     return result / 1000.0
 
 
-def _native_hands(value: Sequence[float]) -> np.ndarray:
-    result = _finite(value, 12, "normalized hand target")
+def _native_hands(value: Sequence[float], size: int = 12) -> np.ndarray:
+    result = _finite(value, size, "normalized hand target")
     if np.any(result < 0.0) or np.any(result > 1.0):
         raise MappingError("normalized hand target must be in [0,1]")
     return result * 1000.0
@@ -66,6 +66,35 @@ def policy_action24_to_native30(value: Sequence[float]) -> np.ndarray:
     return np.concatenate((left, right, _native_hands(policy[12:24])))
 
 
+def native_action30_to_right_policy12(value: Sequence[float]) -> np.ndarray:
+    """Select the right arm/hand from one canonical bimanual action."""
+
+    native = _finite(value, 30, "native action")
+    right = np.concatenate(
+        (native[9:12], matrix_to_rotvec(rotation6d_to_matrix(native[12:18])))
+    )
+    return np.concatenate((right, _normalized_hands(native[24:30], 6)))
+
+
+def right_policy_action12_to_native30(value: Sequence[float]) -> np.ndarray:
+    """Embed a right-only action; left values are inert and masked by the server."""
+
+    policy = _finite(value, 12, "right policy action")
+    identity_rotation = matrix_to_rotation6d(np.eye(3))
+    right = np.concatenate(
+        (policy[0:3], matrix_to_rotation6d(rotvec_to_matrix(policy[3:6])))
+    )
+    return np.concatenate(
+        (
+            np.zeros(3),
+            identity_rotation,
+            right,
+            np.zeros(6),
+            _native_hands(policy[6:12], 6),
+        )
+    )
+
+
 def flexiv_inspire_action_mappings() -> ActionMappingRegistry:
     """Build the station mapping registry without importing RPC or hardware code."""
 
@@ -75,6 +104,11 @@ def flexiv_inspire_action_mappings() -> ActionMappingRegistry:
             "cartesian_delta_rotvec_v1",
             input_dimension=24,
             transform=policy_action24_to_native30,
+        )
+        .register(
+            "right_cartesian_delta_rotvec_v1",
+            input_dimension=12,
+            transform=right_policy_action12_to_native30,
         )
         .register(
             "flexiv_inspire_native_rot6d_v1",
@@ -111,6 +145,14 @@ def joint_minimal_state(
 ) -> np.ndarray:
     return np.concatenate(
         (_finite(arm_q14, 14, "arm q"), _normalized_hands(hand_angle12))
+    )
+
+
+def right_joint_minimal_state(
+    arm_q7: Sequence[float], hand_angle6: Sequence[float]
+) -> np.ndarray:
+    return np.concatenate(
+        (_finite(arm_q7, 7, "right arm q"), _normalized_hands(hand_angle6, 6))
     )
 
 

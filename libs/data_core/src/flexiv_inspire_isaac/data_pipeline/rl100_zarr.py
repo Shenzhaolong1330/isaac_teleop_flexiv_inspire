@@ -14,7 +14,13 @@ import numpy as np
 import yaml
 import zarr
 
-from policy_contracts import get_profile, joint_minimal_state, native_action30_to_policy24
+from policy_contracts import (
+    get_profile,
+    joint_minimal_state,
+    native_action30_to_policy24,
+    native_action30_to_right_policy12,
+    right_joint_minimal_state,
+)
 
 from .export_spec import ActionView
 from .lerobot_v3 import _decode_image, _field_vector, _validated_action
@@ -23,11 +29,25 @@ from .profile_export import InvalidPolicyFrame, _required_row_value
 
 SCHEMA_ID = "flexiv_rl100_dp_rgb_v1"
 PROFILE_ID = "joint_proprio_cartesian_v1"
+RIGHT_SCHEMA_ID = "flexiv_rl100_right_dp_rgb_v1"
+RIGHT_PROFILE_ID = "right_joint_proprio_cartesian_v1"
 IMAGE_SOURCES = {
     "rgb_head": "observation.images.head",
     "rgb_left_wrist": "observation.images.left_wrist",
     "rgb_right_wrist": "observation.images.right_wrist",
 }
+RIGHT_IMAGE_SOURCES = {
+    "rgb_head": "observation.images.head",
+    "rgb_right_wrist": "observation.images.right_wrist",
+}
+
+
+def _profile_contract(profile_id: str) -> tuple[str, Mapping[str, str]]:
+    if profile_id == PROFILE_ID:
+        return SCHEMA_ID, IMAGE_SOURCES
+    if profile_id == RIGHT_PROFILE_ID:
+        return RIGHT_SCHEMA_ID, RIGHT_IMAGE_SOURCES
+    raise RL100ZarrSpecError(f"unsupported RL-100 profile: {profile_id}")
 
 
 class RL100ZarrSpecError(ValueError):
@@ -108,10 +128,7 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
         timeline.get("max_period_error_fraction", 0.25)
     )
 
-    if profile != PROFILE_ID:
-        raise RL100ZarrSpecError(
-            f"RL-100 MVP requires profile: {PROFILE_ID}"
-        )
+    _profile_contract(profile)
     get_profile(profile)
     if source_name != "control/sent_command":
         raise RL100ZarrSpecError(
@@ -153,8 +170,14 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
     )
 
 
-def aligned_row_to_rl100_frame(row: Mapping[str, Any]) -> dict[str, np.ndarray]:
-    """Convert one aligned native row to the exact 26D/24D/three-RGB contract."""
+def aligned_row_to_rl100_frame(
+    row: Mapping[str, Any], *, profile_id: str = PROFILE_ID
+) -> dict[str, np.ndarray]:
+    """Convert one aligned native row to the selected strict policy contract."""
+
+    profile = get_profile(profile_id)
+    _, image_sources = _profile_contract(profile_id)
+    sides = ("right",) if profile_id == RIGHT_PROFILE_ID else ("left", "right")
 
     try:
         arm_q = np.concatenate(
@@ -168,7 +191,7 @@ def aligned_row_to_rl100_frame(row: Mapping[str, Any]) -> dict[str, np.ndarray]:
                     "q",
                     7,
                 )
-                for side in ("left", "right")
+                for side in sides
             ]
         )
         hand_angle = np.concatenate(
@@ -182,10 +205,14 @@ def aligned_row_to_rl100_frame(row: Mapping[str, Any]) -> dict[str, np.ndarray]:
                     "angle",
                     6,
                 )
-                for side in ("left", "right")
+                for side in sides
             ]
         )
-        state = joint_minimal_state(arm_q, hand_angle).astype(np.float32)
+        state = (
+            right_joint_minimal_state(arm_q, hand_angle)
+            if profile_id == RIGHT_PROFILE_ID
+            else joint_minimal_state(arm_q, hand_angle)
+        ).astype(np.float32)
     except InvalidPolicyFrame:
         raise
     except ValueError as exc:
@@ -195,14 +222,18 @@ def aligned_row_to_rl100_frame(row: Mapping[str, Any]) -> dict[str, np.ndarray]:
         native_action = _validated_action(
             _required_row_value(row, "action", category="action"), ActionView()
         )
-        action = native_action30_to_policy24(native_action).astype(np.float32)
+        action = (
+            native_action30_to_right_policy12(native_action)
+            if profile_id == RIGHT_PROFILE_ID
+            else native_action30_to_policy24(native_action)
+        ).astype(np.float32)
     except InvalidPolicyFrame:
         raise
     except ValueError as exc:
         raise InvalidPolicyFrame("action", str(exc)) from exc
 
     images: dict[str, np.ndarray] = {}
-    for target, source in IMAGE_SOURCES.items():
+    for target, source in image_sources.items():
         try:
             image = _decode_image(
                 _required_row_value(row, source, category="image")
@@ -215,7 +246,9 @@ def aligned_row_to_rl100_frame(row: Mapping[str, Any]) -> dict[str, np.ndarray]:
             raise InvalidPolicyFrame("image", f"{source}: expected HWC uint8 RGB")
         images[target] = np.ascontiguousarray(image.transpose(2, 0, 1))
 
-    if state.shape != (26,) or action.shape != (24,):
+    if state.shape != (profile.state_dimension,) or action.shape != (
+        profile.action_dimension,
+    ):
         raise InvalidPolicyFrame("observation", "policy mapping returned wrong dimensions")
     return {"state": state, "action": action, **images}
 
@@ -225,6 +258,7 @@ class _StreamingZarrWriter:
         self,
         root: zarr.Group,
         *,
+        profile_id: str,
         fps: float,
         source_manifests: Sequence[str],
         stitch_gaps: bool,
@@ -237,21 +271,22 @@ class _StreamingZarrWriter:
         self.episode_ends: list[int] = []
         self.episode_sources: list[int] = []
         self.count = 0
-        profile = get_profile(PROFILE_ID)
+        self.profile = get_profile(profile_id)
+        schema_id, self.image_sources = _profile_contract(profile_id)
         root.attrs.update(
             {
-                "schema_id": SCHEMA_ID,
+                "schema_id": schema_id,
                 "schema_version": 1,
-                "profile": PROFILE_ID,
+                "profile": profile_id,
                 "fps": float(fps),
                 "image_layout": "CHW",
                 "image_dtype": "uint8",
-                "state_dimension": 26,
-                "action_dimension": 24,
-                "state_names": list(profile.state_names),
-                "action_names": list(profile.action_names),
-                "state_semantics": profile.state_semantics,
-                "action_semantics": profile.action_semantics,
+                "state_dimension": self.profile.state_dimension,
+                "action_dimension": self.profile.action_dimension,
+                "state_names": list(self.profile.state_names),
+                "action_names": list(self.profile.action_names),
+                "state_semantics": self.profile.state_semantics,
+                "action_semantics": self.profile.action_semantics,
                 "timeline_source": "control/sent_command",
                 "timestamp_semantics": (
                     "pedal_gaps_removed" if stitch_gaps else "source_monotonic"
@@ -266,16 +301,24 @@ class _StreamingZarrWriter:
     def _initialize(self, frame: Mapping[str, np.ndarray]) -> None:
         image_shapes = {
             key: tuple(int(item) for item in frame[key].shape)
-            for key in IMAGE_SOURCES
+            for key in self.image_sources
         }
         compressor = numcodecs.Blosc(
             cname="zstd", clevel=3, shuffle=numcodecs.Blosc.BITSHUFFLE
         )
         self.arrays["state"] = self.data.empty(
-            "state", shape=(0, 26), chunks=(1024, 26), dtype="f4", compressor=compressor
+            "state",
+            shape=(0, self.profile.state_dimension),
+            chunks=(1024, self.profile.state_dimension),
+            dtype="f4",
+            compressor=compressor,
         )
         self.arrays["action"] = self.data.empty(
-            "action", shape=(0, 24), chunks=(1024, 24), dtype="f4", compressor=compressor
+            "action",
+            shape=(0, self.profile.action_dimension),
+            chunks=(1024, self.profile.action_dimension),
+            dtype="f4",
+            compressor=compressor,
         )
         for key, shape in image_shapes.items():
             self.arrays[key] = self.data.empty(
@@ -299,7 +342,7 @@ class _StreamingZarrWriter:
     def validate_shapes(self, frame: Mapping[str, np.ndarray]) -> None:
         if self.image_shapes is None:
             return
-        actual = {key: tuple(frame[key].shape) for key in IMAGE_SOURCES}
+        actual = {key: tuple(frame[key].shape) for key in self.image_sources}
         if actual != self.image_shapes:
             raise InvalidPolicyFrame(
                 "image", f"camera image shape changed: {actual} != {self.image_shapes}"
@@ -321,7 +364,7 @@ class _StreamingZarrWriter:
             array.resize((end, *array.shape[1:]))
         self.arrays["state"][start:end] = np.stack([item[0]["state"] for item in records])
         self.arrays["action"][start:end] = np.stack([item[0]["action"] for item in records])
-        for key in IMAGE_SOURCES:
+        for key in self.image_sources:
             self.arrays[key][start:end] = np.stack([item[0][key] for item in records])
         self.arrays["timestamp_ns"][start:end] = [item[1] for item in records]
         self.arrays["source_timestamp_ns"][start:end] = [item[2] for item in records]
@@ -376,6 +419,7 @@ def export_rl100_zarr(
         root = zarr.group(store=zarr.DirectoryStore(str(staging)), overwrite=True)
         writer = _StreamingZarrWriter(
             root,
+            profile_id=spec.profile,
             fps=spec.fps,
             source_manifests=[item.source_manifest for item in episodes],
             stitch_gaps=spec.stitch_gaps,
@@ -431,7 +475,7 @@ def export_rl100_zarr(
                     )
                 )
                 try:
-                    frame = aligned_row_to_rl100_frame(row)
+                    frame = aligned_row_to_rl100_frame(row, profile_id=spec.profile)
                     writer.validate_shapes(frame)
                 except InvalidPolicyFrame as exc:
                     category = exc.category if exc.category in dropped else "observation"
@@ -477,7 +521,7 @@ def export_rl100_zarr(
 
         result = RL100ZarrExportResult(
             output_root=str(destination),
-            schema_id=SCHEMA_ID,
+            schema_id=_profile_contract(spec.profile)[0],
             profile=spec.profile,
             source_episodes=len(episodes),
             episodes_written=len(writer.episode_ends),

@@ -26,6 +26,7 @@ from policy_contracts import (
     legacy_state38,
     matrix_to_rotation6d,
     quaternion_xyzw_to_matrix,
+    right_joint_minimal_state,
 )
 
 from .data_client import decode_tensor
@@ -58,6 +59,12 @@ PROFILE_CHANNELS = {
         "hand.left.angle",
         "hand.right.angle",
         "camera.left_wrist.rgb",
+        "camera.right_wrist.rgb",
+        "camera.head.rgb",
+    ),
+    "right_joint_proprio_cartesian_v1": (
+        "arm.right.q",
+        "hand.right.angle",
         "camera.right_wrist.rgb",
         "camera.head.rgb",
     ),
@@ -163,11 +170,21 @@ class ProfileSnapshotMapper:
         self.schema_hash = str(description.schema_hash)
         self.session_id = str(description.session_id)
         self.required_channels = PROFILE_CHANNELS[self.profile_id]
+        self.sides = tuple(
+            side
+            for side in ("left", "right")
+            if any(f".{side}." in channel for channel in self.required_channels)
+        )
+        self.image_channels = {
+            feature: channel
+            for feature, channel in PROFILE_IMAGE_CHANNELS.items()
+            if channel in self.required_channels
+        }
         descriptors = _descriptor_map(description)
         self.image_shapes: dict[str, tuple[int, int, int]] = {}
 
         if any(channel.endswith(".q") for channel in self.required_channels):
-            for side in ("left", "right"):
+            for side in self.sides:
                 _require_descriptor(
                     descriptors,
                     f"arm.{side}.q",
@@ -175,7 +192,7 @@ class ProfileSnapshotMapper:
                     semantic="joint_position",
                 )
         if any(channel.endswith(".tcp_pose") for channel in self.required_channels):
-            for side in ("left", "right"):
+            for side in self.sides:
                 descriptor = _require_descriptor(
                     descriptors,
                     f"arm.{side}.tcp_pose",
@@ -184,14 +201,14 @@ class ProfileSnapshotMapper:
                 )
                 if descriptor.frame_id != "world":
                     raise ProfileRuntimeError("RPC TCP pose must be expressed in world")
-        for side in ("left", "right"):
+        for side in self.sides:
             _require_descriptor(
                 descriptors,
                 f"hand.{side}.angle",
                 shape=(6,),
                 semantic="hand_actuator_angle",
             )
-        for feature_key, channel_id in PROFILE_IMAGE_CHANNELS.items():
+        for feature_key, channel_id in self.image_channels.items():
             descriptor = _require_descriptor(
                 descriptors,
                 channel_id,
@@ -204,12 +221,17 @@ class ProfileSnapshotMapper:
             self.image_shapes[feature_key] = shape
 
         actions = {item.schema_id: item for item in description.action_schemas}
-        action = actions.get("cartesian_delta_rotvec_v1")
+        action_schema_id = (
+            "right_cartesian_delta_rotvec_v1"
+            if self.profile_id == "right_joint_proprio_cartesian_v1"
+            else "cartesian_delta_rotvec_v1"
+        )
+        action = actions.get(action_schema_id)
         if action is None or tuple(action.tensor.shape) != (
             self.profile.action_dimension,
         ):
             raise ProfileRuntimeError(
-                "RPC does not provide the registered 24D Cartesian action schema"
+                "RPC does not provide the registered Cartesian action schema"
             )
         if action.frame_id != "world" or not action.relative:
             raise ProfileRuntimeError("RPC Cartesian action semantics changed")
@@ -251,24 +273,31 @@ class ProfileSnapshotMapper:
         hands = np.concatenate(
             [
                 decode_tensor(samples[f"hand.{side}.angle"].tensor)
-                for side in ("left", "right")
+                for side in self.sides
             ]
         )
-        if self.profile_id == "joint_proprio_cartesian_v1":
+        if self.profile_id in {
+            "joint_proprio_cartesian_v1",
+            "right_joint_proprio_cartesian_v1",
+        }:
             joints = np.concatenate(
                 [
                     decode_tensor(samples[f"arm.{side}.q"].tensor)
-                    for side in ("left", "right")
+                    for side in self.sides
                 ]
             )
-            state = joint_minimal_state(joints, hands)
+            state = (
+                right_joint_minimal_state(joints, hands)
+                if self.profile_id == "right_joint_proprio_cartesian_v1"
+                else joint_minimal_state(joints, hands)
+            )
         else:
             poses = np.concatenate(
                 [
                     _pose7_to_pose9(
                         decode_tensor(samples[f"arm.{side}.tcp_pose"].tensor)
                     )
-                    for side in ("left", "right")
+                    for side in self.sides
                 ]
             )
             if self.profile_id == "cartesian_proprio_v1":
@@ -277,7 +306,7 @@ class ProfileSnapshotMapper:
                 joints = np.concatenate(
                     [
                         decode_tensor(samples[f"arm.{side}.q"].tensor)
-                        for side in ("left", "right")
+                        for side in self.sides
                     ]
                 )
                 state = legacy_state38(joints, poses, hands)
@@ -285,7 +314,7 @@ class ProfileSnapshotMapper:
         frame = {
             "observation.state": state.astype(np.float32, copy=False),
         }
-        for feature_key, channel_id in PROFILE_IMAGE_CHANNELS.items():
+        for feature_key, channel_id in self.image_channels.items():
             frame[feature_key] = _decode_image(
                 samples[channel_id].image, self.image_shapes[feature_key]
             )

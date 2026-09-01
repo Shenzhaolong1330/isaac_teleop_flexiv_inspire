@@ -75,6 +75,7 @@ class QuestSE3Mapper:
     def __init__(
         self,
         *,
+        controlled_sides: tuple[str, ...] = ("left", "right"),
         world_frame: str = "world",
         axis_rotation: np.ndarray | None = None,
         translation_gain: float = 1.0,
@@ -85,6 +86,9 @@ class QuestSE3Mapper:
         max_translation_step_m: float = 0.02,
         max_rotation_step_rad: float = 0.10,
     ) -> None:
+        if not controlled_sides or set(controlled_sides) - {"left", "right"}:
+            raise ValueError("controlled_sides must contain left and/or right")
+        self.controlled_sides = tuple(controlled_sides)
         self.world_frame = world_frame
         self.axis = (
             np.eye(3)
@@ -159,8 +163,11 @@ class QuestSE3Mapper:
             # The 60 Hz timer can run before a new 60 Hz PoseArray arrives.
             # A still-fresh duplicate is an active identity command, not a fault.
             return TeleopDelta.identity(active=True, reason="tracking_repeat")
-        values: dict[str, tuple[np.ndarray, np.ndarray, bool]] = {}
-        for side in ("left", "right"):
+        values = {
+            side: (np.zeros(3), IDENTITY_ROT6D.copy(), False)
+            for side in ("left", "right")
+        }
+        for side in self.controlled_sides:
             current = getattr(sample, side)
             previous = getattr(self._last, side)
             raw_translation = current.position - previous.position
@@ -213,7 +220,7 @@ class QuestSE3Mapper:
             hold_latched=False,
             reason=(
                 "mapped_step_limited"
-                if values["left"][2] or values["right"][2]
+                if any(values[side][2] for side in self.controlled_sides)
                 else "mapped"
             ),
         )

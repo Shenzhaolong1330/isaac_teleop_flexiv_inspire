@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from policy_contracts import ActionSchema, ChannelDescriptor, SystemSchema, TensorDescriptor
-from policy_contracts.profiles import HAND_ACTUATORS, JOINT_MINIMAL_PROFILE
+from policy_contracts.profiles import (
+    HAND_ACTUATORS,
+    JOINT_MINIMAL_PROFILE,
+    RIGHT_JOINT_MINIMAL_PROFILE,
+)
 
 
 ARM_JOINT_NAMES = tuple(f"joint_{index}" for index in range(1, 8))
@@ -140,6 +144,16 @@ def build_system_schema(
             ),
             "world",
             "delta_xyz_rotvec+absolute_hand_0_1",
+            action_rate_hz,
+            True,
+        ),
+        ActionSchema(
+            "right_cartesian_delta_rotvec_v1",
+            TensorDescriptor(
+                "float32", (12,), RIGHT_JOINT_MINIMAL_PROFILE.action_names
+            ),
+            "world",
+            "right_delta_xyz_rotvec+absolute_hand_0_1",
             action_rate_hz,
             True,
         ),

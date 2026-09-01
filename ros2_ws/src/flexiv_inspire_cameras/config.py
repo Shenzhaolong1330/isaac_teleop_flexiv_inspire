@@ -15,6 +15,7 @@ MIN_HEIGHT = 120
 MAX_HEIGHT = 1080
 MIN_FPS = 1
 MAX_FPS = 90
+CAMERA_NAMES = {"head", "left_wrist", "right_wrist"}
 
 
 @dataclass(frozen=True)
@@ -144,9 +145,11 @@ def load_camera_configs(path: str | Path) -> Mapping[str, CameraConfig]:
                 extrinsics_mode=mode,
             )
         cameras[name] = CameraConfig(name=name, **config)
-    if set(cameras) != {"head", "left_wrist", "right_wrist"}:
-        raise ValueError("exactly head, left_wrist and right_wrist cameras are required")
+    if not cameras or set(cameras) - CAMERA_NAMES:
+        raise ValueError(
+            "cameras must be a non-empty subset of head, left_wrist and right_wrist"
+        )
     serials = [camera.serial for camera in cameras.values()]
-    if len(set(serials)) != 3:
+    if len(set(serials)) != len(serials):
         raise ValueError("camera serials must be unique")
     return cameras

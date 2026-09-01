@@ -74,6 +74,7 @@ class ActionChunk:
     frame_id: str
     deadman: bool
     points: tuple[ActionPoint, ...]
+    valid_mask: int = 15
 
 
 def _validate_rot6d(values) -> None:
@@ -92,6 +93,8 @@ def validate_action_chunk(
         raise ValueError("frame_id must be exactly world")
     if not chunk.deadman:
         raise ValueError("policy deadman is false")
+    if chunk.valid_mask not in {10, 15}:
+        raise ValueError("policy valid_mask must select right-only or both sides")
     if chunk.sequence < 0:
         raise ValueError("sequence must be non-negative")
     elapsed = now_ns - chunk.server_receive_monotonic_ns

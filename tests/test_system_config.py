@@ -549,12 +549,12 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
 def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_path):
     config = load_system_config(_site())
 
-    assert config.document["recording"]["dataset_name"] == "open_boxes_first_try"
-    assert config.document["recording"]["task_name"] == "open_boxes"
+    assert config.document["recording"]["dataset_name"] == "pick_place_first_try"
+    assert config.document["recording"]["task_name"] == "pick_place"
     assert config.document["recording"]["episode_count"] == 20
     assert config.document["recording"]["auto_reset_before_record"] is True
     assert config.document["recording"]["ros_mcap_enabled"] is False
-    assert config.document["recording"]["deviceio_profile"] == "training"
+    assert config.document["recording"]["deviceio_profile"] == "right_training"
     assert config.document["recording"]["record_only_while_pedal_pressed"] is True
     assert config.document["sampling"]["arm_observation_hz"] == 300.0
     assert config.document["sampling"]["hand_state_hz"] == 200.0
@@ -600,17 +600,19 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "left_topic": "/manus/left/ergonomics",
         "right_topic": "/manus/right/ergonomics",
     }
+    assert config.document["teleop"]["controlled_side"] == "right"
     assert "--mock" not in config.document["commands"]["rdk_daemon"]
     assert config.document["flexiv"]["safety"]["max_linear_velocity_m_s"] == 0.20
     assert (
-        config.document["flexiv"]["safety"]["software_safety_limits_enabled"] is False
+        config.document["flexiv"]["safety"]["software_safety_limits_enabled"] is True
     )
 
     rendered = render_runtime_configs(config, tmp_path)
     camera = yaml.safe_load(rendered["camera.yaml"].read_text())
     assert camera["cameras"]["head"]["fps"] == 30
     assert camera["cameras"]["head"]["recording_hz"] == 30.0
-    assert camera["cameras"]["left_wrist"]["recording_hz"] == 30.0
+    assert set(camera["cameras"]) == {"head", "right_wrist"}
+    assert camera["cameras"]["right_wrist"]["recording_hz"] == 30.0
     lerobot = yaml.safe_load(rendered["lerobot_export.yaml"].read_text())
     assert lerobot["timeline"]["fps"] == 30.0
     assert lerobot["high_rate_arm_samples_per_frame"] == 20
@@ -649,6 +651,7 @@ def test_site_uses_validated_30hz_rates_and_disables_desktop_viewer():
         name: stream["fps"]
         for name, stream in config.document["cameras"]["streams"].items()
     } == {"head": 30, "left_wrist": 30, "right_wrist": 30}
+    assert config.document["cameras"]["streams"]["left_wrist"]["enabled"] is False
     assert config.document["recording"]["live_rerun"]["enabled"] is False
 
 

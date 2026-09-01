@@ -18,6 +18,8 @@ overrides:
   flexiv:
     policy_control:
       require_pedal: true
+    safety:
+      software_safety_limits_enabled: true
   cameras:
     depth_fps: 30
     streams:

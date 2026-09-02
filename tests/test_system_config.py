@@ -446,8 +446,8 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert parameters["home_lift_right_safe_z_m"] == -0.213296
     assert parameters["home_lift_max_linear_velocity_m_s"] == 0.12
     assert parameters["home_lift_parallel"] is False
-    assert parameters["max_linear_velocity_m_s"] == 0.20
-    assert parameters["max_angular_velocity_rad_s"] == 0.60
+    assert parameters["max_linear_velocity_m_s"] == 0.30
+    assert parameters["max_angular_velocity_rad_s"] == 0.80
     assert parameters["frame_config"].endswith("/config/dual_arm_frames.yaml")
     dftp = yaml.safe_load(rendered["dftp.yaml"].read_text())[
         "flexiv_inspire_dftp_driver"
@@ -465,7 +465,7 @@ def test_example_system_config_renders_all_runtime_children(tmp_path):
     assert teleop["deadman_source"] == "external_bool"
     assert teleop["foot_pedal"] == "name:input-remapper keyboard"
     assert teleop["enable_key_code"] == 57
-    assert teleop["max_translation_step_m"] == 0.01
+    assert teleop["max_translation_step_m"] == 0.02
     assert teleop["max_rotation_step_rad"] == 0.10
     assert teleop["left_pose_index"] == 0
     assert teleop["right_pose_index"] == 1
@@ -601,7 +601,7 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
         "right_topic": "/manus/right/ergonomics",
     }
     assert "--mock" not in config.document["commands"]["rdk_daemon"]
-    assert config.document["flexiv"]["safety"]["max_linear_velocity_m_s"] == 0.20
+    assert config.document["flexiv"]["safety"]["max_linear_velocity_m_s"] == 0.30
     assert (
         config.document["flexiv"]["safety"]["software_safety_limits_enabled"] is False
     )
@@ -633,10 +633,10 @@ def test_site_entry_composes_small_hardware_sensor_recording_runtime_files(tmp_p
     )
 
 
-def test_site_uses_validated_30hz_rates_and_disables_desktop_viewer():
+def test_site_uses_60hz_teleop_and_validated_30hz_data_rates():
     config = load_system_config(_site())
 
-    assert config.document["sampling"]["teleop_command_hz"] == 30.0
+    assert config.document["sampling"]["teleop_command_hz"] == 60.0
     assert config.document["sampling"]["camera_hz"] == 30.0
     assert config.document["sampling"]["policy_observation_hz"] == 30.0
     assert config.document["sampling"]["training_timeline_hz"] == 30.0

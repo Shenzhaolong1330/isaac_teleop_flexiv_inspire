@@ -12,6 +12,7 @@ from flexiv_inspire_isaac.data_pipeline.rl100_zarr import (
     RL100ZarrSpecError,
     aligned_row_to_rl100_frame,
     export_rl100_zarr,
+    load_rl100_zarr_spec,
 )
 from flexiv_inspire_isaac.data_pipeline.rl100_reward_cli import (
     apply_episode_reward_labels,
@@ -96,6 +97,27 @@ def test_right_profile_export_writes_only_right_contract_arrays(tmp_path):
         "state",
         "timestamp_ns",
     }
+
+
+def test_rl100_spec_allows_a_resampled_30_hz_training_timeline(tmp_path):
+    config = tmp_path / "conversion.yaml"
+    config.write_text(
+        """
+rl100_zarr_export:
+  schema_version: 1
+  profile: right_joint_proprio_cartesian_v1
+  timeline: {source: control/sent_command, fps: 30.0, resample: true}
+  action: {view: sent_command}
+  camera_alignment: causal
+  channels: {}
+  segments: {gap_threshold_s: 0.05, min_frames: 9, stitch_gaps: true}
+"""
+    )
+
+    spec = load_rl100_zarr_spec(config)
+
+    assert spec.fps == 30.0
+    assert spec.resample_timeline is True
 
 
 def test_export_writes_rl100_schema_and_splits_command_gaps(tmp_path):

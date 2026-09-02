@@ -134,10 +134,12 @@ def load_rl100_zarr_spec(path: str | Path) -> RL100ZarrSpec:
         raise RL100ZarrSpecError(
             "RL-100 MVP timeline.source must be control/sent_command"
         )
-    if fps != 30.0 or resample is not False:
+    if fps != 30.0:
         raise RL100ZarrSpecError(
-            "RL-100 MVP requires a native 30 Hz command timeline without resampling"
+            "RL-100 MVP requires a 30 Hz training timeline"
         )
+    if not isinstance(resample, bool):
+        raise RL100ZarrSpecError("timeline.resample must be a bool")
     if action_view != "sent_command":
         raise RL100ZarrSpecError("RL-100 MVP requires action.view: sent_command")
     if camera_alignment != "causal":

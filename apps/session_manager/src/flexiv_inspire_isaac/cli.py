@@ -2621,9 +2621,12 @@ def _run_convert(config, args) -> int:
             raise SystemExit(f"MCAP 不存在: {mcap}")
 
     if output_format == "rl100_zarr":
-        if profile != "joint_proprio_cartesian_v1":
+        if profile not in {
+            "joint_proprio_cartesian_v1",
+            "right_joint_proprio_cartesian_v1",
+        }:
             raise SystemExit(
-                "RL-100 Zarr 仅支持 profile: joint_proprio_cartesian_v1"
+                "RL-100 Zarr 不支持该 profile"
             )
         if action_view != "sent_command":
             raise SystemExit("RL-100 Zarr 仅支持 action.view: sent_command")
@@ -2649,7 +2652,7 @@ def _run_convert(config, args) -> int:
             )
         )
         print(
-            f"合并转换 {len(manifests)} 条 episode -> RL-100 26D/24D Zarr -> {base}",
+            f"合并转换 {len(manifests)} 条 episode -> RL-100 Zarr ({profile}) -> {base}",
             flush=True,
         )
         status = subprocess.call(command)

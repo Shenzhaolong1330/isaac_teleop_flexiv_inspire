@@ -151,6 +151,37 @@ def test_uniform_training_timeline_really_downsamples_camera_frames():
     assert all(row["observation.images.head.valid"] for row in rows)
 
 
+def test_uniform_command_timeline_downsamples_60_hz_to_30_hz():
+    commands = [
+        s(tuple([index] * 30), index * 16_666_667)
+        for index in range(7)
+    ]
+    streams = {
+        "control/sent_command": commands,
+        "camera/head/jpeg": [
+            s(b"head", timestamp)
+            for timestamp in (0, 33_333_333, 66_666_666, 99_999_999)
+        ],
+    }
+
+    rows = EpisodeAligner(
+        streams,
+        timeline_source="control/sent_command",
+        timeline_hz=30.0,
+        allow_future_camera_matches=False,
+    ).rows()
+
+    assert len(rows) == 4
+    assert len(rows) < len(commands)
+    assert [row["timestamp_ns"] for row in rows] == [
+        0,
+        33_333_333,
+        66_666_666,
+        99_999_999,
+    ]
+    assert all(row["action.valid"] for row in rows)
+
+
 def test_source_gaps_are_marked_as_distinct_capture_segments_with_depth():
     depth = {
         "z16": b"\x01\x00\x02\x00",

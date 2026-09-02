@@ -19,7 +19,8 @@ rl100_zarr_export:
   timeline:
     source: control/sent_command
     fps: 30.0
-    resample: false
+    # Teleop may run at 60 Hz; keep the policy dataset on a causal 30 Hz grid.
+    resample: true
     max_period_error_fraction: 0.25
   action:
     view: sent_command

@@ -79,6 +79,7 @@ def _load_source_episode(manifest_path: Path, spec) -> tuple[RL100SourceEpisode,
         action=spec.action,
         segment_gap_threshold_s=spec.gap_threshold_s,
         allow_future_camera_matches=False,
+        compose_action_deltas=spec.resample_timeline,
     ).rows()
     return (
         RL100SourceEpisode(

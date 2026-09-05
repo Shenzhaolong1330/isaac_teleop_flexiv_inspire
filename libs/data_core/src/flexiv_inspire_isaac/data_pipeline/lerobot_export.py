@@ -66,6 +66,7 @@ class EpisodeAligner:
         depth_cameras: Sequence[str] = (),
         segment_gap_threshold_s: float = 0.25,
         allow_future_camera_matches: bool = True,
+        compose_action_deltas: bool = False,
     ) -> None:
         self.streams = streams
         self.tolerance = tolerance
@@ -77,6 +78,12 @@ class EpisodeAligner:
             raise ValueError("high_rate_arm_samples_per_frame must be in [0,128]")
         self.high_rate_arm_samples_per_frame = high_rate_arm_samples_per_frame
         self.action = action
+        self.compose_action_deltas = bool(compose_action_deltas)
+        if self.compose_action_deltas and (
+            timeline_hz is None or action.name != "sent_command"
+            or self.timeline_source != "control/sent_command"
+        ):
+            raise ValueError("delta composition requires a uniform sent_command timeline")
         self.depth_cameras = tuple(depth_cameras)
         self.allow_future_camera_matches = bool(allow_future_camera_matches)
         if any(
@@ -104,6 +111,7 @@ class EpisodeAligner:
             self._stream_times[name] = times
 
     def rows(self) -> list[dict[str, Any]]:
+        segment_starts: set[int] = set()
         reference = self.streams.get(self.timeline_source, ())
         mapped_reference = [
             sample for sample in reference if sample.alignment_time_ns is not None
@@ -118,11 +126,22 @@ class EpisodeAligner:
             end_ns = int(mapped_reference[-1].alignment_time_ns)
             period_ns = int(round(1e9 / self.timeline_hz))
             timeline = []
-            for timestamp in range(start_ns, end_ns + 1, period_ns):
-                head = self._causal(
-                    self.timeline_source, timestamp, self.tolerance.image_ns
-                )
-                timeline.append((timestamp, head))
+            ranges = [(start_ns, end_ns)]
+            if self.compose_action_deltas:
+                # Restart the grid after pedal pauses; never carry an old delta
+                # through an empty interval or combine commands across a pause.
+                times = self._stream_times[self.timeline_source]
+                starts = [0] + [i for i in range(1, len(times))
+                                if times[i] - times[i - 1] > self.segment_gap_threshold_ns]
+                ends = starts[1:] + [len(times)]
+                ranges = [(times[a], times[b - 1]) for a, b in zip(starts, ends)]
+                segment_starts = {a for a, _ in ranges}
+            for start_ns, end_ns in ranges:
+                for timestamp in range(start_ns, end_ns + 1, period_ns):
+                    head = self._causal(
+                        self.timeline_source, timestamp, self.tolerance.image_ns
+                    )
+                    timeline.append((timestamp, head))
         else:
             timeline = []
         output: list[dict[str, Any]] = []
@@ -135,7 +154,7 @@ class EpisodeAligner:
             )
             segment_start = previous_timestamp is None or (
                 source_gap_ns > self.segment_gap_threshold_ns
-            )
+            ) or timestamp in segment_starts
             if segment_start and previous_timestamp is not None:
                 capture_segment += 1
                 frame_in_segment = 0
@@ -268,6 +287,8 @@ class EpisodeAligner:
 
     def _action_at(self, timestamp_ns: int) -> AlignedValue:
         if self.action.name == "sent_command":
+            if self.compose_action_deltas:
+                return self._composed_action_at(timestamp_ns)
             # Exact RDK-acknowledged command: default behavioural-cloning label.
             return self._causal(
                 "control/sent_command", timestamp_ns, self.tolerance.action_ns
@@ -309,6 +330,38 @@ class EpisodeAligner:
             values.extend((*pose.value.pose.xyz, *pose.value.rotation6d))
             ages.append(int(pose.age_ns or 0))
         return AlignedValue(tuple(values), timestamp_ns, max(ages, default=0), True)
+
+    def _composed_action_at(self, timestamp_ns: int) -> AlignedValue:
+        import numpy as np
+        from isaac_teleop_core.rotation6d import (
+            compose_world_delta_rot6d, matrix_to_rotation6d,
+        )
+
+        # Label observation(t) with the motion over [t, t + period), not
+        # already-executed motion from the preceding interval. Hands are
+        # absolute targets; only Cartesian arm deltas are accumulated.
+        end_ns = timestamp_ns + round(1e9 / self.timeline_hz)
+        times = self._stream_times.get("control/sent_command", ())
+        samples = self._mapped_streams.get("control/sent_command", ())
+        selected = samples[bisect_left(times, timestamp_ns):bisect_left(times, end_ns)]
+        if not selected:
+            return AlignedValue(None, None, None, False, "empty-action-window")
+        if any(not sample.valid for sample in selected):
+            return AlignedValue(None, None, None, False, "invalid-action-in-window")
+        try:
+            commands = np.asarray([sample.value for sample in selected], dtype=np.float64)
+            if commands.shape != (len(selected), 30) or not np.isfinite(commands).all():
+                raise ValueError("expected finite native 30D commands")
+            composed = commands[-1].copy()
+            for offset in (0, 9):
+                composed[offset:offset + 3] = commands[:, offset:offset + 3].sum(axis=0)
+                rotation = np.eye(3)
+                for command in commands:
+                    rotation = compose_world_delta_rot6d(command[offset + 3:offset + 9], rotation)
+                composed[offset + 3:offset + 9] = matrix_to_rotation6d(rotation)
+        except (TypeError, ValueError) as exc:
+            return AlignedValue(None, None, None, False, f"invalid-action-window:{exc}")
+        return AlignedValue(tuple(composed), timestamp_ns, 0, True)
 
     def _put_nearest(
         self,

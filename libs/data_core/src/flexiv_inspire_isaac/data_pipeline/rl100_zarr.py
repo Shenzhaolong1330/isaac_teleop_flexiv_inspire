@@ -542,6 +542,10 @@ def export_rl100_zarr(
                     "task_descriptions": [item.task for item in episodes],
                     "timeline_source": spec.timeline_source,
                     "timeline_resampled": spec.resample_timeline,
+                    "action_resampling": (
+                        "world_delta_compose_forward_window_v1"
+                        if spec.resample_timeline else "native_sent_command"
+                    ),
                     "camera_alignment": spec.camera_alignment,
                     "segment_gap_threshold_s": spec.gap_threshold_s,
                     "stitch_gaps": spec.stitch_gaps,

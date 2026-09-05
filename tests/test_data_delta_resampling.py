@@ -68,7 +68,10 @@ def test_invalid_command_invalidates_whole_window():
 
 def test_empty_window_does_not_repeat_previous_motion():
     rows = align([command(0), command(49_000_000), command(98_000_000), command(147_000_000)])
-    assert [row["action.valid"] for row in rows] == [True, True, True, False, True]
+    assert all(row["action.valid"] for row in rows)
+    np.testing.assert_equal(rows[3]["action"][9:12], [0, 0, 0])
+    np.testing.assert_allclose(rotation6d_to_matrix(rows[3]["action"][12:18]), np.eye(3))
+    np.testing.assert_equal(rows[3]["action"][24:30], [500] * 6)
     assert sum(row["action"][9] for row in rows if row["action.valid"]) == .04
 
 

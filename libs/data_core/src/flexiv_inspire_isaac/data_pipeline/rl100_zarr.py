@@ -543,7 +543,7 @@ def export_rl100_zarr(
                     "timeline_source": spec.timeline_source,
                     "timeline_resampled": spec.resample_timeline,
                     "action_resampling": (
-                        "world_delta_compose_forward_window_v1"
+                        "world_delta_compose_forward_window_v2"
                         if spec.resample_timeline else "native_sent_command"
                     ),
                     "camera_alignment": spec.camera_alignment,

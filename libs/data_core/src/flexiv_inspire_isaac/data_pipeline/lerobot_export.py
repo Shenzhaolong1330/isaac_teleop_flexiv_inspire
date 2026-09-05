@@ -345,7 +345,22 @@ class EpisodeAligner:
         samples = self._mapped_streams.get("control/sent_command", ())
         selected = samples[bisect_left(times, timestamp_ns):bisect_left(times, end_ns)]
         if not selected:
-            return AlignedValue(None, None, None, False, "empty-action-window")
+            previous = self._causal("control/sent_command", timestamp_ns, self.tolerance.action_ns)
+            if not previous.valid:
+                return AlignedValue(None, None, None, False, "empty-action-window-without-target")
+            # Producer jitter can leave one bin empty and the next with two
+            # commands. Preserve elapsed time with zero motion, not a repeated
+            # delta; keep the last absolute hand target until it is updated.
+            try:
+                held = np.asarray(previous.value, dtype=np.float64).copy()
+                if held.shape != (30,) or not np.isfinite(held).all():
+                    raise ValueError("expected finite native 30D command")
+                for offset in (0, 9):
+                    held[offset:offset + 3] = 0.0
+                    held[offset + 3:offset + 9] = matrix_to_rotation6d(np.eye(3))
+            except (TypeError, ValueError) as exc:
+                return AlignedValue(None, None, None, False, f"invalid-held-target:{exc}")
+            return AlignedValue(tuple(held), timestamp_ns, 0, True)
         if any(not sample.valid for sample in selected):
             return AlignedValue(None, None, None, False, "invalid-action-in-window")
         try:

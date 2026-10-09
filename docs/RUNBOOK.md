@@ -15,6 +15,14 @@ robot record
 
 命令均在机器人主机本地执行；不要 source 其他机器人工作空间。
 
+下面的日常操作和现场 A/B/C 分级步骤沿用 incremental；其“阶段 B”是工具/F/T
+准备，与新增的遥操作工程阶段 B 命名不同。新增 world_absolute 默认关闭，
+必须按 [阶段 B 迁移验收指南](TELEOP_STAGE_B_HARDWARE_ACCEPTANCE.md) 单独完成
+环境增量更新、只读参考采集、批准区域、显式 start 和 Home 后 ALIGNING。
+world 下中踏板不控制日常跟随，左右保存/丢弃不 Home，录制与运动停止分别操作。
+旧配置、policy/replay 门禁保持兼容。`robot record` 会启动设备并可能执行 Reset，
+只读阶段应先用 `record --dry-run`，不能自动运行整套启动流程。
+
 ## 0. 先读：默认状态与尚未完成的现场条件
 
 系统默认是零动作：

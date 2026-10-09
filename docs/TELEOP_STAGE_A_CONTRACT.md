@@ -1,6 +1,6 @@
 # 阶段 A：数据语义与离线消费契约
 
-阶段 A 的完成标准是离线工程实现。机械臂物理安全、持续实测 60 Hz、ROS/RDK/Modbus 部署联调、标定准确度及外部模型训练均需独立验收。本阶段保持现有踏板运动许可、Home 路线和控制算法。
+阶段 A 的完成标准是离线工程实现。机械臂物理安全、持续实测 60 Hz、ROS/RDK/Modbus 部署联调、标定准确度及外部模型训练均需独立验收。阶段 A 提交时保持原有踏板运动许可、Home 路线和控制算法；现阶段显式 world 模式的许可与接管扩展见 [阶段 B 契约](TELEOP_STAGE_B_CONTRACT.md)，incremental 保持兼容。
 
 ## 多速率命令监督
 
@@ -88,4 +88,19 @@ python -m pytest tests/test_teleop_stage_a.py
 
 合成闭环运行生产 EpisodeSession/异步 MCAP sink/归档/导出/消费者。它是软件契约证据，不是真机轨迹或实时性能证据。测试另覆盖生产 bridge 调度方法（隔离 ROS 导入）、daemon 部分失败、手 mailbox/发送、归档搬迁/校验、两个写入器边界和默认门禁。
 
-部署端尚需验证：SDK/Modbus 实际回执含义，DeviceIO 压力与磁盘性能，实际频率/时钟映射、边界时刻、标定与各片段控制锚点。ROS 消息生成/现场节点启动和硬件行为 NOT_RUN。没有修改 protobuf/ROS message 定义，现有生成物无需重生成。阶段 B/C、真机连接、远程部署、push/PR 均未执行。
+部署端尚需验证：SDK/Modbus 实际回执含义，DeviceIO 压力与磁盘性能，实际频率/时钟映射、边界时刻、标定与各片段控制锚点。ROS 消息生成/现场节点启动和硬件行为 NOT_RUN。阶段 A 提交时没有修改 protobuf/ROS message。阶段 B 在 RDK typed IPC 增加 world_session_authority/mapping_epoch 与 sdk_returned_sides，已同步客户端、服务端和 Python 生成物；部署需按阶段 B 指南增量更新 protobuf 并生成一致协议。ROS message 未改。阶段 C、真机连接、远程部署、push/PR 均未执行。
+
+## 阶段 B 扩展后的边界
+
+内部 world 绝对目标仍导出原 30D 增量：相邻同 execution epoch 的已接受 TCP
+目标之差/world 左乘旋转，手是绝对目标；measured 永远是 observation。
+world 的 accepted 唯一由桥内管理器按每侧 sdk_returned_sides 更新；部分失败保留
+各侧证据并 HOLD，下一次显式 start 从实测重建执行基准，不跨 epoch 积分。
+world_control_changed、Home、ALIGNING/FOLLOW、authority 丢失/恢复形成边界；
+world_state 非 FOLLOW 的 sent_command 同时在 v2、通用/profile 输入被拒绝。
+world 的真实踏板边缘不切分无踏板 FOLLOW，旧 incremental 踏板门保持原语义。
+保存/丢弃不改变 mapping epoch；Home 改变 execution epoch，恢复保留父任务身份。
+
+原始稳定参考 reference_samples 是标定的必需归档资产；缺失不能标为 complete。
+零空间与 world 审计都是关键 native 记录，不受普通训练录制门抑制。SDK 返回仍只
+表示调用返回，控制器确认/物理到位没有独立证据时保持 unknown。

@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             for item in config.robots
         )
-        backend = FlexivRDKBackend(specs, write_guard=guard)
+        backend = FlexivRDKBackend(specs, write_guard=guard, nullspace_config=config.nullspace)
         backend.connect()  # read-only connection + RobotInfo compatibility audit
         print(
             json.dumps(
@@ -189,12 +189,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     deviceio = AsyncDeviceIOEmitter("rdk")
+    if args.hardware:
+        backend._nullspace_emitter = deviceio
     dispatcher = RDKRequestDispatcher(
         backend,
         ft_zero,
         hands,
         interlock,
         deviceio_emitter=deviceio,
+        world_absolute_enabled=config.world_absolute_enabled,
         cartesian_limits=config.cartesian_limits,
         world_frame=config.world_frame,
         world_from_base=config.world_from_base,

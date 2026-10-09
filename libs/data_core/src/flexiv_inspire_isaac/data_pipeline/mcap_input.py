@@ -21,6 +21,9 @@ FULL_VALID_MASK = 1 | 2 | 4 | 8
 def _flatten_safe_command_checked(payload):
     if not isinstance(payload, dict):
         return None, "sent-command-payload-not-mapping"
+    metadata = dict(zip(payload.get("metadata_keys", []), payload.get("metadata_values", [])))
+    if metadata.get("world_state") and metadata["world_state"] != "FOLLOW":
+        return None, "world-maintenance-not-follow"
     try:
         schema_version = int(payload.get("schema_version", 0))
         valid_mask = int(payload.get("valid_mask", 0))

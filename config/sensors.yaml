@@ -86,6 +86,10 @@ xr_video:
     transition_duration: 0.3
 
 teleop:
+  mapping_mode: incremental  # opt in to world_absolute only after calibration
+  world_installation: ""
+  world_calibration: ""
+  world_execution_config: ""
   control_config: ros2_ws/src/flexiv_inspire_control/config/control_bridge.yaml
   teleop_config: ros2_ws/src/flexiv_inspire_control/config/teleop.yaml
   # Quest controls only wrist position/orientation and buttons. OculusReader

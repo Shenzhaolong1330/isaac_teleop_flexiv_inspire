@@ -499,6 +499,13 @@ def load_system_config(path: str | Path) -> SystemConfig:
         raise SystemConfigError(
             "teleop.manus_ergonomics left/right topics must be distinct absolute topics"
         )
+    mode = teleop.get("mapping_mode", "incremental")
+    if mode not in {"incremental", "world_absolute"}:
+        raise SystemConfigError("unsupported teleop.mapping_mode")
+    if mode == "world_absolute":
+        for key in ("world_installation", "world_calibration", "world_execution_config"):
+            if not isinstance(teleop.get(key), str) or not teleop[key].strip():
+                raise SystemConfigError(f"teleop.{key} required for world_absolute")
     teleop_mapping = _mapping(teleop.get("mapping"), "teleop.mapping")
     axis_rotation = _vector(
         teleop_mapping.get("axis_rotation"),
@@ -1092,6 +1099,14 @@ def render_runtime_configs(config: SystemConfig, output: str | Path) -> dict[str
             },
         },
     }
+    for filename in ("control_bridge.yaml", "teleop.yaml"):
+        params = payloads[filename]["/**"]["ros__parameters"]
+        params["teleop_mapping_mode"] = teleop.get("mapping_mode", "incremental")
+        params["world_installation"] = str(config.resolve(teleop["world_installation"])) if teleop.get("world_installation") else ""
+        if filename == "control_bridge.yaml":
+            params["world_tool_payload_config"] = str(config.resolve(flexiv["tool_payload_config"]))
+            for key in ("world_calibration", "world_execution_config"):
+                params[key] = str(config.resolve(teleop[key])) if teleop.get(key) else ""
     for name, payload in payloads.items():
         path = out / name
         path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")

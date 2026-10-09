@@ -39,6 +39,7 @@ from flexiv_inspire_interfaces.msg import (
     HandState,
 )
 from isaac_teleop_core.command import CommandSource, ValidMask
+from isaac_teleop_core.rotation6d import matrix_to_quaternion_xyzw, ros_pose_to_rdk_pose
 from isaac_teleop_core.scheduling import PointSchedule
 from isaac_teleop_core.evidence import command_id, receipt, emit_receipt
 from isaac_teleop_core.deviceio import AsyncDeviceIOEmitter, record_envelope
@@ -50,6 +51,7 @@ from isaac_teleop_core.control import (
     TransitionError,
 )
 
+from .world_bridge import WorldBridge
 from .clock_mapper import OnlineClockMapper
 from .conversion import cartesian_target_from_point, command_from_ros
 from .frames import load_base_transforms, rdk_pose_base_to_world
@@ -97,7 +99,7 @@ def _require_matching_ft_zero_epoch(
         raise RuntimeError("RDK connection generation changed during F/T zero")
 
 
-class ControlBridge(Node):
+class ControlBridge(WorldBridge, Node):
     def __init__(self) -> None:
         super().__init__("flexiv_inspire_control_bridge")
         runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
@@ -218,6 +220,7 @@ class ControlBridge(Node):
             "left": OnlineClockMapper(), "right": OnlineClockMapper()
         }
         self._last_arm_observation_ns = {"left": 0, "right": 0}
+        self._last_arm_mapped_ns = {"left": 0, "right": 0}
         self._last_hand_observation_ns = {"left": 0, "right": 0}
         self._hand_connected = {"left": False, "right": False}
         self._hand_angles: dict[str, np.ndarray | None] = {
@@ -252,6 +255,7 @@ class ControlBridge(Node):
         self._home_sequence = 0
         self._home_request_sequence = 0
         self._home_thread: threading.Thread | None = None
+        self._init_world()
         self._deviceio = AsyncDeviceIOEmitter("control")
 
         command_qos = QoSProfile(
@@ -556,6 +560,8 @@ class ControlBridge(Node):
         with self._state_lock:
             if self._daemon_instance_id and instance_id != self._daemon_instance_id:
                 self._arbiter.on_rdk_reconnect()
+                if getattr(self, "_world", None) is not None:
+                    self._world.hold("rdk_reconnect_execution_rebuild_required")
                 self._safe_pose_rdk.clear()
                 self._pending_arm_token = None
                 self._pending_arm_token_expiry_ns = 0
@@ -587,6 +593,8 @@ class ControlBridge(Node):
             elif generation != self._connection_generation:
                 self._connection_generation = generation
                 self._arbiter.on_rdk_reconnect()
+                if getattr(self, "_world", None) is not None:
+                    self._world.hold("rdk_reconnect_execution_rebuild_required")
                 self._safe_pose_rdk.clear()
                 self._pending_arm_token = None
                 self._pending_arm_token_expiry_ns = 0
@@ -623,6 +631,7 @@ class ControlBridge(Node):
         with self._state_lock:
             self._arm_safety_ok[side] = safe
             self._limits_ok = all(self._arm_safety_ok.values())
+            self._last_arm_mapped_ns[side] = mapping.mapped_host_monotonic_ns if mapping.timing_valid and safe else 0
         state = ArmStateMsg()
         state.header.stamp = stamp
         state.header.frame_id = self._world_frame
@@ -737,7 +746,7 @@ class ControlBridge(Node):
                 return False, "nonfinite_or_malformed_arm_observation"
             if not bool(
                 self.get_parameter("software_safety_limits_enabled").value
-            ):
+            ) and getattr(self, "_world", None) is None:
                 return True, ""
             if str(wire.get("fault", "")):
                 return False, f"arm_fault:{wire['fault']}"
@@ -795,6 +804,9 @@ class ControlBridge(Node):
 
     def _on_command(self, source: CommandSource, message: BimanualCommandMsg) -> None:
         receive_ns = time.monotonic_ns()
+        if source is CommandSource.TELEOP and self._world_selected():
+            with self._world_lock:
+                message = self._world_receive(message)
         capture_is_critical = self._command_may_actuate(message)
         captured = self._emit_deviceio(
             "/control/requested_command",
@@ -869,7 +881,7 @@ class ControlBridge(Node):
             self._chunk_generation += 1
             generation = self._chunk_generation
         threading.Thread(
-            target=self._execute_chunk,
+            target=self._dispatch_chunk,
             args=(generation, command, message, receive_ns),
             daemon=True,
             name=f"command-chunk-{source.value}-{command.sequence}",
@@ -959,6 +971,16 @@ class ControlBridge(Node):
                 f"{prepared_state.value}"
             )
 
+    def _dispatch_chunk(self, generation, command, message, receive_ns):
+        if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None:
+            with self._world_send_lock, self._world_lock:
+                try:
+                    self._execute_chunk(generation, command, message, receive_ns)
+                finally:
+                    self._world_event()
+        else:
+            self._execute_chunk(generation, command, message, receive_ns)
+
     def _execute_chunk(
         self,
         generation: int,
@@ -1019,6 +1041,15 @@ class ControlBridge(Node):
                 targets, candidate_poses, candidate_quaternions = (
                     self._targets_for_point(command, point)
                 )
+                if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None:
+                    world_proposal = self._world.pending
+                    point = self._world.executed_point
+                    for side in ("left", "right"):
+                        setattr(point_message.trajectory[0], side+"_delta_xyz", getattr(point, side+"_delta_xyz").tolist())
+                        setattr(point_message.trajectory[0], side+"_delta_rotation6d", getattr(point, side+"_delta_rotation6d").tolist())
+                        setattr(point_message.trajectory[0], side+"_hand_targets", getattr(point, side+"_hand_targets").tolist())
+                    point_message.metadata_keys += ["world_state", "mapping_epoch", "execution_epoch"]
+                    point_message.metadata_values += [self._world.state, self._world.mapping.calibration["mapping_epoch"], self._world.execution_epoch]
                 payload = None
                 if targets:
                     with self._state_lock:
@@ -1057,7 +1088,9 @@ class ControlBridge(Node):
                         "valid_mask": int(command.valid_mask & (ValidMask.LEFT_ARM | ValidMask.RIGHT_ARM)),
                         "safety_validated": True,
                         "local_permission": self._local_permission,
-                        "physical_pedal": self._effective_motion_pedal(),
+                        "physical_pedal": self._physical_pedal if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None else self._effective_motion_pedal(),
+                        "world_session_authority": command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None and self._world.authority,
+                        "mapping_epoch": self._world.mapping.calibration["mapping_epoch"] if getattr(self, "_world", None) is not None else "",
                         "local_arm_token": token,
                         **targets,
                     }
@@ -1095,6 +1128,9 @@ class ControlBridge(Node):
                         kind, response = self._ipc_command.request(
                             "cartesian_command", payload
                         )
+                    if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None:
+                        accepted_sides = response.get("sdk_returned_sides", [])
+                        self._world.acknowledge(accepted_sides, complete=kind == "command_ack" and response.get("accepted", False), proposal=world_proposal)
                     if kind != "command_ack" or not response.get("accepted", False):
                         raise RuntimeError(f"RDK rejected command: {response.get('reason', kind)}")
                     # The token establishes a daemon lease. Later points remain
@@ -1123,6 +1159,8 @@ class ControlBridge(Node):
                 self._sent_pub.publish(point_message)
                 self._publish_trace(point_message, point_message, point_message, "", receive_ns)
             except Exception as exc:
+                if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None:
+                    self._world.hold(f"execution_failed:{exc}")
                 logger = getattr(self, "_logger", None)
                 if logger is not None:
                     logger.error(
@@ -1247,6 +1285,8 @@ class ControlBridge(Node):
     def _targets_for_point(
         self, command, point
     ) -> tuple[dict[str, dict], dict[str, np.ndarray], dict[str, np.ndarray]]:
+        if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None:
+            point = self._world_point(command, point)
         result: dict[str, dict] = {}
         candidate_poses: dict[str, np.ndarray] = {}
         candidate_quaternions: dict[str, np.ndarray] = {}
@@ -1272,23 +1312,29 @@ class ControlBridge(Node):
             with self._state_lock:
                 previous = self._safe_pose_rdk.get(side)
                 previous_quaternion = self._previous_output_quaternion[side]
-            if previous is None:
+            if previous is None and not (command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None):
                 raise RuntimeError(f"no valid {side} measured pose for rebase")
-            target, output_quaternion = cartesian_target_from_point(
-                point,
-                side=side,
-                representation=command.representation,
-                previous_safe_pose_rdk=previous,
-                max_translation_step_m=float(self.get_parameter("max_translation_step_m").value),
-                max_rotation_step_rad=float(self.get_parameter("max_rotation_step_rad").value),
-                previous_output_quaternion_xyzw=previous_quaternion,
-                world_from_base=self._world_from_base[side],
-                enforce_step_limits=bool(
-                    self.get_parameter(
-                        "software_safety_limits_enabled"
-                    ).value
-                ),
-            )
+            if command.source is CommandSource.TELEOP and getattr(self, "_world", None) is not None:
+                candidate = self._world.limited[side]
+                base = self._world_from_base[side]
+                output_quaternion = matrix_to_quaternion_xyzw(base.rotation.T @ candidate.r, previous=previous_quaternion)
+                target = ros_pose_to_rdk_pose(base.rotation.T @ (candidate.p-base.translation_m), output_quaternion)
+            else:
+                target, output_quaternion = cartesian_target_from_point(
+                    point,
+                    side=side,
+                    representation=command.representation,
+                    previous_safe_pose_rdk=previous,
+                    max_translation_step_m=float(self.get_parameter("max_translation_step_m").value),
+                    max_rotation_step_rad=float(self.get_parameter("max_rotation_step_rad").value),
+                    previous_output_quaternion_xyzw=previous_quaternion,
+                    world_from_base=self._world_from_base[side],
+                    enforce_step_limits=bool(
+                        self.get_parameter(
+                            "software_safety_limits_enabled"
+                        ).value
+                    ),
+                )
             candidate_poses[side] = target.copy()
             candidate_quaternions[side] = output_quaternion.copy()
             result[side] = {
@@ -1437,6 +1483,9 @@ class ControlBridge(Node):
     def _effective_motion_pedal(self) -> bool:
         """Return the source-specific motion enable seen by the bridge."""
 
+        world = getattr(self, "_world", None)
+        if world is not None and world.authority and (getattr(self, "_pending_arm_source", None) is CommandSource.TELEOP or self._arbiter.snapshot.active_source is CommandSource.TELEOP):
+            return True
         if self._physical_pedal:
             return True
         pending = getattr(self, "_pending_arm_source", None)
@@ -1540,7 +1589,7 @@ class ControlBridge(Node):
     def _gates_allow_arm(gates: GateInputs) -> bool:
         return bool(
             gates.local_permission
-            and gates.physical_pedal
+            and (gates.physical_pedal or gates.teleop_session_authority)
             and gates.arms_online
             and gates.hands_online
             and gates.limits_ok
@@ -1652,6 +1701,13 @@ class ControlBridge(Node):
         return f"{source}-{sequence}"
 
     def _begin_home_request(self, request_id: str) -> None:
+        if getattr(self, "_world", None) is not None:
+            with self._world_send_lock, self._world_lock:
+                self._begin_home_request_locked(request_id)
+        else:
+            self._begin_home_request_locked(request_id)
+
+    def _begin_home_request_locked(self, request_id: str) -> None:
         now = time.monotonic_ns()
         self._update_gates(now)
         try:
@@ -1688,6 +1744,9 @@ class ControlBridge(Node):
             with self._state_lock:
                 self._home_inflight = True
                 self._home_recovery_active = recovery_home
+            if getattr(self, "_world", None) is not None:
+                self._world.home()
+                self._world_event()
             self._emit_home_event("home_started", request_id=request_id)
             thread = threading.Thread(
                 target=self._run_home,
@@ -1712,6 +1771,9 @@ class ControlBridge(Node):
         if kind != "command_ack" or not response.get("accepted", False):
             raise RuntimeError(response.get("reason", kind))
         self._arbiter.prepare_home()
+        if getattr(self, "_world", None) is not None:
+            self._world.home()
+            self._world_event()
         with self._state_lock:
             self._hold_sent_for_latch = False
 
@@ -1956,6 +2018,10 @@ class ControlBridge(Node):
         request_id: str = "",
     ) -> None:
         if state in {"complete", "failed", "rejected"}:
+            if getattr(self, "_world", None) is not None:
+                with self._world_lock:
+                    self._world.home_complete(state == "complete")
+                    self._world_event()
             self._emit_home_event("home_completed" if state == "complete" else "home_failed", request_id=request_id, reason=reason)
         publisher = getattr(self, "_home_status_pub", None)
         if publisher is None:
@@ -1978,6 +2044,11 @@ class ControlBridge(Node):
             self.get_parameter("software_safety_limits_enabled").value
         )
         snapshot = getattr(self._arbiter, "snapshot", None)
+        world_teleop = getattr(self, "_world", None) is not None and (
+            getattr(self, "_pending_arm_source", None) is CommandSource.TELEOP
+            or getattr(snapshot, "active_source", None) is CommandSource.TELEOP
+        )
+        practical_mode = practical_mode and not world_teleop
         direct_policy = not bool(
             self.get_parameter("policy_pedal_required").value
         ) and (
@@ -2016,7 +2087,8 @@ class ControlBridge(Node):
         )
         gates = GateInputs(
             local_permission=self._local_permission,
-            physical_pedal=self._effective_motion_pedal(),
+            physical_pedal=self._physical_pedal if getattr(self, "_world", None) is not None and (getattr(self, "_pending_arm_source", None) is CommandSource.TELEOP or getattr(snapshot, "active_source", None) is CommandSource.TELEOP) else self._effective_motion_pedal(),
+            teleop_session_authority=getattr(self, "_world", None) is not None and self._world_motion_authority() and (getattr(self, "_pending_arm_source", None) is CommandSource.TELEOP or getattr(snapshot, "active_source", None) is CommandSource.TELEOP),
             arms_online=arms_online,
             hands_online=hands_online,
             limits_ok=True if practical_mode else self._limits_ok,
@@ -2033,6 +2105,9 @@ class ControlBridge(Node):
         self._update_gates(now)
         snapshot = self._arbiter.tick(now_monotonic_ns=now)
         if snapshot.state in {ControlState.HOLD_LATCHED, ControlState.FAULT}:
+            if getattr(self, "_world", None) is not None and self._world.authority:
+                self._world.hold(snapshot.hold_reason.value)
+                self._world_event()
             self._send_hold_once(snapshot.hold_reason.value)
         self._publish_control_state()
 
@@ -2082,6 +2157,9 @@ class ControlBridge(Node):
                 self._hold_request_inflight = False
 
     def _stop_control(self) -> None:
+        if getattr(self, "_world", None) is not None:
+            self._world.hold("local_stop")
+            self._world_event()
         self._arbiter.stop()
         self._send_hold_once("local_stop")
         self._publish_control_state()

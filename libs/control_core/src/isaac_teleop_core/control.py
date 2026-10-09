@@ -54,6 +54,7 @@ class GateInputs:
     limits_ok: bool = False
     collision_clear: bool = False
     hardware_fault: bool = False
+    teleop_session_authority: bool = False
 
 
 @dataclass(frozen=True)
@@ -476,7 +477,7 @@ class ControlArbiter:
             return HoldReason.FT_NOT_ZEROED
         if not gates.local_permission:
             return HoldReason.LOCAL_PERMISSION
-        if not gates.physical_pedal:
+        if not (gates.physical_pedal or (self._active_source is CommandSource.TELEOP and gates.teleop_session_authority)):
             return HoldReason.PEDAL_RELEASED
         if not gates.arms_online:
             return HoldReason.ARM_OFFLINE

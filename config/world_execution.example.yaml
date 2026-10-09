@@ -1,0 +1,35 @@
+# Examples are diagnostic values, never physical safety qualification.
+schema_version: 1
+limits:
+  linear_speed: 0.05             # m/s
+  angular_speed: 0.2             # rad/s
+  linear_acceleration: 0.2       # m/s^2
+  angular_acceleration: 0.5      # rad/s^2
+  position_lead: 0.02            # m against measured TCP
+  rotation_lead: 0.08            # rad against measured TCP
+  max_dt: 0.1                   # s; longer control gap latches HOLD
+  tracking_age: 0.12            # s, same-host monotonic receive age
+  feedback_age: 0.1             # s
+  tracking_jump: 0.1            # m; detectable relocation, invalidates mapping
+  tracking_rotation_jump: 0.5   # rad
+  align_position: 0.005          # m, bilateral measured and accepted
+  align_rotation: 0.03           # rad
+  human_motion_position: 0.01    # m relative to captured target
+  human_motion_rotation: 0.05    # rad
+  target_speed: 0.02             # m/s for ALIGNING -> FOLLOW
+  target_angular_speed: 0.1      # rad/s
+  dwell: 0.5                    # s
+  timeout: 20.0                 # s
+  blocked_timeout: 2.0          # s
+  finger_takeover_tolerance: 10.0  # raw hand target units, explicit takeover match
+  finger_lead_units: 10.0          # raw hand target units against measured hand
+  jerk: unsupported
+# Empty checker is a refusal. Only fill after site validation of complete arm,
+# dual-arm, tool geometry and environment for approaches in this TCP region.
+approved_region: {}
+# approved_region:
+#   approved_by: SITE_OPERATOR_AND_RECEIPT_ID
+#   mapping_epoch: FROM_CALIBRATION
+#   tool_identity: FROM_INSTALLATION
+#   left: {lower_m: [0, 0, 0], upper_m: [1, 1, 1]}
+#   right: {lower_m: [0, 0, 0], upper_m: [1, 1, 1]}

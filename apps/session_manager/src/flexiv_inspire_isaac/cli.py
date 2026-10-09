@@ -502,7 +502,7 @@ def _report_optional_xr_video_status(
     if len(processes) != len(commands) or len(logs) != len(commands):
         print(
             "Quest 视频进程未完整启动；record 和遥操继续，机械臂仍由 "
-            "Quest 位姿有效性和中踏板控制",
+            "Quest 位姿有效性和所选模式的会话许可控制",
             flush=True,
         )
         return False
@@ -538,7 +538,7 @@ def _report_optional_xr_video_status(
         return True
     print(
         "Quest 视频暂不可用；record 和遥操继续。机械臂只有在 Quest 腕部"
-        "位姿有效且中踏板踩下时才会运动",
+        "位姿有效且所选模式的运动许可满足时才会运动",
         flush=True,
     )
     return False
@@ -1229,6 +1229,8 @@ def _episode_command(config, rendered: dict[str, Path]) -> list[str]:
         f"ros_mcap_enabled:={str(bool(recording['ros_mcap_enabled'])).lower()}",
         "-p",
         f"deviceio_profile:={recording['deviceio_profile']}",
+        "-p",
+        f"teleop_mapping_mode:={root["teleop"].get("mapping_mode", "incremental")}",
         "-p",
         "record_only_while_pedal_pressed:="
         + str(bool(recording["record_only_while_pedal_pressed"])).lower(),
@@ -2983,10 +2985,13 @@ def _run_collection(config, rendered: dict[str, Path]) -> int:
         + (
             "capture: middle pedal pressed only; action=sent_command\n"
             if recording.get("record_only_while_pedal_pressed", False)
+            and config.document["teleop"].get("mapping_mode", "incremental") != "world_absolute"
             and recording.get("deviceio_profile", "full") == "training"
             else "capture: whole episode\n"
         )
-        + "right=commit/Home/next, left=discard/Home/retry, Quest A=pause/Home/resume, Ctrl-C=save/stop",
+        + ("right=commit/next, left=discard/retry, Quest A=Home then explicit ALIGNING start; recording and motion independent"
+           if config.document["teleop"].get("mapping_mode") == "world_absolute"
+           else "right=commit/Home/next, left=discard/Home/retry, Quest A=pause/Home/resume, Ctrl-C=save/stop"),
         flush=True,
     )
     pedal = None

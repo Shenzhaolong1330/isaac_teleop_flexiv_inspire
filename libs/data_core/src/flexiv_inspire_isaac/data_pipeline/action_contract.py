@@ -54,6 +54,7 @@ BOUNDARIES = {
     "fault",
     "recovered",
     "control_changed",
+    "world_control_changed",
     "recording_started",
     "recording_stopped",
 }
@@ -109,6 +110,8 @@ def boundaries(records):
         }:
             continue
         kind = payload.get("event_type", "")
+        if kind in {"pedal_pressed", "pedal_released"} and payload.get("recording_gate") is False:
+            continue
         if kind in BOUNDARIES or payload.get("discontinuity", False):
             result.append(
                 (
@@ -205,10 +208,13 @@ def export_supervision(
     def recording_active(t):
         paused = False
         pedal = True
+        world_follow = True
         for event_t, event in recording_events:
             if event_t > t:
                 break
             kind = event.get("event_type")
+            if kind == "world_control_changed":
+                world_follow = event.get("world", {}).get("state") == "FOLLOW"
             if kind in {"episode_paused", "episode_stopped", "episode_failed"}:
                 paused = True
             elif kind in {"episode_started", "episode_resumed"}:
@@ -217,7 +223,7 @@ def export_supervision(
                 pedal = False
             elif kind == "pedal_pressed":
                 pedal = True
-        return not paused and pedal
+        return not paused and pedal and world_follow
 
     if not cuts and not allow_legacy:
         raise ValueError(
@@ -269,6 +275,9 @@ def export_supervision(
             or "sequence" not in payload
         ):
             reasons.append("command-identity-missing-or-invalid")
+        metadata = dict(zip(payload.get("metadata_keys", []), payload.get("metadata_values", [])))
+        if metadata.get("world_state") and metadata["world_state"] != "FOLLOW":
+            reasons.append("world-maintenance-not-follow")
         if not recording_active(time_ns):
             reasons.append("inactive-recording-interval")
         action, reason = _flatten_safe_command_checked(payload)

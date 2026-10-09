@@ -79,6 +79,8 @@ class DaemonConfiguration:
     capture_frame_path: Path
     world_frame: str
     world_from_base: dict[str, CaptureBaseTransform]
+    world_absolute_enabled: bool = False
+    nullspace: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -276,7 +278,14 @@ def load_daemon_configuration(path: str | Path) -> DaemonConfiguration:
     if str(ft_zero.get("confirmation_token", "")) != "FLEXIV-FT-UNLOADED":
         raise ConfigurationError("unsafe ft_zero.confirmation_token")
 
+    from .nullspace import validate_nullspace
+    nullspace = validate_nullspace(control.get("nullspace"))
+    world_enabled = control.get("world_absolute_enabled", False)
+    if not isinstance(world_enabled, bool):
+        raise ConfigurationError("world_absolute_enabled must be bool")
     return DaemonConfiguration(
+        world_absolute_enabled=world_enabled,
+        nullspace=nullspace,
         source_path=source,
         schema_version=schema,
         robots=(robots[0], robots[1]),

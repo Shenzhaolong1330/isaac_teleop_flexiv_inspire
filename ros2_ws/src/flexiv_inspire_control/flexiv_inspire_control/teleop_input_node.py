@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -445,6 +446,8 @@ class TeleopInput(Node):
             "tf_topic": "/tf",
             "external_deadman_topic": "/teleop/deadman",
             "deadman_source": "external_bool",
+            "teleop_mapping_mode": "incremental",
+            "world_installation": "",
             "foot_pedal": "name:input-remapper keyboard",
             "enable_key_code": KEY_SPACE,
             "squeeze_threshold": 0.65,
@@ -472,6 +475,13 @@ class TeleopInput(Node):
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
+        self._world_identity = None
+        self._input_boot_id = str(uuid.uuid4())
+        if self.get_parameter("teleop_mapping_mode").value == "world_absolute":
+            from isaac_teleop_core.world_teleop import installation, identity
+            raw = installation(yaml.safe_load(Path(self.get_parameter("world_installation").value).read_text()))
+            self._world_identity = identity(raw)
+            self._world_identity["input_session_id"] = self._input_boot_id
         self._enabled = bool(self.get_parameter("command_enabled").value)
         configured_session = str(self.get_parameter("session_id").value).strip()
         self._session = configured_session or f"teleop-{uuid.uuid4()}"
@@ -770,9 +780,8 @@ class TeleopInput(Node):
     def _tick(self) -> None:
         now = time.monotonic_ns()
         deadman = self._deadman(now)
-        delta = self._mapper.update(
-            self._tracking_sample(now), deadman=deadman, now_ns=now
-        )
+        sample = self._tracking_sample(now)
+        delta = self._mapper.update(sample, deadman=deadman, now_ns=now)
         hand_valid = self._retarget.calibrated and all(
             self._hands[side] is not None
             and now - self._hands_received[side]
@@ -828,6 +837,17 @@ class TeleopInput(Node):
             "command" if self._enabled else "shadow",
             self._tracking_unavailable_reason or delta.reason,
         ]
+        if self._world_identity is not None:
+            # Raw snapshot only; bridge owns mapping, limiter and accepted targets.
+            # No physical pedal value is rewritten here.
+            message.deadman = False
+            message.valid_mask = 12 if hand_valid else 0
+            if sample is not None:
+                tracking = {"identity": self._world_identity, "sequence": sample.sequence, "source_ns": sample.source_time_ns,
+                    "receive_ns": sample.receive_monotonic_ns, "frame_id": sample.frame_id,
+                    **{s: [*getattr(sample, s).position.tolist(), *getattr(sample, s).quaternion_xyzw.tolist()] for s in ("left", "right")}}
+                message.metadata_keys += ["world_tracking", "world_command_enabled"]
+                message.metadata_values += [json.dumps(tracking), "true" if self._enabled else "false"]
         self._command_pub.publish(message)
         heartbeat = UInt64()
         heartbeat.data = now

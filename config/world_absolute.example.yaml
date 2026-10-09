@@ -1,0 +1,27 @@
+# Diagnostic values only. Fill measured installation geometry and freeze site limits.
+schema_version: 1
+mode: world_absolute
+world_frame: world
+input_backend: oculus_reader
+origin_reported: false
+tracking_origin_id: operator-declared-origin-1
+input_session_id: capture-will-bind-source-boot-id
+tool_identity: REPLACE_WITH_TOOL_AND_GRIP_HASH
+axis_rotation: [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+translation_scale: 1.0
+world_from_base:
+  left: [0, 0, 0, 0, 0, 0, 1]
+  right: [0, 0, 0, 0, 0, 0, 1]
+controller_from_reference:
+  left: [0, 0, 0, 0, 0, 0, 1]
+  right: [0, 0, 0, 0, 0, 0, 1]
+tcp_from_reference:
+  left: [0, 0, 0, 0, 0, 0, 1]
+  right: [0, 0, 0, 0, 0, 0, 1]
+calibration_limits:
+  age_s: 0.1
+  pair_skew_s: 0.02
+  stable_position_m: 0.005
+  stable_rotation_rad: 0.03
+  relative_position_m: 0.01
+  relative_rotation_rad: 0.05

@@ -613,7 +613,7 @@ class EpisodeSession:
                                   "/control/requested_command", "/control/safe_command", "/control/command_trace"}
         if envelope.topic == "/control/state" and isinstance(envelope.payload, dict):
             state = envelope.payload
-            signature = (state.get("state_name"), state.get("active_source"), state.get("hold_reason"), state.get("physical_pedal"))
+            signature = (state.get("state_name"), state.get("active_source"), state.get("hold_reason"), state.get("physical_pedal") if self._record_only_while_pedal_pressed else None)
             if signature != self._control_signature:
                 self._control_signature = signature
                 self._submit_unchecked(RecordEnvelope(
@@ -647,7 +647,7 @@ class EpisodeSession:
         self._motion_recording_enabled = enabled
         self._submit_unchecked(self._event_envelope("/episode/events", self._next_critical_sequence(), {
             "event_type": "pedal_pressed" if enabled else "pedal_released",
-            "episode_uuid": self.episode_uuid, "discontinuity": True,
+            "episode_uuid": self.episode_uuid, "discontinuity": self._record_only_while_pedal_pressed,
             "effective_time_ns": self._clock_ns(),
             "recording_gate": self._record_only_while_pedal_pressed,
         }), critical=True)

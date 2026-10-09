@@ -17,6 +17,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from .guard import HardwareWriteGuard
+from .nullspace import NullspaceAdapter
 from .model import ArmSample, DualArmSample
 
 
@@ -108,9 +109,13 @@ class FlexivRDKBackend:
         specs: tuple[RobotSpec, RobotSpec],
         *,
         write_guard: HardwareWriteGuard,
+        nullspace_config=None,
     ) -> None:
         if {spec.side for spec in specs} != {"left", "right"}:
             raise ValueError("exactly one left and one right RobotSpec are required")
+        self._nullspace_emitter = None
+        self._nullspace = NullspaceAdapter(nullspace_config)
+        self._rdk_version = ""
         self._specs = {spec.side: spec for spec in specs}
         self._guard = write_guard
         self._robots: dict[str, Any] = {}
@@ -149,6 +154,8 @@ class FlexivRDKBackend:
             raise RuntimeError(
                 f"RDK 1.9.x is required and must report its version, found {version!r}"
             )
+        self._rdk_version = version
+        self._nullspace.reconnect()
         robots: dict[str, Any] = {}
         metadata: dict[str, RobotMetadata] = {}
         try:
@@ -589,6 +596,28 @@ class FlexivRDKBackend:
             )
             # A mode switch may restore controller-default Cartesian gains.
             self._cartesian_impedance.pop(side, None)
+            if getattr(self, "_nullspace", None) is not None and self._nullspace.config[side]["enabled"]:
+                self._guard.require("SetNullSpacePosture/Objectives", local_console=local_console)
+                metadata = self._metadata[side]
+                try:
+                    self._nullspace.mode_entry(side, robot, self.observe(side).q,
+                        np.asarray(metadata.q_min), np.asarray(metadata.q_max), self._rdk_version)
+                finally:
+                    if self._nullspace_emitter is not None:
+                        from isaac_teleop_core.deviceio import record_envelope
+                        self._nullspace_emitter.emit(record_envelope(producer="rdk", topic="/maintenance/nullspace",
+                            sequence=time.monotonic_ns(), source_time_ns=time.monotonic_ns(), host_receive_time_ns=time.monotonic_ns(),
+                            payload={"side": side, **self._nullspace.results.get(side, {})}), critical=True)
+
+    def begin_nullspace_takeover(self):
+        for side in ("left", "right"):
+            if self._nullspace.config[side].get("reference_strategy") == "takeover_measured":
+                self._nullspace.reference.pop(side, None)
+        return any(self._nullspace.config[side]["enabled"] for side in ("left", "right"))
+
+    @property
+    def nullspace_results(self):
+        return self._nullspace.results.copy()
 
     def switch_joint_position_mode(self, side: str, *, local_console: bool) -> None:
         self._switch_mode(side, "NRT_JOINT_POSITION", local_console=local_console)

@@ -108,6 +108,7 @@ def _next_task_episode_index(storage_root: Path, task_name: str) -> int:
 class EpisodeController(Node):
     def __init__(self) -> None:
         super().__init__("flexiv_inspire_episode_controller")
+        self.declare_parameter("teleop_mapping_mode", "incremental")
         defaults = {
             "sessions_root": "sessions",
             "dataset_name": "dataset",
@@ -199,12 +200,19 @@ class EpisodeController(Node):
                 qos,
             )
         self.create_timer(0.25, self._tick)
-        self.get_logger().info(
-            "数采控制：左踏板=丢弃当前条并 Home 后重录；"
-            "中踏板=按住使能双臂、松开立即停止；"
-            "右踏板=保存当前条并 Home 后无缝开始下一条；"
-            "Quest A=暂停记录、Home 后继续当前条；Ctrl+C=结束数采"
-        )
+        if self.get_parameter("teleop_mapping_mode").value == "world_absolute":
+            self.get_logger().info(
+                "world 数采：左踏板=丢弃重录；右踏板=保存下一条；均不 Home。"
+                "录制与运动许可独立；Quest A=独占 Home 后恢复记录，"
+                "运动恢复另需显式 start；pause_recording/resume_recording=独立录制门。"
+            )
+        else:
+            self.get_logger().info(
+                "数采控制：左踏板=丢弃当前条并 Home 后重录；"
+                "中踏板=按住使能双臂、松开立即停止；"
+                "右踏板=保存当前条并 Home 后无缝开始下一条；"
+                "Quest A=暂停记录、Home 后继续当前条；Ctrl+C=结束数采"
+            )
         self._publish("STARTING")
 
     @property
@@ -317,7 +325,7 @@ class EpisodeController(Node):
             command.append("--no-ros-mcap")
         if bool(
             self.get_parameter("record_only_while_pedal_pressed").value
-        ):
+        ) and self.get_parameter("teleop_mapping_mode").value != "world_absolute":
             command.append("--record-only-while-pedal-pressed")
         manus = str(self.get_parameter("manus_calibration").value).strip()
         if manus:
@@ -396,7 +404,7 @@ class EpisodeController(Node):
             _terminal_banner(
                 self.get_logger(),
                 f"✓ 数据流恢复：{identity}",
-                "后续踩下中踏板时会正常写入该相机画面。",
+                "后续录制门打开时会正常写入该相机画面。",
             )
 
     def _read_recorder_state(self) -> dict[str, object]:
@@ -440,7 +448,7 @@ class EpisodeController(Node):
         )
         mode = (
             "等待中踏板；仅中踏板按住期间写入训练数据"
-            if bool(self.get_parameter("record_only_while_pedal_pressed").value)
+            if (bool(self.get_parameter("record_only_while_pedal_pressed").value) and self.get_parameter("teleop_mapping_mode").value != "world_absolute")
             else "正在持续写入数据"
         )
         _terminal_banner(
@@ -578,6 +586,8 @@ class EpisodeController(Node):
         return response
 
     def _authorize_control(self, *, clear_hold_latched: bool = False) -> None:
+        if self.get_parameter("teleop_mapping_mode").value == "world_absolute":
+            return
         if not bool(self.get_parameter("auto_authorize_control").value):
             return
         source = str(self.get_parameter("control_source").value)
@@ -617,6 +627,7 @@ class EpisodeController(Node):
 
         self._control_state_name = str(message.state_name)
         self._control_physical_pedal = bool(message.physical_pedal)
+        world_mode = self.get_parameter("teleop_mapping_mode").value == "world_absolute"
         # Pedal edges are useful status changes while running, but once the
         # bridge reports FAULT they do not change the fault.  Do not print the
         # same alarming line again on every press/release.
@@ -636,14 +647,14 @@ class EpisodeController(Node):
             if self._control_state_name == "ACTIVE":
                 _terminal_banner(
                     self.get_logger(),
-                    f"▶ 正在记录动作 · EPISODE {self._episode_index:03d}",
-                    "中踏板已按下：机械臂运动已使能，观测与动作正在写入。",
+                    f"▶ 控制 ACTIVE · EPISODE {self._episode_index:03d}" if world_mode else f"▶ 正在记录动作 · EPISODE {self._episode_index:03d}",
+                    "world 会话控制已激活；录制由 episode 录制门独立控制。" if world_mode else "中踏板已按下：机械臂运动已使能，观测与动作正在写入。",
                 )
             elif previous is not None and previous[0] == "ACTIVE":
                 _terminal_banner(
                     self.get_logger(),
-                    f"Ⅱ 动作记录已暂停 · EPISODE {self._episode_index:03d}",
-                    "中踏板已松开：机械臂停止；本条尚未结束。再次踩下可继续。",
+                    f"Ⅱ 控制离开 ACTIVE · EPISODE {self._episode_index:03d}" if world_mode else f"Ⅱ 动作记录已暂停 · EPISODE {self._episode_index:03d}",
+                    "运动恢复需显式 start；本条是否录制由 episode 录制门决定。" if world_mode else "中踏板已松开：机械臂停止；本条尚未结束。再次踩下可继续。",
                 )
             if self._control_state_name == "HOLD_LATCHED":
                 detail = "机械臂进入 HOLD_LATCHED：" + (
@@ -657,6 +668,9 @@ class EpisodeController(Node):
                 self.get_logger().error(
                     "机械臂控制进入 FAULT：" + (message.hold_reason or "unknown")
                 )
+        if self.get_parameter("teleop_mapping_mode").value == "world_absolute":
+            self._control_ready_for_recording = self._control_state_name in {"READY", "TELEOP_ARMED", "ACTIVE"} and bool(getattr(message, "ft_zeroed_for_session", False)) and bool(getattr(message, "arms_online", False))
+            return  # World recovery requires explicit local start, never pedal auto-rearm.
         self._control_ready_for_recording = (
             self._control_state_name == "READY"
             and bool(getattr(message, "local_permission", False))
@@ -789,7 +803,10 @@ class EpisodeController(Node):
             "FAULT",
             "MAINTENANCE",
             "DISABLED",
-        }:
+        } and not (
+            self.get_parameter("teleop_mapping_mode").value == "world_absolute"
+            and command in {"stop", "toggle", "save", "rerecord", "pause_recording", "resume_recording"}
+        ):
             self.get_logger().error(
                 f"ignored episode input {command!r}: control is "
                 f"{self._control_state_name}; recorder remains active"
@@ -797,6 +814,25 @@ class EpisodeController(Node):
             self._publish_progress("WAITING_FOR_CONTROL_RECOVERY")
             return
         try:
+            if self.get_parameter("teleop_mapping_mode").value == "world_absolute":
+                if command in {"stop", "toggle", "save", "rerecord"}:
+                    discarded = command == "rerecord"
+                    completed = self._stop(rerecord=discarded)
+                    if not discarded and completed:
+                        self._completed_episodes += 1
+                        self._episode_index += 1
+                    else:
+                        self._attempt += 1
+                    if self._completed_episodes >= int(self.get_parameter("episode_count").value):
+                        self._finished = True
+                        self._publish_progress("COMPLETE")
+                    else:
+                        self._start()
+                    return
+                if command == "pause_recording":
+                    self._pause(); return
+                if command == "resume_recording":
+                    self._resume(); return
             if command in {"stop", "toggle"}:
                 _terminal_banner(
                     self.get_logger(),

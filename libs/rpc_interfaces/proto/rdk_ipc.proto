@@ -88,6 +88,8 @@ message CartesianCommand {
   bool local_permission = 9;
   bool physical_pedal = 10;
   string local_arm_token = 11;
+  bool world_session_authority = 12;
+  string mapping_epoch = 13;
 }
 
 message CommandAck {
@@ -95,6 +97,7 @@ message CommandAck {
   bool accepted = 2;
   string reason = 3;
   uint64 applied_monotonic_ns = 4;
+  repeated string sdk_returned_sides = 5;
 }
 
 message WrenchStatistics {

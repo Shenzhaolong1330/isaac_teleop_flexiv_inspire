@@ -87,6 +87,7 @@ class EpisodeAligner:
             for sample in streams.get(topic, ())
             if sample.alignment_time_ns is not None and isinstance(sample.value, Mapping)
             and (sample.value.get("event_type") in BOUNDARIES or sample.value.get("discontinuity"))
+            and not (sample.value.get("event_type") in {"pedal_pressed", "pedal_released"} and sample.value.get("recording_gate") is False)
         })
         self.depth_cameras = tuple(depth_cameras)
         if any(
@@ -316,9 +317,12 @@ class EpisodeAligner:
     def _action_at(self, timestamp_ns: int) -> AlignedValue:
         if self.action.name == "sent_command":
             # Exact RDK-acknowledged command: default behavioural-cloning label.
-            return self._causal(
-                "control/sent_command", timestamp_ns, self.tolerance.action_ns
-            )
+            sample = self._causal("control/sent_command", timestamp_ns, self.tolerance.action_ns)
+            if isinstance(sample.value, dict):
+                metadata = dict(zip(sample.value.get("metadata_keys", []), sample.value.get("metadata_values", [])))
+                if metadata.get("world_state") and metadata["world_state"] != "FOLLOW":
+                    return AlignedValue(None, sample.source_time_ns, sample.age_ns, False, "world-maintenance-not-follow")
+            return sample
         raise ValueError("absolute command targets unavailable")
 
     def _put_nearest(

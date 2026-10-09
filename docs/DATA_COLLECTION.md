@@ -1,5 +1,23 @@
 # 一键数采工作流
 
+本文下述自动授权、踏板/Home 表描述 incremental。world_absolute 的配置、
+门禁与现场准备见 [阶段 B 契约](TELEOP_STAGE_B_CONTRACT.md) 和
+[迁移验收指南](TELEOP_STAGE_B_HARDWARE_ACCEPTANCE.md)。world 模式不会由
+episode controller 自动授权运动；需要独立本地会话 start。录制以 episode 生命周期
+及 `/episode/control` 的 `pause_recording/resume_recording` 为准，中踏板真实状态仍
+记录，旧踏板录制门被禁用。右踏板保存/下一条，左踏板丢弃/重录，均不 Home 或
+重锚。Quest Home 保留独占过程，完成后录制可恢复，运动另需 start/ALIGNING。
+
+普通 FOLLOW（包括静止）可形成监督；Home/ALIGNING/HOLD 保留审计但不进入
+普通训练窗口。`world_control_changed` 切分连续片段，保持父 episode，world 模式
+物理中踏板边缘不切片。永久归档包含安装、标定、原始参考采集、执行限值、批准区域
+与零空间配置；`/maintenance/world_state` 保存四层目标与两个 epoch，
+`/maintenance/nullspace` 保存真实调用结果及参考/权重。正式 world 验收使用 native
+DeviceIO 链路。
+
+停录不自动撤回 world 运动许可；明确停止用 `/control/stop`，退出整套 `robot record`
+则会关闭本次启动服务。保存或停止都不代表物理任务成功。
+
 日常录制参数只在 [`config/recording.yaml`](../config/recording.yaml) 修改：
 
 ```yaml

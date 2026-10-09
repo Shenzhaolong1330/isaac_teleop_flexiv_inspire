@@ -9,6 +9,15 @@
 > 真机操作只能在机器人主机本地终端执行。运行前确认工作区无人、双臂和双手
 > 无接触/无外载、线缆不受拉扯，且中踏板处于松开状态。
 
+
+阶段 B 新增显式选择的 `world_absolute`。旧配置默认仍为 incremental，下面的
+日常流程与踏板表适用于旧模式。world 模式需要人工参数、有效标定、本地授权、
+批准接近区域和显式会话 start；右踏板保存/左踏板丢弃不 Home，录制与运动许可
+独立，普通 Home 后需 ALIGNING 再 FOLLOW。迁移及现场验收请先执行
+[阶段 B 真机指南](docs/TELEOP_STAGE_B_HARDWARE_ACCEPTANCE.md)，公式、门禁与
+限制见 [阶段 B 契约](docs/TELEOP_STAGE_B_CONTRACT.md)。未配置的部署不会自动
+开始无踏板跟随。
+
 ## 最短日常流程
 
 ```bash

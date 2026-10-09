@@ -38,7 +38,15 @@ def test_policy_server_stack_is_hardware_owner_only(tmp_path) -> None:
     config = load_system_config(_site())
     assert config.document["flexiv"]["policy_control"]["require_pedal"] is False
     rendered = render_runtime_configs(config, tmp_path / "rendered")
-    settings = _load_policy_server_config(config, _policy_server())
+    # This tests command construction, not TLS. Avoid depending on site credentials.
+    server_config = yaml.safe_load(_policy_server().read_text())
+    for key in ("server_cert", "server_key"):
+        placeholder = tmp_path / key
+        placeholder.write_text("synthetic command-builder fixture; not TLS material\n")
+        server_config["server"][key] = str(placeholder)
+    test_config = tmp_path / "policy_server.yaml"
+    test_config.write_text(yaml.safe_dump(server_config))
+    settings = _load_policy_server_config(config, test_config)
     commands = _policy_serve_commands(config, rendered, settings)
     joined = [" ".join(command) for command in commands]
 

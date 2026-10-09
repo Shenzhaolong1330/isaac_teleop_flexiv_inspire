@@ -7,7 +7,7 @@ name = "isaac-teleop-core"
 version = "0.2.0"
 description = "Fail-closed control primitives for the independent Flexiv/Inspire teleoperation stack"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24,<3"]
+dependencies = ["numpy>=1.24,<3", "PyYAML>=6"]
 
 [project.optional-dependencies]
 test = ["pytest>=7.4,<9"]

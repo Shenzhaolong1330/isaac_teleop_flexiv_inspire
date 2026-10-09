@@ -152,32 +152,34 @@ def archive_episode(directory, *, config=None, assets=None, rendered_dir=None):
         ):
             yield value
 
+    def required_references(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if SECRET.search(str(key)):
+                    continue
+                if (
+                    isinstance(item, str)
+                    and item
+                    and (
+                        str(key).endswith("config")
+                        or str(key)
+                        in {
+                            "frame_config",
+                            "world_installation", "world_calibration", "world_execution_config", "reference_samples",
+                            "tool_payload_config",
+                            "manus_calibration",
+                        }
+                    )
+                ):
+                    yield item
+                yield from required_references(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from required_references(item)
+
+
     if config:
         pending += [(ref, Path(ref)) for ref in references(config)]
-
-        def required_references(value):
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    if SECRET.search(str(key)):
-                        continue
-                    if (
-                        isinstance(item, str)
-                        and item
-                        and (
-                            str(key).endswith("config")
-                            or str(key)
-                            in {
-                                "frame_config",
-                                "tool_payload_config",
-                                "manus_calibration",
-                            }
-                        )
-                    ):
-                        yield item
-                    yield from required_references(item)
-            elif isinstance(value, list):
-                for item in value:
-                    yield from required_references(item)
 
         required_names.update(required_references(config))
     while pending:
@@ -196,6 +198,7 @@ def archive_episode(directory, *, config=None, assets=None, rendered_dir=None):
         if source.suffix in {".yaml", ".yml", ".json"}:
             value = yaml.safe_load(source.read_text())
             data = yaml_bytes(value)
+            required_names.update(required_references(value))
             for ref in references(value):
                 refpath = Path(ref)
                 pending.append(
@@ -279,7 +282,7 @@ def startup_summary(config, *, profile, task, output, pedal_gate):
         "hands": config.get("inspire", {}),
         "safety": config.get("safety", config.get("flexiv", {})),
         "pedal_recording_gate": pedal_gate,
-        "home_behavior": "existing pause and resume workflow",
+        "home_behavior": "exclusive Home; explicit ALIGNING restart; save/discard independent" if config.get("teleop", {}).get("mapping_mode") == "world_absolute" else "existing pause and resume workflow",
         "output": str(output),
         "config_sha256": hashlib.sha256(
             json.dumps(redact(config), sort_keys=True).encode()

@@ -102,3 +102,15 @@ EULA。首次实际启动必须由操作者阅读并现场确认。
 `--help`/动态库 smoke，尚未完成 Quest 串流验收。`coturn` 已安装但保持
 `disabled`、`inactive`，只有在明确启动 CloudXR USB-local 流程时才应
 按需启动。
+
+## 阶段 B 增量更新
+
+复用已工作的 ROS 3.12、RDK 3.10、data/Isaac 环境，不要求重建。新 world CLI
+依赖 control_core 中的 PyYAML；RDK generated typed IPC 要求 protobuf >=5.29,<6，
+仓库原 5.29.5 满足。生成器可用 grpcio-tools==1.71.0，与 protobuf 5.29.x 兼容。
+RDK 软零空间限定实际 1.9.x 并探测绑定，不将升级 SDK 作为默认迁移步骤。
+
+重绑本仓库 editable 包、补齐缺失依赖、重新生成 RDK protobuf/构建 ROS overlay 后
+核对模块 __file__ 与 Python/AMENT/COLCON 路径，不能混用旧 checkout。
+具体增量命令、现场资产保护、只读入口和环境回退见
+[阶段 B 真机指南](TELEOP_STAGE_B_HARDWARE_ACCEPTANCE.md)。

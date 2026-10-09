@@ -300,7 +300,9 @@ class RDKRequestDispatcher:
         world_frame: str = "world",
         world_from_base: dict[str, Any] | None = None,
         watchdog_period_s: float = 0.005,
+        world_absolute_enabled: bool = False,
     ) -> None:
+        self._world_absolute_enabled = world_absolute_enabled
         self._backend = backend
         self._ft_zero = ft_zero
         self._hands = hands
@@ -632,10 +634,13 @@ class RDKRequestDispatcher:
                     raise PermissionError("cannot clear hold before this session is F/T-zeroed")
                 if self._active:
                     raise RuntimeError("cannot clear hold while motion is active")
+                prepare_nullspace = False
+                if callable(getattr(self._backend, "begin_nullspace_takeover", None)):
+                    prepare_nullspace = bool(self._backend.begin_nullspace_takeover())
                 # A latched hold leaves both controllers in IDLE via Robot.Stop.
                 # Prepare a fresh measured Cartesian anchor before allowing a
                 # new command token to cross the hardware boundary.
-                if self._hold_latched:
+                if self._hold_latched or prepare_nullspace:
                     errors: list[str] = []
                     for side in ("left", "right"):
                         try:
@@ -880,7 +885,8 @@ class RDKRequestDispatcher:
             return rejected("safety_not_validated")
         if not bool(payload.get("local_permission", False)):
             return rejected("local_permission_missing")
-        if not bool(payload.get("physical_pedal", False)):
+        world_authority = source == "teleop" and self._world_absolute_enabled and bool(payload.get("world_session_authority", False)) and bool(payload.get("mapping_epoch"))
+        if not bool(payload.get("physical_pedal", False)) and not world_authority:
             return rejected("physical_pedal_released")
         if expires <= now:
             return rejected("command_expired")
@@ -933,6 +939,7 @@ class RDKRequestDispatcher:
             # is always followed by a best-effort hold on both arms.
             self._active = True
             self._command_deadline_ns = expires
+            returned_sides = []
             try:
                 for side in ("left", "right"):
                     if side in validated_targets:
@@ -943,12 +950,19 @@ class RDKRequestDispatcher:
                         except Exception as exc:
                             emit_receipt(self._deviceio_emitter, "rdk", receipt(cid, side + "_arm", "send_failed", detail=str(exc)), source_sequence)
                             raise
+                        returned_sides.append(side)
                         emit_receipt(self._deviceio_emitter, "rdk", receipt(cid, side + "_arm", "sdk_returned",
                                      target={"tcp_pose_rdk": validated_targets[side][1].tolist(), "frame": side + "_base", "quaternion": "wxyz"}), source_sequence)
             except Exception:
                 self._latch_hold_locked("send_failure", force_hardware_hold=True)
+                if world_authority:
+                    kind, response = self._ack(source_sequence, False, "partial_or_failed_send")
+                    response["sdk_returned_sides"] = returned_sides
+                    return kind, response
                 raise
-        return self._ack(source_sequence, True, "sent")
+        kind, response = self._ack(source_sequence, True, "sent")
+        response["sdk_returned_sides"] = returned_sides
+        return kind, response
 
     def _validate_target(
         self, side: str, target: object
@@ -964,7 +978,7 @@ class RDKRequestDispatcher:
         # Old replay/test clients did not carry this field and historically
         # used impedance. Current control bridges always send it explicitly.
         control_mode = str(
-            target.get("control_mode", "impedance")
+            (target.get("control_mode") or "impedance")
         ).strip().lower()
         if control_mode not in {"position", "impedance"}:
             raise ValueError(

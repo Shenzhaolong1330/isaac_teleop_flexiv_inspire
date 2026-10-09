@@ -18,6 +18,11 @@ tool_payload_config: tool_payload.yaml
 # TCP pose/twist in this measured shared world frame.
 capture_frame_config: ../../../config/dual_arm_frames.yaml
 control:
+  world_absolute_enabled: false  # explicit site opt in; never defaults to pedal-free
+  nullspace:
+    schema_version: 1
+    left: {enabled: false}
+    right: {enabled: false}
   target_rate_hz: 300
   default_mode: observe_only
   hardware_writes_enabled: false

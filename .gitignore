@@ -47,3 +47,5 @@ certs/private/
 .idea/
 .vscode/
 .DS_Store
+
+.local/

@@ -71,6 +71,8 @@ def _load_episode(
         depth_cameras=(),
         segment_gap_threshold_s=spec.segments.gap_threshold_s,
     ).rows()
+    for row in rows:
+        row["parent_episode_id"] = manifest.get("episode_uuid", "unknown-legacy-parent")
     return (
         PolicyEpisode(
             rows=rows,
@@ -121,6 +123,16 @@ def main(argv=None) -> int:
         episodes.append(episode)
         provenance.append(episode_provenance)
 
+    from .action_contract import export_supervision, records_from_mcap
+    from .provenance import verify_archive
+    supervision_documents = []
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("provenance"):
+            verify_archive(manifest_path.parent)
+        records = [r for p in _manifest_paths(manifest_path, manifest["deviceio_mcap"]) for r in records_from_mcap(p)]
+        supervision_documents.append(export_supervision(records, episode_id=manifest["episode_uuid"],
+            allow_legacy=manifest.get("action_contract") != "command-supervision-v2"))
     result = export_policy_episodes(
         episodes,
         output_root=args.output_root,
@@ -128,6 +140,10 @@ def main(argv=None) -> int:
         profile_id=spec.profile,
         fps=spec.fps,
     )
+    supervision_dir = Path(args.output_root) / "command_supervision"
+    supervision_dir.mkdir()
+    for document in supervision_documents:
+        (supervision_dir / (document["episode_id"] + ".json")).write_text(json.dumps(document, allow_nan=False))
     validation_path = Path(args.output_root) / "export_validation.json"
     validation_path.write_text(
         json.dumps(
@@ -153,6 +169,8 @@ def main(argv=None) -> int:
                         },
                     )
                 ),
+                "action_contract": "legacy-camera-sampled-v1",
+                "command_supervision": "command_supervision/",
                 "rotation_representation": "XYZ_PLUS_ROTATION_VECTOR",
                 "hand_domain": "normalized_0_to_1",
             },

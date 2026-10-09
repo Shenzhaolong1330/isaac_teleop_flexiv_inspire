@@ -194,6 +194,7 @@ class AsyncMcapRecorder:
         self.written_by_topic: dict[str, int] = defaultdict(int)
         self.dropped_by_topic: dict[str, int] = defaultdict(int)
         self.write_errors: list[str] = []
+        self.written_metadata: list[dict] = []
         self._fatal_error: str | None = None
         self._failed_critical: RecordEnvelope | None = None
         self._critical_spool: str = ""
@@ -267,6 +268,12 @@ class AsyncMcapRecorder:
                 envelope.json_bytes()
                 self.sink.write(envelope)
                 self.written_by_topic[envelope.topic] += 1
+                metadata = {key: getattr(envelope, key) for key in (
+                    "topic", "source_time_ns", "host_receive_time_ns", "sequence", "valid",
+                    "mapped_host_time_ns", "source_clock_domain", "host_clock_domain")}
+                metadata["timing_valid"] = envelope._timing()[1]
+                metadata["payload"] = (envelope.payload if envelope.topic in {"/episode/events", "/maintenance/events"} else {})
+                self.written_metadata.append(metadata)
             except Exception as exc:
                 error = f"{envelope.topic}: {exc}"
                 self.write_errors.append(error)

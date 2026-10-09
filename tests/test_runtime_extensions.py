@@ -317,9 +317,11 @@ def test_rosbag_pause_and_resume_use_its_unique_recorder_services(
         def destroy_client(self, _client):
             return None
 
-    monkeypatch.setattr(
-        "rclpy.spin_until_future_complete", lambda *_args, **_kwargs: None
-    )
+    import sys
+    module = SimpleNamespace(spin_until_future_complete=lambda *_args, **_kwargs: None)
+    service = SimpleNamespace(Request=lambda: object())
+    monkeypatch.setitem(sys.modules, "rclpy", module)
+    monkeypatch.setitem(sys.modules, "rosbag2_interfaces.srv", SimpleNamespace(Pause=service, Resume=service))
     bag = RosbagProcess(tmp_path / "bag")
     bag.process = Process()
     bag._started = True
@@ -355,7 +357,7 @@ def test_rerecord_without_sent_command_is_retained_but_not_an_error(tmp_path):
     assert manifest["completion_reason"] == "rerecord-requested"
 
 
-def test_training_deviceio_profile_drops_diagnostics_but_keeps_training_data(tmp_path):
+def test_training_deviceio_profile_keeps_command_evidence_and_training_data(tmp_path):
     episode = _episode_session(tmp_path)
     episode._deviceio_profile = "training"
 
@@ -375,10 +377,10 @@ def test_training_deviceio_profile_drops_diagnostics_but_keeps_training_data(tmp
     episode.submit(envelope("/control/sent_command", 3))
     episode.submit(envelope("/robot/left_arm/state", 4))
 
-    assert "control/requested_command" not in episode.manifest.streams
-    assert "control/safe_command" not in episode.manifest.streams
-    assert episode.manifest.streams["control/sent_command"].samples == 1
-    assert episode.manifest.streams["robot/left_arm/state"].samples == 1
+    assert episode._enqueued["control/requested_command"] == 1
+    assert episode._enqueued["control/safe_command"] == 1
+    assert episode._enqueued["control/sent_command"] == 1
+    assert episode._enqueued["robot/left_arm/state"] == 1
     episode.abort(reason="test-complete")
 
 
@@ -405,11 +407,11 @@ def test_motion_only_recording_uses_middle_pedal_gate(tmp_path):
 
     episode.set_motion_recording(True)
     episode.submit(envelope(2))
-    assert episode.manifest.streams["robot/left_arm/state"].samples == 1
+    assert episode._enqueued["robot/left_arm/state"] == 1
 
     episode.set_motion_recording(False)
     episode.submit(envelope(3))
-    assert episode.manifest.streams["robot/left_arm/state"].samples == 1
+    assert episode._enqueued["robot/left_arm/state"] == 1
     assert episode.manifest.suppressed_samples == 2
     episode.abort(reason="test-complete")
 

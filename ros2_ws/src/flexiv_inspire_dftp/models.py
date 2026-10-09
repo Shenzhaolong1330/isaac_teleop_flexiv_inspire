@@ -131,6 +131,7 @@ class HandCommand:
     force_limits: tuple[int, ...]
     deadline_ns: int
     source: str
+    command_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "angles", _six(self.angles, "angles"))

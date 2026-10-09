@@ -20,6 +20,7 @@ from .ft_zero import (
 )
 from .ipc import peer_has_local_tty
 from isaac_teleop_core.deviceio import record_envelope
+from isaac_teleop_core.evidence import command_id, receipt, emit_receipt
 from isaac_teleop_core.rotation6d import (
     matrix_to_quaternion_xyzw,
     quaternion_xyzw_to_matrix,
@@ -861,26 +862,32 @@ class RDKRequestDispatcher:
         source_sequence = self._uint64(payload.get("source_sequence"), "source_sequence")
         expires = self._uint64(payload.get("expires_monotonic_ns"), "expires_monotonic_ns")
         valid_mask = int(payload.get("valid_mask", 0))
+        def rejected(reason):
+            cid = command_id(session_id, source, source_sequence)
+            for side, bit in (("left", 1), ("right", 2)):
+                if valid_mask & bit:
+                    emit_receipt(self._deviceio_emitter, "rdk", receipt(cid, side + "_arm", "rejected", detail=reason), source_sequence)
+            return self._ack(source_sequence, False, reason)
         if self._interlock.maintenance_active:
-            return self._ack(source_sequence, False, "maintenance_active")
+            return rejected("maintenance_active")
         if not self._ft_zero.is_zeroed_for(session_id):
-            return self._ack(source_sequence, False, "ft_not_zeroed_for_session")
+            return rejected("ft_not_zeroed_for_session")
         if self._interlock.ready_generation != self._backend.connection_generation:
-            return self._ack(source_sequence, False, "rdk_connection_generation_changed")
+            return rejected("rdk_connection_generation_changed")
         if source not in {"teleop", "policy", "replay"}:
-            return self._ack(source_sequence, False, "unknown_source")
+            return rejected("unknown_source")
         if not bool(payload.get("safety_validated", False)):
-            return self._ack(source_sequence, False, "safety_not_validated")
+            return rejected("safety_not_validated")
         if not bool(payload.get("local_permission", False)):
-            return self._ack(source_sequence, False, "local_permission_missing")
+            return rejected("local_permission_missing")
         if not bool(payload.get("physical_pedal", False)):
-            return self._ack(source_sequence, False, "physical_pedal_released")
+            return rejected("physical_pedal_released")
         if expires <= now:
-            return self._ack(source_sequence, False, "command_expired")
+            return rejected("command_expired")
         if expires - now > 1_000_000_000:
-            return self._ack(source_sequence, False, "command_ttl_exceeds_one_second")
+            return rejected("command_ttl_exceeds_one_second")
         if valid_mask == 0 or valid_mask & ~0x3:
-            return self._ack(source_sequence, False, "invalid_arm_mask")
+            return rejected("invalid_arm_mask")
         try:
             validated_targets = {
                 side: self._validate_target(side, payload.get(side, {}))
@@ -896,7 +903,7 @@ class RDKRequestDispatcher:
             raise
         with self._lock:
             if self._hold_latched:
-                return self._ack(source_sequence, False, f"hold_latched:{self._hold_reason}")
+                return rejected(f"hold_latched:{self._hold_reason}")
             if self._active_source is None:
                 self._control_authorizations.consume(
                     str(payload.get("local_arm_token", "")),
@@ -910,17 +917,17 @@ class RDKRequestDispatcher:
                 self._latch_hold_locked(
                     "source_or_session_conflict", force_hardware_hold=True
                 )
-                return self._ack(source_sequence, False, "source_or_session_conflict")
+                return rejected("source_or_session_conflict")
             elif owner_pid != self._owner_pid:
                 self._latch_hold_locked(
                     "command_owner_pid_changed", force_hardware_hold=True
                 )
-                return self._ack(source_sequence, False, "command_owner_pid_changed")
+                return rejected("command_owner_pid_changed")
             if source_sequence <= self._last_command_sequence.get(source, -1):
                 self._latch_hold_locked(
                     "non_monotonic_source_sequence", force_hardware_hold=True
                 )
-                return self._ack(source_sequence, False, "non_monotonic_source_sequence")
+                return rejected("non_monotonic_source_sequence")
             self._last_command_sequence[source] = source_sequence
             # Mark active before the first arm write so a partial two-arm send
             # is always followed by a best-effort hold on both arms.
@@ -929,7 +936,15 @@ class RDKRequestDispatcher:
             try:
                 for side in ("left", "right"):
                     if side in validated_targets:
-                        self._send_validated_target(side, validated_targets[side])
+                        cid = command_id(session_id, source, source_sequence)
+                        emit_receipt(self._deviceio_emitter, "rdk", receipt(cid, side + "_arm", "submitted"), source_sequence)
+                        try:
+                            self._send_validated_target(side, validated_targets[side])
+                        except Exception as exc:
+                            emit_receipt(self._deviceio_emitter, "rdk", receipt(cid, side + "_arm", "send_failed", detail=str(exc)), source_sequence)
+                            raise
+                        emit_receipt(self._deviceio_emitter, "rdk", receipt(cid, side + "_arm", "sdk_returned",
+                                     target={"tcp_pose_rdk": validated_targets[side][1].tolist(), "frame": side + "_base", "quaternion": "wxyz"}), source_sequence)
             except Exception:
                 self._latch_hold_locked("send_failure", force_hardware_hold=True)
                 raise

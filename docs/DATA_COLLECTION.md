@@ -11,7 +11,7 @@ recording:
 ```
 
 - `dataset_name`：数据集目录名，也是本批 episode 的名字；
-- `episode_count`：成功保存多少条后自动退出；左键丢弃的 attempt 不计数；
+- `episode_count`：正常保存多少条后自动退出（不等于任务成功）；左键丢弃的 attempt 不计数；
 - `output_root`：输出根目录；相对路径相对于仓库根目录；
 - `task_description`：写入每条 manifest，LeRobot 导出时默认作为 VLA prompt。
 
@@ -33,9 +33,9 @@ episode 数量会自动退出，`Ctrl-C` 会保存当前条、等待 MCAP/Device
 
 | 输入 | 当前 episode | Home 期间 | Home 完成后 |
 |---|---|---|---|
-| 右脚踏 | 结束并保存 | ROS bag 与 DeviceIO 都暂停，不写入 Home | 条数加一，未达目标则自动开始下一条 |
-| 左脚踏 | 标记丢弃 | 两套记录都暂停 | 同一编号增加 attempt，重新录制；旧数据保留审计但不能导出训练 |
-| Quest 右手 A | 暂停，不切 episode | 两套记录都暂停 | 恢复同一条 episode |
+| 右脚踏 | 结束并保存 | 传感器记录暂停；DeviceIO 事件/执行器证据继续写入 | 条数加一，未达目标则自动开始下一条 |
+| 左脚踏 | 标记丢弃 | 传感器记录暂停；关键事件仍保留 | 同一编号增加 attempt，重新录制；旧目录按当前控制器行为删除，不承诺审计保留 |
+| Quest 右手 A | 暂停，不切 episode | 传感器记录暂停；关键事件仍保留 | 恢复同一条 episode |
 | `Ctrl-C` | 正常保存当前条 | 不自动 Home | flush manifest/MCAP 后退出 |
 
 每次左键或右键都会执行一次配置的双臂 Home。Home 失败、被拒绝或超时会让
@@ -68,14 +68,13 @@ data 环境。默认 `all` 会批量转换所有已完成 episode；已有非空
 
 ```bash
 robot convert
-robot convert --action-view absolute_joint_position
-robot convert --action-view absolute_cartesian_pose
 ```
 
 输入 episode、输出目录、动作视图以及最终写进 LeRobot 的字段都在
 `config/conversion.yaml` 配置。`lerobot_export.fields` 是字段白名单；当前还会
-把头部相机原始 Z16 深度、深度比例和内参写进 Parquet。三种动作视图分别是
-30 维实际下发命令、14 维双臂绝对关节位置和 18 维 world 下双臂绝对 EE 位姿。
+把头部相机原始 Z16 深度、深度比例和内参写进 Parquet。默认动作是 30 维命令。旧绝对关节/TCP action 导出使用了实测状态，现在明确拒绝。
+转换会额外输出 60 Hz `command-supervision-v2`，不能只用 15 Hz LeRobot 最近增量行宣称多速率训练。
+详见 [阶段 A 数据契约](TELEOP_STAGE_A_CONTRACT.md)。
 输出写入
 `sessions/<dataset>/lerobot/<episode>/<action-view>/`，与原始 MCAP 的 `raw/`
 平行；已有非空目录不会被覆盖。已有旧的平铺 episode 仍可被转换和回放。
@@ -110,9 +109,12 @@ robot convert --conversion-config config/conversion_policy_minimal.yaml
 - `config/runtime.yaml`：进程命令，仅用于开发/启动编排。
 
 生成的进程配置位于 `/run/user/1000/isaac_teleop/launcher/<config-hash>/`；
-它们是运行时快照，不需要手工维护，也不需要 `artifacts/site/`。
+它们是运行时快照，不需要手工维护。episode 的 `provenance/` 保存其内容与已知资产；
+只搬走 manifest/MCAP 会丢失新增可复现性归档，应搬迁整个 episode 并校验。
 
 一键数采只合并重复的录制控制，不绕过一次性的真机安全准备：它不会自动
 启动/Enable 机器人、代替工具/payload 审核、执行 F/T 清零、伪造现场许可，
 也不会在 MANUS 未标定或 Inspire 写门禁未开启时发送手指命令。启动前检查
 若发现脚踏、RDK socket、F/T 记录或标定文件缺失，会直接报错且不开始录制。
+
+`training` 包含双手触觉；三路 RGB、头部处理后的 Z16 深度按逐相机配置录制，腕部深度和点云默认不写盘。暂停/松踏板保持同一任务 episode，恢复建立内部连续片段，静止不自动切段。关键事件不受 profile/录制门控抑制。通用与 profile 导出的训练子 episode 通过 `episode_lineage.json` 保留父任务 ID；默认保留有效性/age，必需观测失效拒绝样本。

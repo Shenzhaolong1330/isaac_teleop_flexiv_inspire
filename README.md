@@ -61,7 +61,7 @@ robot xr-doctor      # 检查当前选择的 Quest 控制器输入
 | `config/hardware.yaml` | 改 Home、速度、机械臂/手网络配置 | 硬件安装参数；非日常修改 |
 
 `config/site.yaml` 是上述配置的组合入口。运行时生成的文件在
-`/run/user/1000/isaac_teleop/launcher/`，不要手工编辑。
+`/run/user/1000/isaac_teleop/launcher/`，不要手工编辑；episode 的 `provenance/` 会永久归档最终配置与已知资产。
 
 ### 选择 Inspire 手型号
 
@@ -247,14 +247,13 @@ output:
 ```bash
 robot convert
 robot convert --action-view sent_command
-robot convert --action-view absolute_joint_position
-robot convert --action-view absolute_cartesian_pose
 ```
 
 默认 `all` 批量转换所有已完成 raw episode；已有非空输出会跳过，不会覆盖。
-三种动作视图分别是：实际下发的 30 维动作、14 维绝对关节、18 维 world 下双臂
-末端位姿。导出字段、深度、触觉、高频关节历史及空档切片策略都在
-`config/conversion.yaml` 配置。详见 [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)。
+转换同时保存独立的 `command-supervision-v2` 60 Hz 命令监督与因果观测；普通相机频率
+LeRobot 行仍为显式兼容视图，不自动满足多速率训练。旧绝对动作导出因使用实测状态而明确拒绝。
+导出字段、深度、触觉、高频关节历史及事件切片策略都在
+`config/conversion.yaml` 配置。完整契约与参考消费者见 [阶段 A 数据契约](docs/TELEOP_STAGE_A_CONTRACT.md)。详见 [docs/DATA_COLLECTION.md](docs/DATA_COLLECTION.md)。
 
 ## Quest 图像与 MANUS
 

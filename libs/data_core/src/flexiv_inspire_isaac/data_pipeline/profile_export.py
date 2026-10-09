@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
+import json
 from typing import Any, Mapping, Sequence
 import uuid
 
@@ -290,11 +291,33 @@ def export_policy_episodes(
             robot_type=robot_type,
             use_videos=True,
         )
+        lineage = []
         for episode in episodes:
             episode_written = 0
+            segment_written = 0
+            active_segment = None
+            parent_id = "unknown-legacy-parent"
+            def save_segment():
+                nonlocal episodes_written, segment_written
+                if segment_written:
+                    dataset.save_episode()
+                    lineage.append({"export_episode_index": episodes_written, "parent_episode_id": parent_id,
+                                    "source_manifest": episode.source_manifest, "capture_segment": active_segment,
+                                    "frames": segment_written})
+                    episodes_written += 1
+                    segment_written = 0
             for row in episode.rows:
+                segment = int(row.get("observation.capture_segment", 0))
+                if active_segment is not None and segment != active_segment and segment_written:
+                    save_segment()
+                active_segment = segment
+                if row.get("training.valid") is False:
+                    save_segment()
+                    dropped_observation += 1
+                    continue
                 explicitly_invalid = row.get("action.valid") is False
                 if row.get("action") is None or explicitly_invalid:
+                    save_segment()
                     dropped_action += 1
                     continue
                 try:
@@ -306,27 +329,32 @@ def export_policy_episodes(
                     )
                 except InvalidPolicyFrame as exc:
                     if exc.category == "image":
+                        save_segment()
                         dropped_image += 1
                         continue
                     if exc.category == "observation":
+                        save_segment()
                         dropped_observation += 1
                         continue
                     if exc.category == "action":
+                        save_segment()
                         dropped_action += 1
                         continue
                     raise RuntimeError(
                         f"unknown invalid policy frame category: {exc.category}"
                     ) from exc
+                parent_id = row.get("parent_episode_id", parent_id)
                 dataset.add_frame(frame)
                 episode_written += 1
+                segment_written += 1
                 written += 1
             if episode_written == 0:
                 provenance = episode.source_manifest or "<unknown manifest>"
                 raise ValueError(
                     f"source episode has no fully valid frames: {provenance}"
                 )
-            dataset.save_episode()
-            episodes_written += 1
+            if segment_written:
+                save_segment()
         dataset.finalize()
     except Exception:
         if dataset is not None:
@@ -359,6 +387,7 @@ def export_policy_episodes(
             profile.action_dimension,
         ):
             raise RuntimeError("reloaded action has the wrong shape")
+        (staging_root / "episode_lineage.json").write_text(json.dumps(lineage, indent=2))
         staging_root.rename(root)
     except Exception:
         shutil.rmtree(staging_root, ignore_errors=True)

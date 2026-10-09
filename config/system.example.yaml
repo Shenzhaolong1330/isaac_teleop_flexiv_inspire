@@ -211,7 +211,7 @@ lerobot_export:
     fps: 15.0
   high_rate_arm_samples_per_frame: 20
   action:
-    # sent_command (30-D) | absolute_joint_position (14-D) | absolute_cartesian_pose (18-D)
+    # sent_command (30-D); measured-state absolute action views are unsupported
     view: sent_command
   # canonical exporter stream -> recorded MCAP stream.  Use this to remap a
   # later hardware/topic layout without changing raw data or Python code.

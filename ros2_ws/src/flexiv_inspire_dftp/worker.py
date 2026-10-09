@@ -6,6 +6,8 @@ import threading
 import time
 from typing import Callable, Protocol
 
+from isaac_teleop_core.evidence import receipt
+
 from .models import Acquisition, HandCommand, HandState, TactileFrame, TactileSurface
 from .profiles import HandProfile, hand_profile
 from .protocol import (
@@ -32,7 +34,10 @@ class CommandSink(Protocol):
 class LatestOnlyMailbox:
     """A single-slot mailbox; a newer sequence atomically replaces the old one."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_receipt=None, actuator="unknown", clock_ns=time.monotonic_ns) -> None:
+        self.on_receipt = on_receipt or (lambda _value: None)
+        self.actuator = actuator
+        self.clock_ns = clock_ns
         self._lock = threading.Lock()
         self._pending: HandCommand | None = None
         self._last_taken_sequence = -1
@@ -44,9 +49,21 @@ class LatestOnlyMailbox:
                 -1 if self._pending is None else self._pending.sequence,
             )
             if command.sequence <= newest:
+                self._emit(command, "rejected", "non-monotonic-mailbox-sequence")
                 return False
+            if self._pending is not None:
+                self._emit(self._pending, "replaced", "latest-only-mailbox")
+            self._emit(command, "submitted", "mailbox")
             self._pending = command
             return True
+
+    def _emit(self, command, status, detail):
+        if command.command_id:
+            target = {"angles": list(command.angles), "force_limits": list(command.force_limits), "domain": "driver_registers"}
+            evidence = receipt(command.command_id, self.actuator, status, now_ns=self.clock_ns(), detail=detail,
+                               target=target if status == "sdk_returned" else None)
+            evidence["request_target"] = target
+            self.on_receipt(evidence)
 
     def take(self) -> HandCommand | None:
         with self._lock:
@@ -60,6 +77,7 @@ class LatestOnlyMailbox:
         with self._lock:
             if self._pending is not None:
                 self._last_taken_sequence = self._pending.sequence
+                self._emit(self._pending, "rejected", "mailbox-discarded")
             self._pending = None
 
     @property
@@ -186,6 +204,7 @@ class DftpHandWorker:
         on_state: Callable[[HandState], None] | None = None,
         on_tactile: Callable[[TactileFrame], None] | None = None,
         on_fault: Callable[[str], None] | None = None,
+        on_receipt: Callable[[dict], None] | None = None,
     ) -> None:
         if side not in {"left", "right"}:
             raise ValueError("side must be left or right")
@@ -215,7 +234,8 @@ class DftpHandWorker:
         self.on_state = on_state or (lambda _state: None)
         self.on_tactile = on_tactile or (lambda _frame: None)
         self.on_fault = on_fault or (lambda _message: None)
-        self.mailbox = LatestOnlyMailbox()
+        self.on_receipt = on_receipt or (lambda _value: None)
+        self.mailbox = LatestOnlyMailbox(self.on_receipt, side + "_hand", clock_ns)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._tactile_thread: threading.Thread | None = None
@@ -237,6 +257,7 @@ class DftpHandWorker:
 
     def submit(self, command: HandCommand) -> bool:
         if self.read_only:
+            self.mailbox._emit(command, "rejected", "read-only-worker")
             return False
         return self.mailbox.put(command)
 
@@ -407,12 +428,18 @@ class DftpHandWorker:
         command = self.mailbox.take()
         if command is not None:
             if command.deadline_ns <= now_ns:
+                self.mailbox._emit(command, "timeout", "expired-before-execution")
                 self.on_fault(
                     f"{self.side}: rejected expired hand command {command.sequence}"
                 )
                 self._send_timeout_hold(now_ns, reason="expired-before-execution")
             else:
-                self.command_sink.apply(command)
+                try:
+                    self.command_sink.apply(command)
+                except Exception as exc:
+                    self.mailbox._emit(command, "send_failed", str(exc))
+                    raise
+                self.mailbox._emit(command, "sdk_returned", "force-limit and angle write calls returned; physical state unknown")
                 self._last_applied = command
                 self._timeout_hold_sent = False
 

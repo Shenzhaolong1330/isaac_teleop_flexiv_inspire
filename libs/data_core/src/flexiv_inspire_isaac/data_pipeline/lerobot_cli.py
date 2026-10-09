@@ -75,6 +75,14 @@ def main(argv=None) -> int:
     spec = load_export_spec(args.export_config)
     if args.action_view is not None:
         spec = replace(spec, action=ActionView(args.action_view))
+    if spec.action.name != "sent_command":
+        raise ValueError("absolute action export unsupported: measured state is not a command target")
+    from .action_contract import export_supervision, records_from_mcap
+    from .provenance import verify_archive
+    if manifest.get("provenance"):
+        verify_archive(manifest_path.parent)
+    supervision = export_supervision([r for path in paths for r in records_from_mcap(path)],
+        episode_id=manifest["episode_uuid"], allow_legacy=manifest.get("action_contract") != "command-supervision-v2")
     streams = load_json_mcap_streams(paths)
     required_cameras = {
         "camera/head/jpeg",
@@ -107,6 +115,8 @@ def main(argv=None) -> int:
         depth_cameras=spec.depth.cameras if spec.depth.enabled else (),
         segment_gap_threshold_s=spec.segments.gap_threshold_s,
     ).rows()
+    for row in rows:
+        row["parent_episode_id"] = manifest.get("episode_uuid", "unknown-legacy-parent")
     result = export_rows(
         rows,
         output_root=args.output_root,
@@ -119,6 +129,7 @@ def main(argv=None) -> int:
         depth_cameras=spec.depth.cameras if spec.depth.enabled else (),
         split_episodes=spec.segments.split_episodes,
     )
+    (Path(args.output_root) / "command_supervision_v2.json").write_text(json.dumps(supervision, allow_nan=False))
     validation_path = Path(args.output_root) / "export_validation.json"
     validation_path.write_text(
         json.dumps(
@@ -137,6 +148,10 @@ def main(argv=None) -> int:
                 "timeline_resampled": spec.resample_timeline,
                 "high_rate_arm_samples_per_frame": spec.high_rate_arm_samples_per_frame,
                 "action_view": spec.action.name,
+                "action_contract": "legacy-camera-sampled-v1",
+                "command_supervision": "command_supervision_v2.json",
+                "parent_episode_id": manifest["episode_uuid"],
+                "rejections": supervision["quality"]["rejections"],
                 "action_shape": spec.action.shape,
                 "channel_remaps": dict(spec.channels),
                 "lerobot_fields": list(spec.fields),

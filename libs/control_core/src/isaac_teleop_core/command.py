@@ -305,7 +305,7 @@ class BimanualCommand:
         issued_monotonic_ns: int | None = None,
     ) -> "BimanualCommand":
         vector_list = list(vectors)
-        times = [0.0] * len(vector_list) if execute_after_s is None else list(execute_after_s)
+        times = [index / 60 for index in range(len(vector_list))] if execute_after_s is None else list(execute_after_s)
         if len(times) != len(vector_list):
             raise ValueError("execute_after_s length must match action chunk")
         if not math.isfinite(ttl_s) or ttl_s <= 0.0:

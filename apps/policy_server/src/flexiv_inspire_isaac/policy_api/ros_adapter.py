@@ -248,6 +248,8 @@ def remaining_action_timing(chunk: ActionChunk, now_ns: int) -> tuple[int, tuple
     remaining_ns = chunk.ttl_from_server_receive_ns - elapsed_ns
     if remaining_ns <= 0:
         raise ValueError("expired-policy-action-before-ros")
+    if any(elapsed_ns - int(round(point.execute_after_s * 1e9)) >= round(1e9 / 60) for point in chunk.points):
+        raise ValueError("expired-policy-point: reject whole chunk; no catch-up burst")
     offsets = tuple(
         max(0, int(round(point.execute_after_s * 1e9)) - elapsed_ns)
         for point in chunk.points

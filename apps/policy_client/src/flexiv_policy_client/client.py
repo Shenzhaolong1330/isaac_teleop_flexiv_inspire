@@ -250,7 +250,7 @@ class _ActionStream:
         if np.any(values[:, 12:24] < 0.0) or np.any(values[:, 12:24] > 1.0):
             raise PolicyClientError("hand targets must be normalized to [0,1]")
         offsets = (
-            (0,) * values.shape[0]
+            tuple(round(index * 1e9 / 60) for index in range(values.shape[0]))
             if execute_after_ns is None
             else tuple(int(item) for item in execute_after_ns)
         )

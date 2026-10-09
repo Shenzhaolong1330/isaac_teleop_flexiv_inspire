@@ -39,6 +39,8 @@ from flexiv_inspire_interfaces.msg import (
     HandState,
 )
 from isaac_teleop_core.command import CommandSource, ValidMask
+from isaac_teleop_core.scheduling import PointSchedule
+from isaac_teleop_core.evidence import command_id, receipt, emit_receipt
 from isaac_teleop_core.deviceio import AsyncDeviceIOEmitter, record_envelope
 from isaac_teleop_core.control import (
     ControlArbiter,
@@ -964,12 +966,20 @@ class ControlBridge(Node):
         message: BimanualCommandMsg,
         receive_ns: int,
     ) -> None:
+        schedule = PointSchedule(command, receive_ns)
+        def replaced_from(index):
+            for pending in range(index, len(command.points)):
+                seq = (int(command.sequence) << 6) | pending
+                emit_receipt(getattr(self, "_deviceio", None), "control",
+                    receipt(command_id(command.session_id, command.source.value, seq), "scheduler", "replaced",
+                            detail="new chunk generation cancelled pending point"), seq)
         for index, point in enumerate(command.points):
             safe_message = None
             deadline = receive_ns + int(point.execute_after_s * 1e9)
             while time.monotonic_ns() < deadline:
                 with self._chunk_lock:
                     if generation != self._chunk_generation:
+                        replaced_from(index)
                         return
                 if self._arbiter.snapshot.state is not ControlState.ACTIVE:
                     return
@@ -978,7 +988,14 @@ class ControlBridge(Node):
                 now = time.monotonic_ns()
                 with self._chunk_lock:
                     if generation != self._chunk_generation:
+                        replaced_from(index)
                         return
+                admission = schedule.admit(index, now)
+                if admission != "execute":
+                    emit_receipt(getattr(self, "_deviceio", None), "control",
+                        receipt(command_id(command.session_id, command.source.value, (int(command.sequence) << 6) | index),
+                                "scheduler", "timeout", now_ns=now, detail=admission), (int(command.sequence) << 6) | index)
+                    continue
                 # Every scheduled point is revalidated immediately before send.
                 self._update_gates(now)
                 snapshot = self._arbiter.tick(now_monotonic_ns=now)
@@ -1066,6 +1083,7 @@ class ControlBridge(Node):
                             >= command.expires_monotonic_ns
                         )
                         if cancelled:
+                            replaced_from(index)
                             self._publish_trace(
                                 message,
                                 safe_message,
@@ -1091,6 +1109,12 @@ class ControlBridge(Node):
                         self._rdk_control_lease_active = True
                         self._pending_arm_token = None
                         self._pending_arm_token_expiry_ns = 0
+                for side in ("left", "right"):
+                    if side in targets:
+                        emit_receipt(getattr(self, "_deviceio", None), "control",
+                            receipt(command_id(command.session_id, command.source.value, internal_sequence),
+                                    side + "_arm", "accepted", target=targets[side],
+                                    detail="daemon whole transaction ACK; SDK return only"), internal_sequence)
                 self._arbiter.mark_sent(command)
                 if not self._emit_deviceio(
                     "/control/sent_command", point_message, time.monotonic_ns(), critical=True
@@ -1664,6 +1688,7 @@ class ControlBridge(Node):
             with self._state_lock:
                 self._home_inflight = True
                 self._home_recovery_active = recovery_home
+            self._emit_home_event("home_started", request_id=request_id)
             thread = threading.Thread(
                 target=self._run_home,
                 args=(request_id, prepare_control),
@@ -1908,6 +1933,20 @@ class ControlBridge(Node):
                 self._pending_home_token_expiry_ns = 0
                 self._pending_home_recovery = False
 
+    def _emit_home_event(self, kind, *, request_id="", reason=""):
+        now = time.monotonic_ns()
+        emitter = getattr(self, "_deviceio", None)
+        if emitter is not None:
+            try:
+                emitter.emit(record_envelope(producer="control", topic="/maintenance/events",
+                    source_time_ns=now, host_receive_time_ns=now, sequence=now,
+                    mapped_host_time_ns=now,
+                    payload={"schema": "episode-event-v2", "event_type": kind, "discontinuity": True,
+                             "effective_time_ns": now, "session_id": self._session_id,
+                             "request_id": request_id, "reason": reason}), critical=True)
+            except (BufferError, RuntimeError, ValueError):
+                pass
+
     def _publish_home_status(
         self,
         state: str,
@@ -1916,6 +1955,8 @@ class ControlBridge(Node):
         max_position_error_rad: float = 0.0,
         request_id: str = "",
     ) -> None:
+        if state in {"complete", "failed", "rejected"}:
+            self._emit_home_event("home_completed" if state == "complete" else "home_failed", request_id=request_id, reason=reason)
         publisher = getattr(self, "_home_status_pub", None)
         if publisher is None:
             return

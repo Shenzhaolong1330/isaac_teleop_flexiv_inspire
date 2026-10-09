@@ -196,7 +196,7 @@ def test_writer_exports_selected_head_depth_and_segment_fields(tmp_path):
     )
 
     created = FakeDataset.instances[0]
-    assert set(created.frames[0]).difference({"task"}) == set(fields)
+    assert set(created.frames[0]).difference({"task"}) == set(fields) | {"observation.valid", "observation.age_s", "observation.hand_field_valid", "observation.hand_field_age_s"}
     assert created.frames[0]["observation.depth.head"].dtype == np.uint16
     assert created.frames[0]["observation.depth.head"].shape == (2, 2)
     assert created.frames[0]["observation.depth.head"].tolist() == [[1, 2], [3, 4]]

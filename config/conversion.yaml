@@ -58,12 +58,12 @@ lerobot_export:
     # - observation.hand_temperature
     # - observation.hand_error
     # - observation.hand_status
-    # - observation.hand_field_valid
-    # - observation.hand_field_age_s
+    - observation.hand_field_valid
+    - observation.hand_field_age_s
     - observation.force_torque
     - observation.tactile
-    # - observation.valid
-    # - observation.age_s
+    - observation.valid
+    - observation.age_s
     - observation.arm_high_rate
     - observation.arm_high_rate_valid
     - observation.arm_high_rate_age_s
@@ -78,9 +78,9 @@ lerobot_export:
     cameras: [head]
     representation: z16
     storage: parquet
-  # record_only_while_pedal_pressed 会在源时间轴上留下空档。超过阈值就
-  # 标记为新片段；默认仍保留为同一个任务 episode，不篡改真实采集顺序。
+  # 新数据优先使用源时间上的显式事件；gap_threshold 仅用于旧数据降级推断。
+  # LeRobot 拆内部片段，episode_lineage.json 保留父任务 ID；60Hz 监督单独导出。
   segments:
     gap_threshold_s: 0.25
-    split_episodes: false
+    split_episodes: true
   channels: {}

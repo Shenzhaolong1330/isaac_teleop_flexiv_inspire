@@ -13,12 +13,23 @@ recording:
   deviceio_mode: native
   # 训练与 replay 都使用 deviceio.mcap；关闭重复的 ROS bag 可显著省空间。
   ros_mcap_enabled: false
-  # training 仅保留相机、双臂完整状态、双手/触觉和 sent_command。
+  # training 保留相机、双臂实测状态、双手/触觉和 sent_command；事件、requested/safe/trace 与执行器证据始终保留。
   deviceio_profile: training  # training | full
   # true: 只在中踏板踩下、机械臂允许运动时写入上述训练数据。
-  # 松开踏板不会结束 episode，再次踩下会继续写入同一条数据。
+  # 松开踏板不会结束任务 episode；事件仍录制，再次踩下建立内部连续片段。
   record_only_while_pedal_pressed: true
+  # episode/provenance 归档最终配置、实际子配置与已知资产；缺失标为 missing/unknown。
   snapshot_config: true
+  # 只计算观测到的生产者编号空洞，不将其冒充传感器/传输丢失。
+  # arm 是 daemon 每侧发出记录的计数；hand/tactile 是对应采集尝试计数。
+  # 相机设备帧号可能带主动降采样；command 是 chunk 复合 ID，保持 unknown。
+  sequence_rules:
+    robot/left_arm/state: {kind: continuous_counter, step: 1}
+    robot/right_arm/state: {kind: continuous_counter, step: 1}
+    robot/left_hand/state: {kind: continuous_counter, step: 1}
+    robot/right_hand/state: {kind: continuous_counter, step: 1}
+    robot/left_hand/tactile_raw: {kind: continuous_counter, step: 1}
+    robot/right_hand/tactile_raw: {kind: continuous_counter, step: 1}
   # One-command hardware preparation: F/T zero (or session reuse), Home, then
   # leave both hands open before recording and teleop authorization begin.
   auto_reset_before_record: true

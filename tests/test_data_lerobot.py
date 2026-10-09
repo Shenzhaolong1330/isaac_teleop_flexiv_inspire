@@ -1,3 +1,4 @@
+import pytest
 from flexiv_inspire_isaac.data_pipeline.alignment import Pose, TimedSample
 from flexiv_inspire_isaac.data_pipeline.export_spec import ActionView
 from flexiv_inspire_isaac.data_pipeline.lerobot_export import EpisodeAligner
@@ -36,7 +37,7 @@ def test_lerobot_uses_head_clock_sent_command_and_explicit_invalids():
     assert len(row["observation.left_arm.pose"].rotation6d) == 6
 
 
-def test_wrist_images_accept_nearly_simultaneous_later_camera_frames():
+def test_wrist_images_reject_future_camera_frames():
     row = EpisodeAligner(
         {
             "camera/head/jpeg": [s(b"head", 100)],
@@ -46,9 +47,8 @@ def test_wrist_images_accept_nearly_simultaneous_later_camera_frames():
     ).rows()[0]
 
     assert row["observation.images.left_wrist"] == b"left"
-    assert row["observation.images.right_wrist"] == b"right"
-    assert row["observation.images.right_wrist.valid"]
-    assert row["observation.images.right_wrist.age_ns"] == -10
+    assert row["observation.images.right_wrist"] is None
+    assert not row["observation.images.right_wrist.valid"]
 
 
 def test_low_rate_hand_state_uses_its_own_bounded_causal_tolerance():
@@ -76,17 +76,15 @@ def test_absolute_joint_action_view_uses_timestamp_aligned_robot_q():
         "robot/left_arm/state": [s({"q": tuple(range(7))}, 99)],
         "robot/right_arm/state": [s({"q": tuple(range(10, 17))}, 98)],
     }
-    row = EpisodeAligner(streams, action=ActionView("absolute_joint_position")).rows()[0]
-    assert row["action"] == tuple(range(7)) + tuple(range(10, 17))
-    assert row["action.valid"]
+    with pytest.raises(ValueError, match="historical views used measured state"):
+        EpisodeAligner(streams, action=ActionView("absolute_joint_position"))
 
 
 def test_absolute_cartesian_action_view_uses_interpolated_pose():
     poses = [s(Pose((0, 0, 0), (0, 0, 0, 1)), 95), s(Pose((2, 0, 0), (0, 0, 0, 1)), 105)]
-    row = EpisodeAligner({"camera/head/jpeg": [s(b"head", 100)], "robot/left_arm/tcp_pose": poses, "robot/right_arm/tcp_pose": poses}, action=ActionView("absolute_cartesian_pose")).rows()[0]
-    assert len(row["action"]) == 18
-    assert row["action"][:3] == (1.0, 0.0, 0.0)
-    assert row["action.valid"]
+    with pytest.raises(ValueError, match="absolute action export unsupported"):
+        EpisodeAligner({"camera/head/jpeg": [s(b"head", 100)], "robot/left_arm/tcp_pose": poses,
+                        "robot/right_arm/tcp_pose": poses}, action=ActionView("absolute_cartesian_pose"))
 
 
 def test_episode_aligner_indexes_high_rate_stream_only_once_per_key():
@@ -109,7 +107,7 @@ def test_episode_aligner_indexes_high_rate_stream_only_once_per_key():
         "robot/right_arm/state": states,
     }
     rows = EpisodeAligner(
-        streams, action=ActionView("absolute_joint_position")
+        streams, action=ActionView("sent_command")
     ).rows()
     assert len(rows) == 100
     assert states.iterations == 2

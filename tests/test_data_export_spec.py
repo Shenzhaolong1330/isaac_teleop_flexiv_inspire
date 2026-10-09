@@ -138,7 +138,8 @@ channels: {}
     monkeypatch.setattr(lerobot_cli, "EpisodeAligner", FakeAligner)
     monkeypatch.setattr(lerobot_cli, "export_rows", fake_export_rows)
 
-    assert lerobot_cli.main(
+    with pytest.raises(ValueError, match="absolute action export unsupported"):
+        lerobot_cli.main(
         [
             "--manifest",
             str(manifest),
@@ -151,10 +152,8 @@ channels: {}
             "--action-view",
             "absolute_joint_position",
         ]
-    ) == 0
-    assert captured["action_view"] == "absolute_joint_position"
-    assert captured["timeline_hz"] == 30.0
-    assert captured["high_rate_samples"] == 0
+        )
+    assert not captured
 
 
 def test_export_spec_selects_exact_fields_and_head_z16_depth(tmp_path: Path):

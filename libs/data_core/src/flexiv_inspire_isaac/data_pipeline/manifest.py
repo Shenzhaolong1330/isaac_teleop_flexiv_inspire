@@ -82,6 +82,9 @@ class EpisodeManifest:
     suppressed_samples: int = 0
     native_source_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     streams: dict[str, StreamStats] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+    quality: dict[str, Any] = field(default_factory=dict)
+    action_contract: str = "legacy-unversioned"
     completed: bool = False
     completion_reason: str = ""
 

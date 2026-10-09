@@ -30,6 +30,9 @@ from .manifest import (
     sha256_file,
 )
 from .native_deviceio import NativeDeviceIOIngress
+from .provenance import archive_episode, startup_summary
+from .quality import expected_rates, written_quality
+from .action_contract import VERSION, REQUIRED
 from .recorder import AsyncMcapRecorder, McapJsonSink, RecordEnvelope
 
 ROS_BAG_TOPICS = (
@@ -89,17 +92,6 @@ ROS_BAG_TOPICS = (
     "/episode/events",
 )
 
-EXPECTED_HZ = {
-    "robot/left_arm/state": 300.0,
-    "robot/right_arm/state": 300.0,
-    "robot/left_hand/state": 200.0,
-    "robot/right_hand/state": 200.0,
-    "robot/left_hand/tactile_raw": 15.0,
-    "robot/right_hand/tactile_raw": 15.0,
-    "camera/head/color/image_raw/compressed": 15.0,
-    "camera/left_wrist/color/image_raw/compressed": 15.0,
-    "camera/right_wrist/color/image_raw/compressed": 15.0,
-}
 
 TRAINING_DEVICEIO_TOPICS = {
     "/robot/left_arm/state",
@@ -178,7 +170,7 @@ def _runtime_versions() -> dict[str, str]:
             return fallback
 
     try:
-        project_file = Path(__file__).resolve().parents[3] / "pyproject.toml"
+        project_file = Path(__file__).resolve().parents[5] / "pyproject.toml"
         project_version = str(
             tomllib.loads(project_file.read_text())["project"]["version"]
         )
@@ -200,14 +192,14 @@ def _runtime_versions() -> dict[str, str]:
         "python": platform.python_version(),
         "ros_distro": os.environ.get("ROS_DISTRO", "unknown"),
         "rmw_implementation": os.environ.get("RMW_IMPLEMENTATION", "unknown"),
-        "flexiv_rdk": "1.9.0-pinned",
-        "lerobot": "0.6.0-pinned",
+        "flexiv_rdk": package("flexivrdk", "unknown"),
+        "lerobot": package("lerobot", "unknown"),
         "rerun": package("rerun-sdk", "not-importable-in-recorder-env"),
         "grpcio": package("grpcio", "unknown"),
         "mcap": package("mcap", "unknown"),
-        "librealsense": "2.57.7-pinned",
-        "cuda_toolkit": "12.8-local-selection",
-        "schema": "flexiv-inspire-episode-v1",
+        "librealsense": package("pyrealsense2", "unknown"),
+        "cuda_toolkit": "unknown",
+        "schema": "flexiv-inspire-episode-v2",
     }
 
 
@@ -302,8 +294,8 @@ def _load_ft_zero_event(path: Path, session_id: str, tool_hash: str) -> dict:
     return selected
 
 
-def _critical_envelope(topic: str, sequence: int, payload: dict) -> RecordEnvelope:
-    now = time.monotonic_ns()
+def _critical_envelope(topic: str, sequence: int, payload: dict, *, now_ns=None) -> RecordEnvelope:
+    now = time.monotonic_ns() if now_ns is None else now_ns
     return RecordEnvelope(
         topic=topic,
         source_time_ns=now,
@@ -458,6 +450,9 @@ class EpisodeSession:
         record_ros_mcap: bool = True,
         deviceio_profile: str = "full",
         record_only_while_pedal_pressed: bool = False,
+        clock_ns=time.monotonic_ns,
+        effective_config: dict | None = None,
+        rendered_config_dir: Path | None = None,
     ) -> None:
         if camera_recording_mode != "jpeg":
             raise ValueError(
@@ -474,6 +469,7 @@ class EpisodeSession:
             name: sha256_file(path) for name, path in calibration_paths.items()
         }
         versions = _runtime_versions()
+        self._clock_ns = clock_ns
         self.episode_uuid = str(uuid.uuid4())
         collection_timestamp_local = (
             collection_timestamp_local or local_minute_timestamp()
@@ -514,7 +510,7 @@ class EpisodeSession:
         versions["camera_recording_mode_declared"] = camera_recording_mode
         versions["deviceio_capture_layer"] = deviceio_capture_layer
         self.manifest = EpisodeManifest(
-            schema_version="1",
+            schema_version="2",
             episode_uuid=self.episode_uuid,
             session_id=session_id,
             deviceio_mcap=self.device_path.name,
@@ -532,6 +528,23 @@ class EpisodeSession:
             task_name=task_name,
             task_description=task_description,
         )
+        self._effective_config = effective_config or {}
+        self._expected_hz = expected_rates(self._effective_config)
+        self._enqueued = {}
+        self._suppressed = {}
+        self._received = {}
+        self._profile_filtered = {}
+        self._control_signature = None
+        self._source_stats_baseline = {}
+        self._source_stats_totals = {}
+        self.manifest.action_contract = VERSION
+        self.manifest.provenance = archive_episode(
+            self.directory, config=effective_config,
+            assets={**calibration_paths, "tool_payload": tool_config, "ft_zero": ft_zero_record},
+            rendered_dir=rendered_config_dir,
+        )
+        print(json.dumps(startup_summary(self._effective_config, profile=deviceio_profile,
+              task=task_name, output=self.directory, pedal_gate=record_only_while_pedal_pressed), ensure_ascii=False))
         self.manifest.write_atomic(self.manifest_path)
         self._critical_sequence = 0
         self._deviceio_profile = deviceio_profile
@@ -550,7 +563,7 @@ class EpisodeSession:
             self.recorder = AsyncMcapRecorder(McapJsonSink(self.device_path))
             self.recorder.start()
             self._submit_unchecked(
-                _critical_envelope(
+                self._event_envelope(
                     "/maintenance/ft_zero_event",
                     self._next_critical_sequence(),
                     ft_event,
@@ -558,7 +571,7 @@ class EpisodeSession:
                 critical=True,
             )
             self._submit_unchecked(
-                _critical_envelope(
+                self._event_envelope(
                     "/episode/events",
                     self._next_critical_sequence(),
                     {
@@ -583,29 +596,61 @@ class EpisodeSession:
             self.manifest.write_atomic(self.manifest_path)
             raise
 
+    def _event_envelope(self, topic, sequence, payload):
+        return _critical_envelope(topic, sequence, {"schema": "episode-event-v2", "event_id": f"{self.episode_uuid}:{sequence}", **payload}, now_ns=self._clock_ns())
+
     def _next_critical_sequence(self) -> int:
-        self._critical_sequence += 1
-        return self._critical_sequence
+        with self._stats_lock:
+            self._critical_sequence += 1
+            return self._critical_sequence
 
     def submit(self, envelope: RecordEnvelope, *, critical: bool = False) -> None:
-        if (
-            self._deviceio_profile == "training"
-            and envelope.topic not in TRAINING_DEVICEIO_TOPICS
-        ):
+        name = envelope.topic.lstrip("/")
+        with self._stats_lock:
+            self._received[name] = self._received.get(name, 0) + 1
+        audit = envelope.topic.startswith(("/episode/", "/maintenance/")) or envelope.topic in {"/episode/events", "/maintenance/events", "/control/state",
+                                  "/control/actuator_evidence", "/teleop/deadman",
+                                  "/control/requested_command", "/control/safe_command", "/control/command_trace"}
+        if envelope.topic == "/control/state" and isinstance(envelope.payload, dict):
+            state = envelope.payload
+            signature = (state.get("state_name"), state.get("active_source"), state.get("hold_reason"), state.get("physical_pedal"))
+            if signature != self._control_signature:
+                self._control_signature = signature
+                self._submit_unchecked(RecordEnvelope(
+                    topic="/episode/events", source_time_ns=envelope.source_time_ns,
+                    host_receive_time_ns=envelope.host_receive_time_ns,
+                    mapped_host_time_ns=envelope.effective_mapped_host_time_ns,
+                    sequence=self._next_critical_sequence(), valid=True,
+                    payload={"schema": "episode-event-v2", "event_type": "control_changed", "discontinuity": True,
+                             "effective_time_ns": envelope.effective_mapped_host_time_ns or envelope.host_receive_time_ns,
+                             "episode_uuid": self.episode_uuid, "control": state},
+                ), critical=True)
+        if audit:
+            self._submit_unchecked(envelope, critical=True)
             return
-        if self._record_only_while_pedal_pressed and not self._motion_recording_enabled:
+        if self._deviceio_profile == "training" and envelope.topic not in TRAINING_DEVICEIO_TOPICS:
+            self._profile_filtered[name] = self._profile_filtered.get(name, 0) + 1
+            return
+        if ((self._record_only_while_pedal_pressed and not self._motion_recording_enabled)
+                or not self._recording_gate.is_set()):
             with self._stats_lock:
                 self.manifest.suppressed_samples += 1
-            return
-        if not self._recording_gate.is_set():
-            with self._stats_lock:
-                self.manifest.suppressed_samples += 1
+                self._suppressed[name] = self._suppressed.get(name, 0) + 1
             return
         self._submit_unchecked(envelope, critical=critical)
 
     def set_motion_recording(self, enabled: bool) -> None:
-        """Open or close the data gate from the physical middle pedal."""
-        self._motion_recording_enabled = bool(enabled)
+        """Record the existing pedal boundary without changing interaction."""
+        enabled = bool(enabled)
+        if self._motion_recording_enabled == enabled:
+            return
+        self._motion_recording_enabled = enabled
+        self._submit_unchecked(self._event_envelope("/episode/events", self._next_critical_sequence(), {
+            "event_type": "pedal_pressed" if enabled else "pedal_released",
+            "episode_uuid": self.episode_uuid, "discontinuity": True,
+            "effective_time_ns": self._clock_ns(),
+            "recording_gate": self._record_only_while_pedal_pressed,
+        }), critical=True)
 
     def _submit_unchecked(
         self, envelope: RecordEnvelope, *, critical: bool = True
@@ -613,31 +658,16 @@ class EpisodeSession:
         self.recorder.submit(envelope, critical=critical)
         name = envelope.topic.lstrip("/")
         with self._stats_lock:
-            stats = self.manifest.streams.setdefault(
-                name, StreamStats(EXPECTED_HZ.get(name, 0.0))
-            )
-            stats.samples += 1
-            stats.invalid += int(not envelope.valid)
-            previous_sequence = self._last_sequence_by_topic.get(name)
-            if (
-                previous_sequence is not None
-                and envelope.sequence > previous_sequence + 1
-            ):
-                stats.drops += envelope.sequence - previous_sequence - 1
-            if previous_sequence is None or envelope.sequence > previous_sequence:
-                self._last_sequence_by_topic[name] = envelope.sequence
-            if stats.first_source_time_ns is None:
-                stats.first_source_time_ns = envelope.source_time_ns
-            stats.last_source_time_ns = envelope.source_time_ns
+            self._enqueued[name] = self._enqueued.get(name, 0) + 1
 
     def pause(self, *, reason: str) -> None:
         if self._pause_started_ns:
             return
         self._recording_gate.clear()
-        self._pause_started_ns = time.monotonic_ns()
+        self._pause_started_ns = self._clock_ns()
         self.manifest.pause_count += 1
         self._submit_unchecked(
-            _critical_envelope(
+            self._event_envelope(
                 "/episode/events",
                 self._next_critical_sequence(),
                 {
@@ -652,12 +682,12 @@ class EpisodeSession:
     def resume(self, *, reason: str) -> None:
         if self._recording_gate.is_set():
             return
-        now = time.monotonic_ns()
+        now = self._clock_ns()
         if self._pause_started_ns:
             self.manifest.paused_duration_ns += now - self._pause_started_ns
         self._pause_started_ns = 0
         self._submit_unchecked(
-            _critical_envelope(
+            self._event_envelope(
                 "/episode/events",
                 self._next_critical_sequence(),
                 {
@@ -673,7 +703,7 @@ class EpisodeSession:
     def _finish_pause_interval(self) -> None:
         if not self._recording_gate.is_set() and self._pause_started_ns:
             self.manifest.paused_duration_ns += (
-                time.monotonic_ns() - self._pause_started_ns
+                self._clock_ns() - self._pause_started_ns
             )
             self._pause_started_ns = 0
 
@@ -685,12 +715,25 @@ class EpisodeSession:
             payload = document.get("payload")
             if isinstance(payload, dict):
                 with self._stats_lock:
-                    self.manifest.native_source_stats[producer] = dict(payload)
-            return
-        if (
-            self._deviceio_profile == "training"
-            and topic not in TRAINING_DEVICEIO_TOPICS
-        ):
+                    previous = self._source_stats_baseline.get(producer)
+                    total = self._source_stats_totals.setdefault(producer, {})
+                    cumulative = {"enqueued_sensor", "enqueued_critical", "sent", "dropped_queue", "dropped_transport",
+                                  "reconnect_failures", "serialization_failures"}
+                    for key, value in payload.items():
+                        if key in cumulative and isinstance(value, int):
+                            if previous is not None and isinstance(previous.get(key), int):
+                                delta = value - previous[key]
+                                if delta < 0:
+                                    total["counter_resets"] = total.get("counter_resets", 0) + 1
+                                    delta = value
+                                total[key] = total.get(key, 0) + delta
+                            else:
+                                total.setdefault(key, 0)
+                        else:
+                            total[key] = value
+                    total["initial_interval"] = "unknown-before-first-summary"
+                    self._source_stats_baseline[producer] = dict(payload)
+                    self.manifest.native_source_stats[producer] = dict(total)
             return
         mapped = document.get("mapped_host_time_ns")
         if not bool(document.get("timing_valid", False)):
@@ -712,38 +755,24 @@ class EpisodeSession:
 
     def _update_stream_stats(self) -> None:
         recorder_stats = self.recorder.stats()
-        for topic, drops in recorder_stats["dropped_by_topic"].items():
-            name = topic.lstrip("/")
-            stats = self.manifest.streams.setdefault(
-                name, StreamStats(EXPECTED_HZ.get(name, 0.0))
+        self.manifest.quality = written_quality(
+            self.recorder.written_metadata, config=self._effective_config,
+            enqueued=self._enqueued, queue_drops=recorder_stats["dropped_by_topic"], suppressed=self._suppressed,
+            sequence_rules=self._effective_config.get("recording", {}).get("sequence_rules", {}),
+        )
+        self.manifest.quality["write_errors"] = recorder_stats["write_errors"]
+        self.manifest.quality["profile_filtered"] = self._profile_filtered
+        self.manifest.quality["source_counter_deltas"] = self.manifest.native_source_stats
+        for name, entry in self.manifest.quality["streams"].items():
+            entry["received"] = self._received.get(name, entry["enqueued"])
+            self.manifest.streams[name] = StreamStats(
+                entry["configured_hz"], observed_hz=entry["observed_hz"] or 0,
+                samples=entry["written"], invalid=entry["written"] - entry["valid_written"],
+                drops=entry["queue_dropped"],
             )
-            stats.drops += int(drops)
-        for stats in self.manifest.streams.values():
-            if (
-                stats.samples > 1
-                and stats.first_source_time_ns is not None
-                and stats.last_source_time_ns is not None
-                and stats.last_source_time_ns > stats.first_source_time_ns
-            ):
-                stats.observed_hz = (
-                    (stats.samples - 1)
-                    * 1e9
-                    / (stats.last_source_time_ns - stats.first_source_time_ns)
-                )
 
     def _required_stream_errors(self) -> list[str]:
-        required = (
-            "camera/head/color/image_raw/compressed",
-            "camera/left_wrist/color/image_raw/compressed",
-            "camera/right_wrist/color/image_raw/compressed",
-            "robot/left_arm/state",
-            "robot/right_arm/state",
-            "robot/left_hand/state",
-            "robot/right_hand/state",
-            "robot/left_hand/tactile_raw",
-            "robot/right_hand/tactile_raw",
-            "control/sent_command",
-        )
+        required = (*REQUIRED, "control/sent_command")
         errors = []
         for name in required:
             stats = self.manifest.streams.get(name)
@@ -757,7 +786,7 @@ class EpisodeSession:
         self._finish_pause_interval()
         try:
             self._submit_unchecked(
-                _critical_envelope(
+                self._event_envelope(
                     "/episode/events",
                     self._next_critical_sequence(),
                     {
@@ -785,7 +814,7 @@ class EpisodeSession:
         self._finish_pause_interval()
         try:
             self._submit_unchecked(
-                _critical_envelope(
+                self._event_envelope(
                     "/episode/events",
                     self._next_critical_sequence(),
                     {
@@ -909,6 +938,9 @@ def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
                     ),
                     1,
                 )
+            for event_topic in ("/episode/events", "/maintenance/events"):
+                self.create_subscription(EpisodeEvent, event_topic,
+                    lambda msg, topic=event_topic: self._record(topic, msg, True), 10)
             if not record_ros_mirror:
                 return
             for side in ("left", "right"):
@@ -961,18 +993,6 @@ def build_node(session: EpisodeSession, *, record_ros_mirror: bool = True):
                 "/control/command_trace",
                 lambda msg: self._record("/control/command_trace", msg, True),
                 1,
-            )
-            self.create_subscription(
-                EpisodeEvent,
-                "/episode/events",
-                lambda msg: self._record("/episode/events", msg, True),
-                10,
-            )
-            self.create_subscription(
-                EpisodeEvent,
-                "/maintenance/events",
-                lambda msg: self._record("/maintenance/events", msg, True),
-                10,
             )
 
         def _record(self, topic: str, message: Any, critical: bool = False) -> None:
@@ -1091,6 +1111,7 @@ def _parse_args(argv=None):
     )
     parser.add_argument("--root", type=Path, default=Path("episodes"))
     parser.add_argument("--session-id", required=True)
+    parser.add_argument("--effective-config", type=Path)
     parser.add_argument("--tool-config", type=Path, required=True)
     parser.add_argument("--ft-zero-record", type=Path, required=True)
     parser.add_argument(
@@ -1206,6 +1227,8 @@ def main(argv=None) -> int:
             "native-pre-dds"
             if options.deviceio_mode == "native"
             else "post-dds-typed-mirror",
+            effective_config=(__import__("yaml").safe_load(options.effective_config.read_text()) if options.effective_config else None),
+            rendered_config_dir=(options.effective_config.parent if options.effective_config else None),
             dataset_name=options.dataset_name,
             storage_subdirectory=options.storage_subdirectory,
             episode_index=options.episode_index,

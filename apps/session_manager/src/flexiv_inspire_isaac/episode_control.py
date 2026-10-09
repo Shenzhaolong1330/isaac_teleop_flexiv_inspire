@@ -294,6 +294,8 @@ class EpisodeController(Node):
             str(self.get_parameter("task_description").value),
             "--session-id",
             self._required("session_id"),
+            "--effective-config",
+            str(Path(self._required("camera_config")).parent / "system.resolved.yaml"),
             "--tool-config",
             self._required("tool_config"),
             "--ft-zero-record",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -568,14 +569,19 @@ def _hand_field_timing(row: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
                 if isinstance(state, Mapping)
                 else None
             )
+            try:
+                vector = np.asarray(state.get(field, []) if isinstance(state, Mapping) else [], dtype=float)
+                present = vector.shape == (6,) and bool(np.all(np.isfinite(vector)))
+            except (ValueError, TypeError):
+                present = False
             if not isinstance(timing, Mapping):
-                valid_values.append(aggregate_valid)
+                valid_values.append(aggregate_valid and present)
                 age_values.append(
                     np.nan if aggregate_age is None else float(aggregate_age) / 1e9
                 )
                 continue
             mapped_ns = _ros_time_ns(timing.get("mapped_host_time"))
-            valid = bool(timing.get("valid", False)) and bool(
+            valid = aggregate_valid and present and bool(timing.get("valid", False)) and bool(
                 timing.get("timing_valid", False)
             )
             if mapped_ns is None or reference_ns < mapped_ns:
@@ -583,6 +589,7 @@ def _hand_field_timing(row: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
                 age_s = np.nan
             else:
                 age_s = (reference_ns - mapped_ns) / 1e9
+                valid = valid and age_s <= .15
             valid_values.append(valid)
             age_values.append(age_s)
     return (
@@ -800,8 +807,10 @@ def export_rows(
     high_rate_arm_samples_per_frame: int = 0,
     fields: Sequence[str] | None = None,
     depth_cameras: Sequence[str] = (),
-    split_episodes: bool = False,
+    split_episodes: bool = True,
 ) -> ExportResult:
+    if fields is not None:
+        fields = tuple(dict.fromkeys((*fields, "observation.valid", "observation.age_s", "observation.hand_field_valid", "observation.hand_field_age_s")))
     selected = set(CORE_LEROBOT_FIELDS if fields is None else fields)
     selected_image_cameras = tuple(
         camera
@@ -892,8 +901,24 @@ def export_rows(
     episodes_written = 0
     frames_in_episode = 0
     active_segment: int | None = None
+    lineage = []
+    active_parent = "unknown-legacy-parent"
+    def save_segment():
+        nonlocal episodes_written, frames_in_episode
+        if frames_in_episode:
+            dataset.save_episode()
+            lineage.append({"export_episode_index": episodes_written, "parent_episode_id": active_parent,
+                            "capture_segment": active_segment, "frames": frames_in_episode})
+            episodes_written += 1
+            frames_in_episode = 0
     try:
         for row in rows:
+            if row.get("training.valid") is False:
+                if frames_in_episode:
+                    save_segment()
+                active_segment = None
+                dropped_action += 1
+                continue
             validity = row.get("valid", {})
             action_explicitly_invalid = (
                 isinstance(validity, Mapping)
@@ -901,6 +926,7 @@ def export_rows(
                 and not bool(validity["action"])
             )
             if row.get("action") is None or action_explicitly_invalid:
+                save_segment()
                 dropped_action += 1
                 continue
             try:
@@ -915,22 +941,23 @@ def export_rows(
                 )
             except ValueError as exc:
                 if "required image" in str(exc):
+                    save_segment()
                     dropped_image += 1
                     continue
                 if "required depth" in str(exc):
+                    save_segment()
                     dropped_depth += 1
                     continue
                 raise
             row_segment = int(row.get("observation.capture_segment", 0))
             if (
-                split_episodes
+                (split_episodes or row.get("segment.boundary_basis") == "explicit-event")
                 and active_segment is not None
                 and row_segment != active_segment
                 and frames_in_episode > 0
             ):
-                dataset.save_episode()
-                episodes_written += 1
-                frames_in_episode = 0
+                save_segment()
+            active_parent = row.get("parent_episode_id", active_parent)
             dataset.add_frame(frame)
             written += 1
             frames_in_episode += 1
@@ -938,8 +965,7 @@ def export_rows(
         if written == 0:
             raise ValueError("no fully valid aligned frames to export")
         if frames_in_episode > 0:
-            dataset.save_episode()
-            episodes_written += 1
+            save_segment()
         dataset.finalize()
     except Exception:
         # finalize is idempotent in 0.6.0 and closes parquet/video writers.
@@ -1035,6 +1061,8 @@ def export_rows(
             raise RuntimeError(
                 "reloaded tactile values must preserve the uint16 value domain"
             )
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "episode_lineage.json").write_text(json.dumps(lineage, indent=2))
     return ExportResult(
         str(root.resolve()),
         written,

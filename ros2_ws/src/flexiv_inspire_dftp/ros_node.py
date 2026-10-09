@@ -27,6 +27,7 @@ from .modbus import (
 from .protocol import ACTUATOR_NAMES, TACTILE_LAYOUT
 from .profiles import hand_profile
 from .worker import DftpCommandSink, DftpHandWorker, DftpProtocolReader
+from isaac_teleop_core.evidence import command_id, emit_receipt, receipt
 from isaac_teleop_core.deviceio import AsyncDeviceIOEmitter, record_envelope
 
 
@@ -375,6 +376,7 @@ def main(args=None) -> int:
                     state_hz=float(self.get_parameter("state_hz").value),
                     tactile_hz=float(self.get_parameter("tactile_hz").value),
                     safe_force_limits=force_limits,
+                    on_receipt=lambda value: emit_receipt(self._deviceio, "dftp", value, value["time_ns"]),
                     on_state=lambda value, side=side: self._on_state(side, value),
                     on_tactile=lambda value, side=side: self._tactile_queue[
                         side
@@ -484,11 +486,18 @@ def main(args=None) -> int:
                 self._request_both_holds("control-left-active")
 
         def _on_safe_command(self, message) -> None:
+            def rejected(reason, side=None):
+                for unit in ((side,) if side else ("left", "right")):
+                    emit_receipt(self._deviceio, "dftp", receipt(
+                        command_id(message.session_id, message.source, message.sequence), unit + "_hand",
+                        "rejected", detail=reason), int(message.sequence))
             if not self._write_enabled:
+                rejected("hardware-write-disabled")
                 return
             now_mono = time.monotonic_ns()
             now_ros = self.get_clock().now().nanoseconds
             if self._fault_latched or not self._control_active:
+                rejected("fault-or-control-inactive")
                 return
             if (
                 now_mono - self._control_state_received_ns
@@ -496,6 +505,7 @@ def main(args=None) -> int:
             ):
                 self._control_active = False
                 self._request_both_holds("control-state-timeout")
+                rejected("control-state-timeout")
                 return
             if (
                 message.schema_version != 1
@@ -505,6 +515,7 @@ def main(args=None) -> int:
                 or not message.deadman
                 or message.sequence <= self._last_source_command_sequence
             ):
+                rejected("command-authorization-schema-or-sequence")
                 return
             ttl_ns = _time_ns(message.ttl)
             stamp_ns = _time_ns(message.header.stamp)
@@ -516,6 +527,7 @@ def main(args=None) -> int:
                 or age_ns >= ttl_ns
                 or len(message.trajectory) != 1
             ):
+                rejected("command-expired-or-malformed")
                 return
             point = message.trajectory[0]
             if _time_ns(point.execute_after) >= ttl_ns:
@@ -540,6 +552,7 @@ def main(args=None) -> int:
                     # measured position; the next fresh state/command resumes
                     # it automatically. The old permanent fault latch made a
                     # single >200 ms gap disable both hands for the process.
+                    rejected("hand-state-stale", side)
                     self._workers[side].request_hold(
                         self._next_worker_sequence(),
                         f"{side}-hand-state-stale",
@@ -558,6 +571,7 @@ def main(args=None) -> int:
                         force_limits=self._workers[side].safe_force_limits,
                         deadline_ns=now_mono + remaining_ns,
                         source=f"safe:{message.source}",
+                        command_id=command_id(message.session_id, message.source, message.sequence),
                     )
                 except ValueError as exc:
                     self._fault_latched = True

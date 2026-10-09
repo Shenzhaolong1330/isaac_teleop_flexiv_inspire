@@ -10,6 +10,8 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 from .export_spec import ActionView
 from .alignment import (
     AlignedValue,
@@ -76,6 +78,16 @@ class EpisodeAligner:
             raise ValueError("high_rate_arm_samples_per_frame must be in [0,128]")
         self.high_rate_arm_samples_per_frame = high_rate_arm_samples_per_frame
         self.action = action
+        if action.name != "sent_command":
+            raise ValueError("absolute action export unsupported: historical views used measured state, not control targets; use sent_command or command-supervision-v2 evidence")
+        from .action_contract import BOUNDARIES
+        self._boundaries = sorted({
+            int(sample.value.get("effective_time_ns", sample.alignment_time_ns))
+            for topic in ("episode/events", "maintenance/events")
+            for sample in streams.get(topic, ())
+            if sample.alignment_time_ns is not None and isinstance(sample.value, Mapping)
+            and (sample.value.get("event_type") in BOUNDARIES or sample.value.get("discontinuity"))
+        })
         self.depth_cameras = tuple(depth_cameras)
         if any(
             camera not in {"head", "left_wrist", "right_wrist"}
@@ -126,14 +138,18 @@ class EpisodeAligner:
         output: list[dict[str, Any]] = []
         previous_timestamp: int | None = None
         capture_segment = 0
+        prior_event_segment = None
         frame_in_segment = 0
         for timestamp, head in timeline:
             source_gap_ns = (
                 0 if previous_timestamp is None else timestamp - previous_timestamp
             )
+            event_segment = bisect_right(self._boundaries, timestamp)
+            self._segment_lower_ns = self._boundaries[event_segment - 1] if event_segment else 0
             segment_start = previous_timestamp is None or (
-                source_gap_ns > self.segment_gap_threshold_ns
+                event_segment != prior_event_segment if self._boundaries else source_gap_ns > self.segment_gap_threshold_ns
             )
+            prior_event_segment = event_segment
             if segment_start and previous_timestamp is not None:
                 capture_segment += 1
                 frame_in_segment = 0
@@ -149,6 +165,8 @@ class EpisodeAligner:
                 head_value = head
             row: dict[str, Any] = {
                 "timestamp_ns": timestamp,
+                "action.contract": "legacy-camera-sampled-v1",
+                "segment.boundary_basis": "explicit-event" if self._boundaries else "legacy-gap-inference-uncertain",
                 "observation.source_timestamp_ns": timestamp,
                 "observation.source_gap_s": source_gap_ns / 1e9,
                 "observation.capture_segment": capture_segment,
@@ -163,7 +181,7 @@ class EpisodeAligner:
                     f"camera/{camera}/jpeg",
                     timestamp,
                     self.tolerance.image_ns,
-                    allow_future=True,
+                    allow_future=False,
                 )
             for camera in self.depth_cameras:
                 self._put_nearest(
@@ -172,16 +190,18 @@ class EpisodeAligner:
                     f"camera/{camera}/depth_z16",
                     timestamp,
                     self.tolerance.image_ns,
-                    allow_future=True,
+                    allow_future=False,
                 )
             for side in ("left", "right"):
                 pose_stream = f"robot/{side}_arm/tcp_pose"
-                pose = _pose_at(
-                    self._mapped_streams.get(pose_stream, ()),
-                    self._stream_times.get(pose_stream, ()),
-                    timestamp,
-                    self.tolerance.pose_bracket_ns,
-                )
+                raw_pose = self._causal(pose_stream, timestamp, self.tolerance.state_ns)
+                if raw_pose.valid and raw_pose.value is not None:
+                    from .alignment import InterpolatedPose, quaternion_xyzw_to_matrix, matrix_to_rot6d
+                    raw = raw_pose.value
+                    pose = AlignedValue(InterpolatedPose(raw, matrix_to_rot6d(quaternion_xyzw_to_matrix(raw.quaternion_xyzw)), 0, 0),
+                                        raw_pose.source_time_ns, raw_pose.age_ns, True)
+                else:
+                    pose = raw_pose
                 self._put(row, f"observation.{side}_arm.pose", pose)
                 arm_state_stream = f"robot/{side}_arm/state"
                 if not self.streams.get(arm_state_stream):
@@ -227,6 +247,39 @@ class EpisodeAligner:
                 row[f"observation.{side}_arm.high_rate.valid"] = history_valid
                 row[f"observation.{side}_arm.high_rate.age_ns"] = history_age_ns
             self._put(row, "action", self._action_at(timestamp))
+            from .action_contract import modality_valid
+            for side in ("left", "right"):
+                for unit in ("arm", "hand"):
+                    key = f"observation.{side}_{unit}.state"
+                    if not modality_valid(f"robot/{side}_{unit}/state",
+                            {"valid": row.get(key + ".valid"), "payload": row.get(key)},
+                            time_ns=timestamp, max_age_ns=self.tolerance.hand_ns if unit == "hand" else self.tolerance.state_ns):
+                        row[key + ".valid"] = False
+                        row[key + ".invalid_reason"] = "required-state-fields-invalid"
+                key = f"observation.{side}_hand.tactile"
+                if not modality_valid(f"robot/{side}_hand/tactile_raw", {"valid": row.get(key + ".valid"), "payload": row.get(key)}):
+                    row[key] = None
+                    row[key + ".valid"] = False
+                for field in ("tcp_twist", "raw_ft", "tcp_wrench"):
+                    key = f"observation.{side}_arm.{field}"
+                    value = row.get(key)
+                    if isinstance(value, Mapping):
+                        value = value.get(field, value.get("values"))
+                    try:
+                        vector = np.asarray(value, dtype=float)
+                        valid = vector.shape == (6,) and bool(np.all(np.isfinite(vector)))
+                    except (TypeError, ValueError):
+                        valid = False
+                    if not valid:
+                        row[key] = None
+                        row[key + ".valid"] = False
+                        row[key + ".invalid_reason"] = "optional-field-missing-or-invalid"
+            required = ["action", *[f"observation.images.{camera}" for camera in ("head", "left_wrist", "right_wrist")],
+                        *[f"observation.{side}_{unit}.state" for side in ("left", "right") for unit in ("arm", "hand")],
+                        *[f"observation.{side}_arm.pose" for side in ("left", "right")]]
+            row["training.rejection_reasons"] = [key + ":" + row.get(key + ".invalid_reason", "invalid")
+                                                  for key in required if not row.get(key + ".valid", False)]
+            row["training.valid"] = not row["training.rejection_reasons"]
             output.append(row)
             previous_timestamp = timestamp
             frame_in_segment += 1
@@ -254,7 +307,7 @@ class EpisodeAligner:
         # being presented as current while retaining normal timing jitter.
         for sample, sample_time in zip(selected, selected_times):
             age = timestamp_ns - sample_time
-            sample_valid = bool(sample.valid) and 0 <= age <= 150_000_000
+            sample_valid = bool(sample.valid) and sample_time >= getattr(self, "_segment_lower_ns", 0) and 0 <= age <= 150_000_000
             values.append(sample.value if sample_valid else None)
             valid.append(sample_valid)
             ages.append(age if age >= 0 else None)
@@ -266,43 +319,7 @@ class EpisodeAligner:
             return self._causal(
                 "control/sent_command", timestamp_ns, self.tolerance.action_ns
             )
-        if self.action.name == "absolute_joint_position":
-            values: list[float] = []
-            ages: list[int] = []
-            for side in ("left", "right"):
-                value = self._causal(
-                    f"robot/{side}_arm/state",
-                    timestamp_ns,
-                    self.tolerance.state_ns,
-                )
-                if not value.valid or not isinstance(value.value, Mapping):
-                    return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:{value.reason}")
-                try:
-                    joint = [float(item) for item in value.value["q"]]
-                except (KeyError, TypeError, ValueError):
-                    return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:q-missing")
-                if len(joint) != 7:
-                    return AlignedValue(None, None, value.age_ns, False, f"absolute-joint-{side}:q-not-7d")
-                values.extend(joint)
-                ages.append(int(value.age_ns or 0))
-            return AlignedValue(tuple(values), timestamp_ns, max(ages, default=0), True)
-        # Absolute Cartesian pose uses the same valid SO(3)-interpolated poses
-        # as observations: xyz plus Rotation-6D for left then right.
-        values: list[float] = []
-        ages: list[int] = []
-        for side in ("left", "right"):
-            pose_stream = f"robot/{side}_arm/tcp_pose"
-            pose = _pose_at(
-                self._mapped_streams.get(pose_stream, ()),
-                self._stream_times.get(pose_stream, ()),
-                timestamp_ns,
-                self.tolerance.pose_bracket_ns,
-            )
-            if not pose.valid or pose.value is None:
-                return AlignedValue(None, None, pose.age_ns, False, f"absolute-cartesian-{side}:{pose.reason}")
-            values.extend((*pose.value.pose.xyz, *pose.value.rotation6d))
-            ages.append(int(pose.age_ns or 0))
-        return AlignedValue(tuple(values), timestamp_ns, max(ages, default=0), True)
+        raise ValueError("absolute command targets unavailable")
 
     def _put_nearest(
         self,
@@ -389,6 +406,8 @@ class EpisodeAligner:
                 False,
                 sample.invalid_reason or "invalid",
             )
+        if sample_time < getattr(self, "_segment_lower_ns", 0):
+            return AlignedValue(None, sample_time, age, False, "cross-segment")
         if age > tolerance_ns:
             return AlignedValue(
                 None, sample_time, age, False, "outside-tolerance"
@@ -400,4 +419,5 @@ class EpisodeAligner:
         row[name] = aligned.value if aligned.valid else None
         row[f"{name}.valid"] = aligned.valid
         row[f"{name}.age_ns"] = aligned.age_ns
+        row[f"{name}.source_time_ns"] = aligned.source_time_ns
         row[f"{name}.invalid_reason"] = aligned.reason
